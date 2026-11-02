@@ -18,6 +18,7 @@
 
 #include "Core/Preferences/PreferencesAccessors.h"
 #include "Core/Session/RemoteBootstrap.h"
+#include "Core/Title/BannerText.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -121,14 +122,23 @@ enum class UpdateRiskChoice {
 
 /// The warning names the terminals whose process ownership the update could
 /// not prove. It does not promise that an explicit restart will keep them.
-[[nodiscard]] inline std::string updateRelaunchRiskDetail(std::size_t terminalCount)
+[[nodiscard]] inline std::string updateRelaunchRiskDetail(std::size_t terminalCount, const std::string& foregroundProgram)
 {
     if (!terminalCount)
         return "Ubiquitty couldn’t prepare the new host. Restarting now could close open processes. Ubiquitty will update the next time you quit it if you choose Not Now.";
     const std::string count = std::to_string(terminalCount);
+    const std::string program = Title::sanitizedBannerText(std::string_view(foregroundProgram).substr(0, 96), Title::LevelMarks::Remove);
     return terminalCount == 1
-        ? "Ubiquitty couldn’t move 1 terminal to the new host. Restarting now would close its process. Ubiquitty will update the next time you quit it if you choose Not Now."
-        : "Ubiquitty couldn’t move " + count + " terminals to the new host. Restarting now would close their processes. Ubiquitty will update the next time you quit it if you choose Not Now.";
+        ? "Ubiquitty couldn’t move 1 terminal" + (program.empty() ? std::string() : " running " + program)
+            + " to the new host. Restarting now would close its process. Ubiquitty will update the next time you quit it if you choose Not Now."
+        : "Ubiquitty couldn’t move " + count + " terminals to the new host."
+            + (program.empty() ? std::string() : " One is running " + program + ".")
+            + " Restarting now would close their processes. Ubiquitty will update the next time you quit it if you choose Not Now.";
+}
+
+[[nodiscard]] inline std::string updateRelaunchRiskDetail(std::size_t terminalCount)
+{
+    return updateRelaunchRiskDetail(terminalCount, {});
 }
 
 [[nodiscard]] inline std::string_view updateRelaunchRiskTitle() { return "The Update Couldn’t Keep Your Terminals"; }

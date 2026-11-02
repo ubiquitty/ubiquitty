@@ -1020,6 +1020,7 @@ final class TerminalWindows: NSObject {
     struct PreparedUpdateCapture {
         let groups: [LayoutGroup]
         let localPanes: [TerminalSurface]
+        let foregroundPrograms: [String]
         let adoptedLocalPaneCount: Int
     }
 
@@ -1032,6 +1033,8 @@ final class TerminalWindows: NSObject {
                 guard seen.insert(ObjectIdentifier(surface)).inserted else { return false }
                 return !surface.drive.isRemoteAttached && !surface.drive.isSharedIntoLocalDaemon
             }
+        let foregroundPrograms = localPanes.map { $0.drive.foregroundProcessName }
+        let wasShareable = localPanes.map { $0.drive.isShareableLocalSession }
         let daemon = Ubiquitty.Session.readyLocalDaemon(std.string(ShareSessionSupport.localHostBinaryPath() ?? ""))
         let groups = capturedGroups(
             Ubiquitty.Session.CaptureConditions(
@@ -1044,9 +1047,27 @@ final class TerminalWindows: NSObject {
         for controller in controllers {
             controller.reattachCommittedLocalAdoptions()
         }
+        for (index, pane) in localPanes.enumerated() {
+            let reason: String
+            if pane.drive.isSharedIntoLocalDaemon {
+                reason = "handoff committed"
+            } else if daemon.socketPath.empty() {
+                reason = "local host unavailable"
+            } else if !wasShareable[index] {
+                reason = "Core found no shareable local PTY"
+            } else if pane.drive.hasUnresolvedLocalAdoption {
+                reason = "handoff outcome unresolved"
+            } else {
+                reason = "handoff did not commit"
+            }
+            Ubiquitty.SwiftBridge.writeDiagnostic(
+                std.string("Update pane \(index + 1) (\(foregroundPrograms[index])): \(reason)")
+            )
+        }
         return PreparedUpdateCapture(
             groups: groups,
             localPanes: localPanes,
+            foregroundPrograms: foregroundPrograms,
             adoptedLocalPaneCount: localPanes.filter { $0.drive.isSharedIntoLocalDaemon }.count
         )
     }

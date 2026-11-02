@@ -95,6 +95,9 @@ TEST(anUpdateRelaunchWarningNamesTheTerminalsAtRisk)
     CHECK(S::updateRelaunchRiskDetail(1).find("1 terminal") != std::string::npos);
     CHECK(S::updateRelaunchRiskDetail(2).find("2 terminals") != std::string::npos);
     CHECK(S::updateRelaunchRiskDetail(1).find("next time you quit") != std::string::npos);
+    CHECK(S::updateRelaunchRiskDetail(1, "tmux").find("1 terminal running tmux") != std::string::npos);
+    CHECK(S::updateRelaunchRiskDetail(2, "tmux").find("One is running tmux.") != std::string::npos);
+    CHECK(S::updateRelaunchRiskDetail(1, "tmux\nRestart Anyway").find("\n") == std::string::npos);
 }
 
 TEST(aFailedUpdateTransferInstallsOnQuitUnlessThePersonAcceptsTheRisk)

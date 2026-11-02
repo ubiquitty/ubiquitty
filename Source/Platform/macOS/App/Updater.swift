@@ -463,18 +463,50 @@ public final class Updater: NSObject {
             }
             try? FileManager.default.removeItem(at: candidate.directory)
         }
+        for (index, pane) in capture.localPanes.enumerated() {
+            let reason: String
+            if !pane.drive.isSharedIntoLocalDaemon {
+                reason = "local handoff did not commit"
+            } else if pane.drive.remoteState != .Connected {
+                reason = "host attachment \(pane.drive.remoteState); \(pane.drive.lastRemoteTransitionDetail)"
+            } else if pane.drive.remoteSessionID != pane.drive.sharedSessionID {
+                reason = "host attachment names another session"
+            } else if let predecessors, pane.drive.remoteDaemonInstanceID == predecessors[index],
+                facts.isNewHostAnswering
+            {
+                reason = "new host has not taken over the adopted session"
+            } else if !facts.isNewHostVerified {
+                reason = "new host binary could not be verified"
+            } else if !facts.isNewHostInstalled || !facts.isNewHostAnswering {
+                reason = "new host did not start and answer"
+            } else {
+                reason = "handoff and attachment confirmed"
+            }
+            Ubiquitty.SwiftBridge.writeDiagnostic(
+                std.string("Update pane \(index + 1) (\(capture.foregroundPrograms[index])): \(reason)")
+            )
+        }
         if Ubiquitty.Session.updateRelaunchAction(facts, .Unasked) == .InstallNow {
             isPreparingUpdateRelaunch = false
             isUpdateTerminationAuthorized = true
             return .install
         }
 
+        let namedPane =
+            capture.localPanes.firstIndex {
+                !$0.drive.isSharedIntoLocalDaemon || $0.drive.remoteState != .Connected
+            } ?? 0
+        let foregroundProgram =
+            capture.foregroundPrograms.indices.contains(namedPane)
+            ? capture.foregroundPrograms[namedPane] : ""
         await TerminalWindows.reclaimUpdateAdoptions(capture)
         isPreparingUpdateRelaunch = false
         let alert = NSAlert()
         alert.icon = NSApp.applicationIconImage
         alert.messageText = String(Ubiquitty.Session.updateRelaunchRiskTitle())
-        alert.informativeText = String(Ubiquitty.Session.updateRelaunchRiskDetail(facts.localPaneCount))
+        alert.informativeText = String(
+            Ubiquitty.Session.updateRelaunchRiskDetail(facts.localPaneCount, std.string(foregroundProgram))
+        )
         alert.addButton(withTitle: String(Ubiquitty.Session.updateRelaunchProceedTitle()))
         alert.addButton(withTitle: String(Ubiquitty.Session.updateRelaunchPostponeTitle()))
         let acceptedRisk = alert.runModal() == .alertFirstButtonReturn
