@@ -145,6 +145,8 @@ gate_commit_rules() {
 # and the CMake test registrations, both of which drift under ordinary edits — a
 # set_tests_properties wrapped across lines can read as the property having been
 # deleted, and the preflight then stops there for every push.
+# It reads ci.yml as the preflight does: without --workflow the workflow
+# contract test skips, and an edit to ci.yml reaches the preflight untested.
 gate_style() {
     # Whole tree, not the branch diff. This tier is the floor because it is the
     # one an author can rely on: it runs before the push, on the machine making
@@ -155,7 +157,7 @@ gate_style() {
     run "workflow lint (actionlint)" ./Scripts/check-workflows.sh
     run "capability SSOT" ./Scripts/check-capability-ssot.py
     run "gate coverage" python3 ./Scripts/check-gate-coverage.py
-    run "CI orchestration tests" python3 ./Scripts/test-ci-batteries.py
+    run "CI orchestration tests" python3 ./Scripts/test-ci-batteries.py --workflow .github/workflows/ci.yml
     run "terminfo infocmp gate" ./Scripts/check-terminfo.sh
     # CI runs the UI suite; validate its exception tables locally on every push.
     run "UI scenario entries" python3 ./Scripts/check-ui-scenarios.py --entries
@@ -810,7 +812,7 @@ gate_style_without_builds() {
     run "workflow lint (actionlint)" ./Scripts/check-workflows.sh
     run "capability SSOT" ./Scripts/check-capability-ssot.py
     run "gate coverage" python3 ./Scripts/check-gate-coverage.py
-    run "CI orchestration tests" python3 ./Scripts/test-ci-batteries.py
+    run "CI orchestration tests" python3 ./Scripts/test-ci-batteries.py --workflow .github/workflows/ci.yml
     run "UI scenario entries" python3 ./Scripts/check-ui-scenarios.py --entries
     run "backlog growth" python3 ./Scripts/check-backlog-growth.py
     SKIPPED+=("benchmarks compile (tier lint builds nothing; ask for quick to compile them)")

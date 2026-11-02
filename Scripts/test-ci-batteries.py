@@ -2705,16 +2705,18 @@ class WorkflowTests(unittest.TestCase):
         # The workflow's own grant is read-only, so a job that declares none
         # cannot inherit a broader repository default.
         self.assertRegex(text, r"(?m)^permissions:\n  contents: read\n(?!  )")
-        for platform, output in (("linux", "linux"), ("apple", "apple")):
+        # The batteries stay wired behind the preflight but do not run on
+        # hosted runners; the maintainers run them before every landing.
+        for platform in ("linux", "apple"):
             job = jobs[platform]
             self.assertIn("needs: preflight", job)
-            self.assertIn(f"if: needs.preflight.outputs.{output} == 'true'", job)
+            self.assertIn("if: ${{ false }}", job)
             self.assertIn('UBQ_CI_PREFLIGHT_COMPLETE: "1"', job)
             marker = reach.FULL_MARKERS[f"{platform.title()} battery"]
             self.assertIn(f"name: {marker}\n        if: steps.battery.outputs.full_code == 'true'", job)
             self.assertNotIn("continue-on-error: true\n        run:", job)
         hosted = jobs["host-linux-arm64"]
-        self.assertIn("if: needs.preflight.outputs.linux == 'true'", hosted)
+        self.assertIn("if: ${{ false }}", hosted)
         self.assertIn("continue-on-error: true", hosted)
         self.assertIn("runs-on: ubuntu-24.04-arm", hosted)
         self.assertIn("./Scripts/build-host.sh --release", hosted)
