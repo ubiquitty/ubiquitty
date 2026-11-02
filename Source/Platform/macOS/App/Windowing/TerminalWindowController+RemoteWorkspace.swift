@@ -380,8 +380,14 @@ extension TerminalWindowController {
             defer { next += 1 }
             return ordered[next]
         }
+        let selected = group.selectedWindow
         for (index, window) in desired.enumerated() where group.windows[index] !== window {
+            // A native pill moves with a window that leaves and rejoins its group.
+            group.removeWindow(window)
             group.insertWindow(window, at: index)
+        }
+        if let selected, group.windows.contains(where: { $0 === selected }) {
+            group.selectedWindow = selected
         }
     }
 

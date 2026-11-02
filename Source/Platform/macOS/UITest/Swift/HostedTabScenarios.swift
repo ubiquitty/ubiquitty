@@ -256,7 +256,7 @@ enum HostedTabScenarios {
     ///   - t: The scenario's context.
     /// - Returns: Whether the strip had a face for the tab to press.
     @MainActor
-    private static func click(tabOf target: NSWindow, _ t: UBUITestContext) -> Bool {
+    static func click(tabOf target: NSWindow, _ t: UBUITestContext) -> Bool {
         guard let group = target.tabGroup, let index = group.windows.firstIndex(where: { $0 === target }),
             let host = group.selectedWindow
         else { return false }

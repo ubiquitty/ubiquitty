@@ -42,6 +42,22 @@ enum RemoteWorkspaceScenarios {
                 t.expect(group.windows.elementsEqual(desired, by: { $0 === $1 }), desc: "reordered remote tabs preserve foreign slots")
                 TerminalWindowController.orderProjectedTabs([windows[4], windows[0], windows[2]], in: group)
                 t.expect(group.windows.elementsEqual(desired, by: { $0 === $1 }), desc: "repeated projection leaves the order unchanged")
+
+                let pair = (0..<2).map { _ in NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false) }
+                for window in pair { window.isReleasedWhenClosed = false }
+                defer { for window in pair { window.close() } }
+                pair[0].addTabbedWindow(pair[1], ordered: .above)
+                guard let pairGroup = pair[0].tabGroup else {
+                    t.expect(false, desc: "AppKit creates a two-tab group")
+                    return
+                }
+                pairGroup.selectedWindow = pair[1]
+                TerminalWindowController.orderProjectedTabs([pair[1], pair[0]], in: pairGroup)
+                t.expect(
+                    pairGroup.windows.elementsEqual([pair[1], pair[0]], by: { $0 === $1 }),
+                    desc: "a two-tab group can move its projected pills"
+                )
+                t.expect(pairGroup.selectedWindow === pair[1], desc: "reordering two tabs keeps the selected window")
             }
         }
 
@@ -253,6 +269,10 @@ enum RemoteWorkspaceScenarios {
         UBUITestRegister("remote_workspace_late_tab_keeps_its_process_title") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { run(t, processAttributionOnly: true) }
+        }
+        UBUITestRegister("remote_workspace_tab_pills_follow_host_reorder") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { run(t, processAttributionOnly: true, reorderHostTabs: true) }
         }
         UBUITestRegister("remote_workspace_progress_follows_hosted_pane_focus") { context in
             guard let t = context else { return }
@@ -1421,7 +1441,9 @@ enum RemoteWorkspaceScenarios {
     private static func verifyHostedProcessAttribution(
         _ t: UBUITestContext,
         controller: TerminalWindowController,
-        under root: String
+        under root: String,
+        shellCommand: String,
+        reorderHostTabs: Bool
     ) {
         guard #available(macOS 26.0, *), let firstWindow = controller.window,
             let first = controller.remoteSurface
@@ -1448,36 +1470,45 @@ enum RemoteWorkspaceScenarios {
             }
             guard let pane = members[index].remoteSurface else { return }
             sessions.append(pane.remoteSessionID)
-            let executable = root + "/" + programs[index]
-            do {
-                try FileManager.default.copyItem(atPath: "/bin/sh", toPath: executable)
-            } catch {
-                t.expect(false, desc: "the named foreground fixture is copied (\(error))")
-                return
+            if reorderHostTabs {
+                pane.send("printf '\\033]0;\(markers[index])\\007\(markers[index])\\n'; read -r line\n")
+            } else {
+                let executable = root + "/" + programs[index]
+                do {
+                    try FileManager.default.copyItem(atPath: "/bin/sh", toPath: executable)
+                } catch {
+                    t.expect(false, desc: "the named foreground fixture is copied (\(error))")
+                    return
+                }
+                // macOS kills a copied platform binary at exec; an ad hoc
+                // signature makes the copy an ordinary program under its own name.
+                let sign = Process()
+                sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+                sign.arguments = ["--force", "--sign", "-", executable]
+                try? sign.run()
+                sign.waitUntilExit()
+                guard sign.terminationStatus == 0 else {
+                    t.expect(false, desc: "the named foreground fixture is signed (status \(sign.terminationStatus))")
+                    return
+                }
+                pane.send("'\(executable)' -c 'printf \"\\033]0;\(markers[index])\\007\(markers[index])\\n\"; read -r line'\n")
             }
-            // macOS kills a copied platform binary at exec; an ad hoc
-            // signature makes the copy an ordinary program under its own name.
-            let sign = Process()
-            sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-            sign.arguments = ["--force", "--sign", "-", executable]
-            try? sign.run()
-            sign.waitUntilExit()
-            guard sign.terminationStatus == 0 else {
-                t.expect(false, desc: "the named foreground fixture is signed (status \(sign.terminationStatus))")
-                return
-            }
-            pane.send("'\(executable)' -c 'printf \"\\033]0;\(markers[index])\\007\(markers[index])\\n\"; read -r line'\n")
             guard
                 t.wait(
                     until: {
-                        pane.drive.foregroundProcessName == programs[index]
+                        (reorderHostTabs || pane.drive.foregroundProcessName == programs[index])
                             && pane.gridTextForTesting().contains(markers[index])
                             && members[index].window?.tab.title.contains(markers[index]) == true
                     },
                     timeout: 20
                 )
             else {
-                t.expect(false, desc: "session \(pane.remoteSessionID) publishes \(programs[index]) and \(markers[index])")
+                t.expect(
+                    false,
+                    desc: "session \(pane.remoteSessionID) publishes \(programs[index]) and \(markers[index]); "
+                        + "foreground \(pane.drive.foregroundProcessName), grid \(pane.gridTextForTesting().contains(markers[index])), "
+                        + "tab \(members[index].window?.tab.title ?? "missing")"
+                )
                 return
             }
         }
@@ -1489,7 +1520,7 @@ enum RemoteWorkspaceScenarios {
             }
             return keys
         }
-        func verify(_ phase: String) {
+        func verify(_ phase: String, hostOrder: [Int] = [0, 1, 2]) {
             guard let group = firstWindow.tabGroup else {
                 t.expect(false, desc: "the three tabs stay grouped \(phase)")
                 return
@@ -1501,7 +1532,7 @@ enum RemoteWorkspaceScenarios {
                 desc: "one native pill belongs to each tab \(phase): \(pills.count) pills, \(group.windows.count) windows"
             )
             for index in markers.indices {
-                let member = members[index]
+                let member = members[hostOrder[index]]
                 let expectedTab = first.drive.remoteWorkspaceTab(of: first.drive.remoteWorkspaceSurface, at: index)
                 let field = TabStripStyling.testTitleField(inGroupOf: firstWindow, at: index)
                 let actual = field?.attributedStringValue
@@ -1513,24 +1544,61 @@ enum RemoteWorkspaceScenarios {
                     desc: "the native selection belongs to tab \(index + 1) \(phase)"
                 )
                 t.expect(
-                    member.remoteSurface?.remoteSessionID == sessions[index],
+                    member.remoteSurface?.remoteSessionID == sessions[hostOrder[index]],
                     desc: "session identity stays with tab \(index + 1) \(phase)"
                 )
+                if !reorderHostTabs {
+                    t.expect(
+                        member.remoteSurface?.drive.foregroundProcessName == programs[hostOrder[index]],
+                        desc: "the process belongs to tab \(index + 1) \(phase)"
+                    )
+                }
+                t.expect(baked?.string.contains(markers[hostOrder[index]]) == true, desc: "tab \(index + 1) bakes its own title \(phase)")
                 t.expect(
-                    member.remoteSurface?.drive.foregroundProcessName == programs[index],
-                    desc: "the process belongs to tab \(index + 1) \(phase)"
-                )
-                t.expect(baked?.string.contains(markers[index]) == true, desc: "tab \(index + 1) bakes its own title \(phase)")
-                t.expect(
-                    actual?.string.contains(markers[index]) == true,
+                    actual?.string.contains(markers[hostOrder[index]]) == true,
                     desc: "tab \(index + 1) displays its own title \(phase): \(actual?.string ?? "missing field")"
                 )
                 t.expect(icons(actual) == icons(baked), desc: "tab \(index + 1) displays its own process icon \(phase)")
-                if index == 2 { t.expect(icons(baked) == ["claude-code"], desc: "the third process has its catalog icon") }
+                if !reorderHostTabs && hostOrder[index] == 2 {
+                    t.expect(icons(baked) == ["claude-code"], desc: "the third process has its catalog icon")
+                }
             }
         }
         t.pump(0.5)
         verify("after adding the third tab")
+        if reorderHostTabs {
+            let directory = HostDirectoryEndpoint(shellCommand: shellCommand)
+            directory.refresh()
+            guard t.wait(until: { directory.snapshot.phase == .Listed }, timeout: 20) else {
+                t.expect(false, desc: "the private host lists its three tabs")
+                return
+            }
+            let tab = HostOutlineIdentity(kind: .tab, number: UInt64(members[2].remoteWorkspaceTab.rawValue))
+            let window = HostOutlineIdentity(kind: .window, number: UInt64(first.drive.remoteWorkspaceSurface.rawValue))
+            t.expect(directory.moveTab(tab, toWindow: window, at: 0) != 0, desc: "the host accepts moving its last tab to the front")
+            guard
+                t.wait(
+                    until: {
+                        first.drive.remoteWorkspaceTab(of: first.drive.remoteWorkspaceSurface, at: 0) == members[2].remoteWorkspaceTab
+                    },
+                    timeout: 20
+                )
+            else {
+                t.expect(false, desc: "the host publishes its changed tab order")
+                return
+            }
+            t.pump(0.5)
+            verify("after the host moved its last tab to the front", hostOrder: [2, 0, 1])
+            for index in markers.indices {
+                guard let window = members[[2, 0, 1][index]].window else { continue }
+                t.expect(HostedTabScenarios.click(tabOf: window, t), desc: "host tab \(index + 1) has a clickable pill")
+                t.expect(
+                    t.wait(until: { firstWindow.tabGroup?.selectedWindow === window }, timeout: 3),
+                    desc: "clicking host pill \(index + 1) selects its own window"
+                )
+            }
+            return
+        }
         let tabPills = TabStripStyling.tabPills(inGroupOf: firstWindow)
         if tabPills.count == 3, tabPills[1].button.superview === tabPills[2].button.superview,
             let secondField = TabStripStyling.testTitleField(inGroupOf: firstWindow, at: 1),
@@ -1585,6 +1653,7 @@ enum RemoteWorkspaceScenarios {
         fullScreenOnly: Bool = false,
         titleBarsOnly: Bool = false,
         processAttributionOnly: Bool = false,
+        reorderHostTabs: Bool = false,
         linkDelayMilliseconds: ClosedRange<Int>? = nil
     ) {
         guard let hostBinary = ProcessInfo.processInfo.environment["UBIQUITTY_UI_TEST_HOST"],
@@ -1753,7 +1822,13 @@ enum RemoteWorkspaceScenarios {
             return
         }
         if processAttributionOnly {
-            verifyHostedProcessAttribution(t, controller: window, under: root)
+            verifyHostedProcessAttribution(
+                t,
+                controller: window,
+                under: root,
+                shellCommand: attachCommand,
+                reorderHostTabs: reorderHostTabs
+            )
             return
         }
 
