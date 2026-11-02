@@ -496,9 +496,8 @@ int main()
         CHECK(A::pendingGrantCount(d) == 0);
     }
 
-    // ---- 8a. Output after two principals have sent input cannot spend either
-    // one's remembered grant. A later input from the first principal does not
-    // establish which principal caused the program's background output.
+    // ---- 8a. Two authenticated human clients of this host account share an
+    // input principal, while each connection keeps its own capability grant.
     {
         Daemon d;
         StreamDouble* stream = nullptr;
@@ -518,8 +517,18 @@ int main()
             A::service(d, s);
 
             CHECK(s.term->currentCapabilityOrigin == Ubiquitty::CapabilityOrigin::Remote);
-            CHECK(s.capabilityPolicy.currentIdentity().empty());
+            CHECK(s.capabilityPolicy.currentIdentity() == A::grantKey(d, first));
+            CHECK(Ubiquitty::effectAllowed(*s.term, Ubiquitty::Capability::DesktopNotification));
+
+            A::stampDriver(d, s, second);
+            A::service(d, s);
+            CHECK(s.capabilityPolicy.currentIdentity() == A::grantKey(d, second));
             CHECK(!Ubiquitty::effectAllowed(*s.term, Ubiquitty::Capability::DesktopNotification));
+
+            A::stampDriver(d, s, first);
+            A::service(d, s);
+            CHECK(s.capabilityPolicy.currentIdentity() == A::grantKey(d, first));
+            CHECK(Ubiquitty::effectAllowed(*s.term, Ubiquitty::Capability::DesktopNotification));
         }
     }
 
