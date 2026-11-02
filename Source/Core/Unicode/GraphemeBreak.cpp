@@ -93,6 +93,7 @@ enum GraphemeBreakClass : std::uint8_t {
 // Keep the header's pinned copies in lockstep with this enum.
 static_assert(Ubiquitty::Unicode::graphemeClassExtend == ClassExtend);
 static_assert(Ubiquitty::Unicode::graphemeClassZWJ == ClassZWJ);
+static_assert(Ubiquitty::Unicode::graphemeClassPrepend == ClassPrepend);
 
 struct ClassRange {
     std::uint32_t first, last;

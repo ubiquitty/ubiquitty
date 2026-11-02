@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "Base/Bits/BitField.h"
 
@@ -97,6 +99,41 @@ extern std::uint8_t unicodeProps[0x110000];
 // Pinned to GraphemeBreak.cpp's full class enum by static_asserts there.
 inline constexpr std::uint8_t graphemeClassExtend = 1;
 inline constexpr std::uint8_t graphemeClassZWJ = 2;
+
+/// The Prepend class as the property table stores it.
+///
+/// Pinned to GraphemeBreak.cpp's class enum by a static_assert there, as the
+/// two classes above are.
+inline constexpr std::uint8_t graphemeClassPrepend = 4;
+
+/// Reports whether a code point is Grapheme_Cluster_Break=Prepend.
+///
+/// A Prepend joins the code point after it (GB9b), so in a cluster it stands
+/// before the base rather than after it.
+///
+/// - Parameter codePoint: The code point to classify.
+/// - Returns: `true` for a Prepend.
+[[nodiscard]] inline bool isGraphemePrepend(std::uint32_t codePoint) noexcept
+{
+    return detail::PropGCBClassField::get(graphemeBreakRawByte(codePoint)) == graphemeClassPrepend;
+}
+
+/// Returns where a cluster's base is: its first code point that is not a Prepend.
+///
+/// The base decides a cluster's face, width and presentation. A cluster that
+/// opens with Prepend code points carries them ahead of it, so its first code
+/// point is not necessarily its base.
+///
+/// - Parameter cluster: The cluster's code points, in order.
+/// - Returns: The base's index, or 0 for an empty cluster or one of Prepends alone.
+[[nodiscard]] inline std::size_t clusterBaseIndex(std::span<const std::uint32_t> cluster) noexcept
+{
+    for (std::size_t index = 0; index < cluster.size(); ++index) {
+        if (!isGraphemePrepend(cluster[index]))
+            return index;
+    }
+    return 0;
+}
 
 /// Reports whether a code point is Grapheme_Cluster_Break=Control here.
 ///

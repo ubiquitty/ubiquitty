@@ -303,4 +303,28 @@ TEST(graphemebreak)
     }
 }
 
+TEST(clusterBaseFollowsPrepends)
+{
+    using Ubiquitty::Unicode::clusterBaseIndex;
+    using Ubiquitty::Unicode::isGraphemePrepend;
+
+    // ARABIC NUMBER SIGN, ARABIC NUMBER MARK ABOVE, SYRIAC ABBREVIATION MARK
+    // and MALAYALAM LETTER DOT REPH are Prepend; a letter, a mark and an ideograph
+    // are not.
+    for (const std::uint32_t prepend : { 0x0600u, 0x0605u, 0x070Fu, 0x0D4Eu })
+        CHECK_MSG(isGraphemePrepend(prepend), "a Prepend is classified as one");
+    for (const std::uint32_t other : { 0x0061u, 0x0301u, 0x8FF2u, 0x1F1EFu })
+        CHECK_MSG(!isGraphemePrepend(other), "a base or mark is not a Prepend");
+
+    const std::uint32_t plain[] = { 0x0061, 0x0301 };
+    CHECK(clusterBaseIndex(plain) == 0);
+    const std::uint32_t onePrepend[] = { 0x0605, 0x8FF2 };
+    CHECK(clusterBaseIndex(onePrepend) == 1);
+    const std::uint32_t twoPrepends[] = { 0x0600, 0x0605, 0x0661, 0x0301 };
+    CHECK(clusterBaseIndex(twoPrepends) == 2);
+    const std::uint32_t prependsAlone[] = { 0x0600, 0x0605 };
+    CHECK(clusterBaseIndex(prependsAlone) == 0);
+    CHECK(clusterBaseIndex({}) == 0);
+}
+
 UBIQUITTY_TEST_MAIN()
