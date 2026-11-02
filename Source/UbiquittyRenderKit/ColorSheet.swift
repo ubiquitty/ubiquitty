@@ -349,6 +349,9 @@ final class ColorSheet {
 
     /// Draws a cluster laid out for a square, centred in it.
     ///
+    /// The code points only LastResort draws are left out, and nothing is drawn
+    /// when no other code point remains.
+    ///
     /// - Parameters:
     ///   - cluster: The cluster.
     ///   - font: The face selected by Core's routing policy.
@@ -361,13 +364,24 @@ final class ColorSheet {
         // slot-sized window out of it.
         let side = targetSide
         let sizedFont = CTFontCreateCopyWithAttributes(font, side * 0.92, nil, nil)
-        let attributed = NSAttributedString(
-            string: cluster,
-            attributes: [NSAttributedString.Key(kCTFontAttributeName as String): sizedFont]
-        )
-        let line = CTLineCreateWithAttributedString(attributed)
-        guard !ctLineHasLastResortRun(line) else {
-            return
+        func shape(_ string: String) -> CTLine {
+            CTLineCreateWithAttributedString(
+                NSAttributedString(
+                    string: string,
+                    attributes: [NSAttributedString.Key(kCTFontAttributeName as String): sizedFont]
+                )
+            )
+        }
+        var line = shape(cluster)
+        if ctLineHasLastResortRun(line) {
+            let kept = stringOutsideLastResort(cluster, shapedAs: line)
+            guard !kept.isEmpty else {
+                return
+            }
+            line = shape(kept)
+            guard !ctLineHasLastResortRun(line) else {
+                return
+            }
         }
 
         // A single-glyph line centres on the glyph's bounding box; asking the

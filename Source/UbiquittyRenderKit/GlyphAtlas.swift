@@ -1656,19 +1656,19 @@ extension GlyphAtlas: WideClusterGlyphSource {
         if fresh && unifontScale > 0 {
             wide.rasteriseUnifontCluster(Ubiquitty.Rendering.ClusterSpan(codePoints), scale: unifontScale, slot: slot)
         } else if fresh {
-            let line = clusterLine(codePoints, face: face)
-            let baseFont = faceCarrying(codePoints[0], face: face)
-            if ctLineHasLastResortRun(line) {
-                wide.rasteriseBlankSlot(slot)
-            } else {
+            if let line = drawableClusterLine(codePoints, face: face) {
+                let baseCodePoint = codePoints[0]
+                let baseFont = faceCarrying(baseCodePoint, face: face)
                 wide.rasterise(
                     cluster: line,
-                    baseGlyph: GlyphAtlas.glyphIdentifier(for: codePoints[0], in: baseFont) ?? 0,
+                    baseGlyph: GlyphAtlas.glyphIdentifier(for: baseCodePoint, in: baseFont) ?? 0,
                     in: baseFont,
                     style: rasterStyle(for: variant),
-                    subpixel: wideSubpixel(of: variant, for: codePoints[0], face: face),
+                    subpixel: wideSubpixel(of: variant, for: baseCodePoint, face: face),
                     slot: slot
                 )
+            } else {
+                wide.rasteriseBlankSlot(slot)
             }
         }
         let uv = wide.atlasRectForSlot(slot)
@@ -2347,7 +2347,8 @@ extension GlyphAtlas: ClusterGlyphSource {
         return atlasGlyph(for: slot)
     }
 
-    /// Shapes a cluster into a line, in the face its base belongs to.
+    /// Shapes a cluster into a line, in the face its base belongs to, without
+    /// the code points only LastResort draws.
     ///
     /// One CTLine over the whole run, so CoreText positions each mark against the
     /// base's advance and substitutes a face for a mark the base face lacks.
@@ -2358,21 +2359,35 @@ extension GlyphAtlas: ClusterGlyphSource {
     /// path draws — so the same character would render at two sizes depending on
     /// whether a mark rode with it.
     ///
-    /// - Parameters:
-    ///   - codePoints: The cluster, base first.
-    ///   - face: The requested face.
-    /// - Returns: The shaped line.
-    private func clusterLine(_ codePoints: UnsafeBufferPointer<UInt32>, face: Ubiquitty.Rendering.FontFace) -> CTLine {
-        clusterLine(codePoints, font: codePoints.first.map { faceCarrying($0, face: face) } ?? faces[face])
-    }
-
-    /// Shapes a cluster into a line in a given base font.
+    /// A code point no installed face carries falls to LastResort, whose glyph is
+    /// a drawn box. Those code points are left out and the rest shaped again, so
+    /// one of them costs only its own glyph and not the whole cluster's.
     ///
     /// - Parameters:
-    ///   - codePoints: The cluster, base first.
-    ///   - baseFace: The font the base is drawn in.
-    /// - Returns: The shaped line.
-    private func clusterLine(_ codePoints: some Sequence<UInt32>, font baseFace: CTFont) -> CTLine {
+    ///   - codePoints: The cluster, in order.
+    ///   - face: The requested face.
+    /// - Returns: The shaped line, or `nil` when LastResort is the only face for
+    ///   every code point in it.
+    private func drawableClusterLine(_ codePoints: UnsafeBufferPointer<UInt32>, face: Ubiquitty.Rendering.FontFace) -> CTLine? {
+        let font = codePoints.first.map { faceCarrying($0, face: face) } ?? faces[face]
+        let string = clusterString(codePoints)
+        let line = clusterLine(string, font: font)
+        guard ctLineHasLastResortRun(line) else {
+            return line
+        }
+        let kept = stringOutsideLastResort(string, shapedAs: line)
+        guard !kept.isEmpty else {
+            return nil
+        }
+        let reshaped = clusterLine(kept, font: font)
+        return ctLineHasLastResortRun(reshaped) ? nil : reshaped
+    }
+
+    /// A cluster's code points as a string, up to the pool's longest cluster.
+    ///
+    /// - Parameter codePoints: The cluster, in order.
+    /// - Returns: The string, without any value that is not a Unicode scalar.
+    private func clusterString(_ codePoints: some Sequence<UInt32>) -> String {
         var scalars = String.UnicodeScalarView()
         for codePoint in codePoints.prefix(Int(Ubiquitty.clusterPoolMaximumCodePoints)) {
             guard let scalar = Unicode.Scalar(codePoint) else {
@@ -2380,8 +2395,18 @@ extension GlyphAtlas: ClusterGlyphSource {
             }
             scalars.append(scalar)
         }
+        return String(scalars)
+    }
+
+    /// Shapes a cluster's string into a line in a given base font.
+    ///
+    /// - Parameters:
+    ///   - string: The cluster.
+    ///   - baseFace: The font the base is drawn in.
+    /// - Returns: The shaped line.
+    private func clusterLine(_ string: String, font baseFace: CTFont) -> CTLine {
         let attributed = NSAttributedString(
-            string: String(scalars),
+            string: string,
             attributes: [
                 NSAttributedString.Key(kCTFontAttributeName as String): baseFace,
                 NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
@@ -2396,11 +2421,12 @@ extension GlyphAtlas: ClusterGlyphSource {
     /// against the base's advance and substitutes a face for a mark the base
     /// face lacks — a decomposed cluster then sits exactly where its
     /// precomposed twin would, at the same baseline pen the mono path uses.
-    /// A line CoreText resolved to LastResort is left blank instead: that
+    /// The code points CoreText resolved to LastResort are left out: that
     /// fallback carries a drawn box for every code point, so baking it puts
     /// tofu in a slot the cache then serves for the cluster's whole lifetime.
-    /// The upload happens either way, because the slot may hold a previous
-    /// glyph and blank has to overwrite the sheet rather than leave it.
+    /// A cluster with nothing else to draw is left blank. The upload happens
+    /// either way, because the slot may hold a previous glyph and blank has to
+    /// overwrite the sheet rather than leave it.
     ///
     /// - Parameters:
     ///   - codePoints: The cluster, base first.
@@ -2421,8 +2447,7 @@ extension GlyphAtlas: ClusterGlyphSource {
         let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         if unifontScale > 0 {
             rasterizer.rasteriseUnifontCluster(Ubiquitty.Rendering.ClusterSpan(codePoints), scale: unifontScale)
-        } else {
-            let line = clusterLine(codePoints, face: face)
+        } else if let line = drawableClusterLine(codePoints, face: face) {
             // The phase rides the pen here as it does on the mono path: a cluster
             // keyed per phase and drawn at phase zero is the same eight-copies
             // shape, one cache over.
@@ -2431,11 +2456,9 @@ extension GlyphAtlas: ClusterGlyphSource {
                     / CGFloat(subpixelPhaseCount),
                 y: CGFloat(baselinePenInPixels)
             )
-            if ctLineHasLastResortRun(line) {
-                rasterizer.rasteriseBlank()
-            } else {
-                rasterizer.rasterise(line: line, at: pen, style: rasterStyle(for: phase))
-            }
+            rasterizer.rasterise(line: line, at: pen, style: rasterStyle(for: phase))
+        } else {
+            rasterizer.rasteriseBlank()
         }
         // A cluster shares the mono sheet's slots, so it owes the ink table the
         // same entry every other writer of those slots owes: the box left by an

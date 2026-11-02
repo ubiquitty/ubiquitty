@@ -14,7 +14,9 @@
 // cascade run — the glyph atlas's cluster and colour paths, the colour sheet
 // and the ligature strips — ask this before baking a line. A box baked into a
 // cached image sticks: a clean row is presented from the cache, so the tofu
-// stays until a full rebuild. Leaving the slot blank is the lesser defect.
+// stays until a full rebuild. A cluster leaves out the characters only
+// LastResort draws and keeps the rest; a slot is blank only when nothing else
+// in it can be drawn.
 //
 // CoreText alone, so Tests/Platform/test_macos_lastresort_guard.swift compiles
 // it beside the test without the module.
