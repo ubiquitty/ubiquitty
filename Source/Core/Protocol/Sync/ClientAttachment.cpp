@@ -552,8 +552,9 @@ void ClientAttachment::transportLost(std::uint64_t)
         m_retired.reset();
         // A notification may reconnect inside the read that brought Welcome,
         // before settle applies its rotated secret. Keep that Welcome before
-        // retiring the reader, or the next resume reuses a consumed secret.
-        if (!m_isWelcomeApplied && m_connection->welcome()) {
+        // retiring the reader, unless the host ended its authority in the
+        // same read. Retiring that reader must not revive an ended attachment.
+        if (!m_isWelcomeApplied && m_connection->welcome() && m_connection->byeReason() != ByeReason::SessionGone) {
             m_isWelcomeApplied = true;
             applyWelcome(*m_connection->welcome());
         }

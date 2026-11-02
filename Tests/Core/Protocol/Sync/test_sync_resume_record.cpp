@@ -264,6 +264,33 @@ TEST(aGoneAttachmentsFailedRecordRetirementBlocksRestoration)
     CHECK(!client.restoreFromStore());
 }
 
+TEST(aWelcomeFollowedBySessionGoneCannotRestoreRetiredAuthorityOnClose)
+{
+    Host host({ 41, 42 });
+    ObservedStore store;
+    ClientAttachment client(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), nullptr, &store);
+    std::uint64_t now = 1;
+    attachFresh(host, client, now);
+    const Welcome welcome = *client.connection()->welcome();
+    drop(host, client, now);
+    (void)client.connect(now);
+    std::vector<std::uint8_t> body;
+    encode(body, welcome);
+    std::vector<std::uint8_t> frames;
+    REQUIRE(appendFrame(frames, FrameKind::Welcome, 0, body));
+    body.clear();
+    encode(body, Bye { .reason = ByeReason::SessionGone, .detail = {} });
+    REQUIRE(appendFrame(frames, FrameKind::Bye, 0, body));
+    client.receiveStream(frames, ++now);
+    REQUIRE(client.connection()->byeReason() == ByeReason::SessionGone);
+    CHECK(!client.held());
+    CHECK(!store.record);
+    client.transportLost(++now);
+    client.persist();
+    CHECK(!client.held());
+    CHECK(!store.record);
+}
+
 TEST(aPinnedAttachmentFallsBackToMemoryAndCanPersistAgain)
 {
     Host host({ 41, 42 });
