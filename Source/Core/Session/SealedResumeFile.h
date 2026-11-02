@@ -109,8 +109,9 @@ public:
     ///   - welcome: The authenticated host and principal.
     ///   - clientInstance: The stable identity this connection greeted as.
     ///   - certificatePin: The pin verified by the current transport.
-    /// - Returns: Whether the exact peer or its authenticated successor binds.
-    [[nodiscard]] bool bindWelcome(const Protocol::Sync::Welcome& welcome, Protocol::Sync::ID128 clientInstance, const std::array<std::uint8_t, 32>& certificatePin) override;
+    /// - Returns: Bound for the exact peer or its authenticated successor;
+    ///   Refused for a scope mismatch or an unconfirmed retirement.
+    [[nodiscard]] Protocol::Sync::ResumeBindingOutcome bindWelcome(const Protocol::Sync::Welcome& welcome, Protocol::Sync::ID128 clientInstance, const std::array<std::uint8_t, 32>& certificatePin) override;
 
     /// Seals and durably replaces only a record matching the configured peer.
     ///

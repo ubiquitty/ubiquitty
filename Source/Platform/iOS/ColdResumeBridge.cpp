@@ -60,17 +60,19 @@ public:
         const auto cap = Sync::measuredClientPolicy().maxCheckpointBytes;
         m_store.emplace(m_path, scope, pin, Ubiquitty::Apple::sealedStore(), Ubiquitty::Apple::restoreAuthorization(), cap, cap);
     }
-    bool bindWelcome(const Sync::Welcome& welcome, Sync::ID128 client, const std::array<std::uint8_t, 32>& pin) override
+    Sync::ResumeBindingOutcome bindWelcome(const Sync::Welcome& welcome, Sync::ID128 client, const std::array<std::uint8_t, 32>& pin) override
     {
-        if (!m_hooks.mayUse(m_hooks.context) || std::ranges::all_of(pin, [](auto byte) { return byte == 0; }))
-            return false;
-        if (m_store && !m_store->bindWelcome(welcome, client, pin)) {
+        if (!m_hooks.mayUse(m_hooks.context))
+            return Sync::ResumeBindingOutcome::Refused;
+        if (std::ranges::all_of(pin, [](auto byte) { return byte == 0; }))
+            return Sync::ResumeBindingOutcome::MemoryOnly;
+        if (m_store && m_store->bindWelcome(welcome, client, pin) != Sync::ResumeBindingOutcome::Bound) {
             if (purge() != Sync::ResumePurgeOutcome::Purged)
-                return false;
+                return Sync::ResumeBindingOutcome::Refused;
             m_store.reset();
         }
         if (!m_hooks.bind(m_hooks.context, welcome.hostInstanceID.low, welcome.hostInstanceID.high, welcome.principal.data(), welcome.principal.size(), pin.data(), pin.size()))
-            return false;
+            return Sync::ResumeBindingOutcome::Refused;
         if (!m_store) {
             std::array<std::uint8_t, 32> principal;
             Ubiquitty::Crypto::sha256({ reinterpret_cast<const std::uint8_t*>(welcome.principal.data()), welcome.principal.size() }, principal);
@@ -186,7 +188,7 @@ const char* ubiquittyIOSResumePopulateForTest(UbiquittyIOSResumeOwner* owner)
     Sync::Welcome welcome;
     welcome.hostInstanceID = { 90, 91 };
     welcome.principal = "cold-resume-smoke";
-    if (!owner->store->bindWelcome(welcome, client, pin))
+    if (owner->store->bindWelcome(welcome, client, pin) != Sync::ResumeBindingOutcome::Bound)
         return "welcome binding refused";
     auto terminal = std::make_unique<Ubiquitty::Terminal>();
     Ubiquitty::resize(*terminal, 4, 24);

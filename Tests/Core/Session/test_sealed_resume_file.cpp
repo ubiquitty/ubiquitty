@@ -233,18 +233,18 @@ TEST(sealedStoreBindsOnlyItsExactAuthenticatedWelcome)
     Welcome welcome;
     welcome.hostInstanceID = host;
     welcome.principal = "alice";
-    CHECK(store.bindWelcome(welcome, client, pin));
+    CHECK(store.bindWelcome(welcome, client, pin) == ResumeBindingOutcome::Bound);
     auto changed = welcome;
     changed.hostInstanceID.low++;
-    CHECK(!store.bindWelcome(changed, client, pin));
+    CHECK(store.bindWelcome(changed, client, pin) == ResumeBindingOutcome::Refused);
     changed = welcome;
     changed.principal = "bob";
-    CHECK(!store.bindWelcome(changed, client, pin));
+    CHECK(store.bindWelcome(changed, client, pin) == ResumeBindingOutcome::Refused);
     changed.principal.clear();
-    CHECK(!store.bindWelcome(changed, client, pin));
-    CHECK(!store.bindWelcome(welcome, { 9, 8 }, pin));
+    CHECK(store.bindWelcome(changed, client, pin) == ResumeBindingOutcome::Refused);
+    CHECK(store.bindWelcome(welcome, { 9, 8 }, pin) == ResumeBindingOutcome::Refused);
     pin[31] ^= 1;
-    CHECK(!store.bindWelcome(welcome, client, pin));
+    CHECK(store.bindWelcome(welcome, client, pin) == ResumeBindingOutcome::Refused);
     CHECK_EQ(FileSealer::current().sealCalls, 0u);
     CHECK_EQ(FileSealer::current().openCalls, 0u);
 }
@@ -268,7 +268,7 @@ TEST(sealedStoreRetiresThePredecessorBeforeCommittingTheSuccessorsSecret)
     welcome.hostInstanceID = successor;
     welcome.predecessorHostInstanceID = original.hostInstanceID;
     welcome.principal = "alice";
-    REQUIRE(store.bindWelcome(welcome, original.clientInstance, {}));
+    REQUIRE(store.bindWelcome(welcome, original.clientInstance, {}) == ResumeBindingOutcome::Bound);
     CHECK(authority.read(predecessorScope).state == RestoreAuthorization::State::Blocked);
     CHECK(authority.read(successorScope).state == RestoreAuthorization::State::Blocked);
     CHECK(!store.read());
@@ -332,7 +332,7 @@ TEST(aHandoverNeverChangesTheResumePrincipalClientOrCertificate)
             pin[0] = 1;
             break;
         }
-        CHECK(!store.bindWelcome(welcome, client, pin));
+        CHECK(store.bindWelcome(welcome, client, pin) == ResumeBindingOutcome::Refused);
         CHECK_EQ(HandoverAuthorization::current().writeCalls, writes);
         CHECK_EQ(FileSealer::current().forgetCalls, forgets);
         REQUIRE(store.read());
@@ -360,7 +360,7 @@ TEST(handoverIntentRefusalCannotRetireThePredecessor)
         welcome.predecessorHostInstanceID = original.hostInstanceID;
         welcome.principal = "alice";
         const auto forgets = FileSealer::current().forgetCalls;
-        CHECK(!store.bindWelcome(welcome, original.clientInstance, {}));
+        CHECK(store.bindWelcome(welcome, original.clientInstance, {}) == ResumeBindingOutcome::Refused);
         CHECK_EQ(FileSealer::current().forgetCalls, forgets);
         CHECK(authority.read(identity).state == RestoreAuthorization::State::Active);
         const auto after = storageReadBounded(path.c_str(), budget + SealedStore::overhead);
@@ -391,7 +391,7 @@ TEST(handoverKeyRetirementRefusalStaysBlockedAcrossRestart)
     welcome.predecessorHostInstanceID = original.hostInstanceID;
     welcome.principal = "alice";
     FileSealer::current().shouldRefuse = true;
-    CHECK(!store.bindWelcome(welcome, original.clientInstance, {}));
+    CHECK(store.bindWelcome(welcome, original.clientInstance, {}) == ResumeBindingOutcome::Refused);
     CHECK(authority.read(identity).state == RestoreAuthorization::State::Blocked);
     CHECK(authority.read(successor).state == RestoreAuthorization::State::Blocked);
     FileSealer::current().shouldRefuse = false;
@@ -403,7 +403,7 @@ TEST(handoverKeyRetirementRefusalStaysBlockedAcrossRestart)
     CHECK(!newOwner.read());
     CHECK(!store.read());
     CHECK_EQ(FileSealer::current().openCalls, opens);
-    REQUIRE(store.bindWelcome(welcome, original.clientInstance, {}));
+    REQUIRE(store.bindWelcome(welcome, original.clientInstance, {}) == ResumeBindingOutcome::Bound);
     auto next = original;
     next.hostInstanceID = welcome.hostInstanceID;
     ++next.resumeSecret.low;
@@ -536,7 +536,7 @@ TEST(encryptedHistoryRestoresBeforeNetworkAndClearRetiresCopiedCiphertext)
         {
         }
         HistoryPersistence historyPersistence() const override { return HistoryPersistence::Enabled; }
-        bool bindWelcome(const Welcome& welcome, ID128 client, const std::array<std::uint8_t, 32>& pin) override { return store.bindWelcome(welcome, client, pin); }
+        ResumeBindingOutcome bindWelcome(const Welcome& welcome, ID128 client, const std::array<std::uint8_t, 32>& pin) override { return store.bindWelcome(welcome, client, pin); }
         ResumeWriteOutcome write(const ResumeRecord& value) override { return store.write(value); }
         std::optional<ResumeRecord> read() override { return store.read(); }
         ResumePurgeOutcome purge() override { return store.purge(); }

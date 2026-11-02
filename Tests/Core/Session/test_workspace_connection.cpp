@@ -664,7 +664,7 @@ TEST(aSuspendedPreparedWorkspaceWritesItsRecordBeforeTheByeLeaves)
         /// The carrier's write count and openness at each record write.
         std::vector<std::pair<std::size_t, bool>> moments;
         std::optional<Sync::ResumeRecord> record;
-        bool bindWelcome(const Sync::Welcome&, Sync::ID128, const std::array<std::uint8_t, 32>&) override { return true; }
+        Sync::ResumeBindingOutcome bindWelcome(const Sync::Welcome&, Sync::ID128, const std::array<std::uint8_t, 32>&) override { return Sync::ResumeBindingOutcome::Bound; }
         Sync::ResumeWriteOutcome write(const Sync::ResumeRecord& value) override
         {
             ++writes;
@@ -3545,7 +3545,7 @@ TEST(retiredTopologyReplyHeadersCannotCompleteATypedWorkspaceCall)
         CHECK(fixture.secondObserver.workspaceResults.empty());
         CHECK(wire.stopped);
         CHECK(fixture.connection.connection().state() == Session::State::Reconnecting);
-        CHECK(fixture.firstObserver.lastDetail == "The connection ended on data that couldn’t be read.");
+        CHECK(fixture.firstObserver.lastDetail == "The connection ended: an unknown Sync frame kind.");
         CHECK(fixture.factory->wires.size() == 1);
     }
 }

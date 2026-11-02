@@ -140,8 +140,8 @@ public:
     /// Accepts the authenticated peer: the slot belongs to one window, and
     /// the attachment checks that the record it rewrites is that window's.
     ///
-    /// - Returns: True.
-    [[nodiscard]] bool bindWelcome(const Protocol::Sync::Welcome&, Protocol::Sync::ID128, const std::array<std::uint8_t, 32>&) override { return true; }
+    /// - Returns: Bound.
+    [[nodiscard]] Protocol::Sync::ResumeBindingOutcome bindWelcome(const Protocol::Sync::Welcome&, Protocol::Sync::ID128, const std::array<std::uint8_t, 32>&) override { return Protocol::Sync::ResumeBindingOutcome::Bound; }
 
     /// Encodes the record and stores it whole.
     ///

@@ -692,6 +692,9 @@ private:
     /// Writes and restores wait until the store confirms the purge.
     bool m_hasPendingRecordPurge = false;
     bool m_isStoreBindingRefused = false;
+    /// A carrier without a persistent binding keeps receipts only in this
+    /// attachment, after retiring the persistent resume secret.
+    bool m_isMemoryOnly = false;
 };
 
 } // namespace Ubiquitty::Protocol::Sync

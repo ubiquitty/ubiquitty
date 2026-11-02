@@ -152,19 +152,19 @@ SealedResumeRecordStore::SealedResumeRecordStore(std::string path, PAL::SealScop
 {
 }
 
-bool SealedResumeRecordStore::bindWelcome(const Protocol::Sync::Welcome& welcome, Protocol::Sync::ID128 clientInstance, const std::array<std::uint8_t, 32>& certificatePin)
+Protocol::Sync::ResumeBindingOutcome SealedResumeRecordStore::bindWelcome(const Protocol::Sync::Welcome& welcome, Protocol::Sync::ID128 clientInstance, const std::array<std::uint8_t, 32>& certificatePin)
 {
     std::array<std::uint8_t, 32> principal {};
     Crypto::sha256({}, { reinterpret_cast<const std::uint8_t*>(welcome.principal.data()), welcome.principal.size() }, principal);
     if (welcome.principal.empty() || !isValidScope(m_scope)
         || m_scope.recordID != identityBytes(clientInstance)
         || m_scope.principal != principal || m_certificatePin != certificatePin)
-        return false;
+        return Protocol::Sync::ResumeBindingOutcome::Refused;
     if (m_scope.hostInstance == identityBytes(welcome.hostInstanceID))
-        return true;
+        return Protocol::Sync::ResumeBindingOutcome::Bound;
     if (welcome.hostInstanceID == Protocol::Sync::ID128 {} || !welcome.predecessorHostInstanceID
         || m_scope.hostInstance != identityBytes(*welcome.predecessorHostInstanceID))
-        return false;
+        return Protocol::Sync::ResumeBindingOutcome::Refused;
 
     auto successor = m_scope;
     successor.hostInstance = identityBytes(welcome.hostInstanceID);
@@ -172,10 +172,10 @@ bool SealedResumeRecordStore::bindWelcome(const Protocol::Sync::Welcome& welcome
     // secret. Record both deny intents before retiring the predecessor; a
     // crash before the successor's durable write leaves no readable record.
     if (!m_authorization.block(successor) || purge() != Protocol::Sync::ResumePurgeOutcome::Purged)
-        return false;
+        return Protocol::Sync::ResumeBindingOutcome::Refused;
     m_scope = successor;
     m_hasPendingPurge = true;
-    return true;
+    return Protocol::Sync::ResumeBindingOutcome::Bound;
 }
 
 Protocol::Sync::ResumeWriteOutcome SealedResumeRecordStore::write(const Protocol::Sync::ResumeRecord& record)

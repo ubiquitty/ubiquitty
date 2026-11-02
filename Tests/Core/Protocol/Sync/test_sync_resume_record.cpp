@@ -58,12 +58,16 @@ namespace {
 class ObservedStore final : public ResumeRecordStore {
 public:
     [[nodiscard]] HistoryPersistence historyPersistence() const override { return persistence; }
-    [[nodiscard]] bool bindWelcome(const Welcome& welcome, ID128 instance, const std::array<std::uint8_t, 32>& pin) override
+    [[nodiscard]] ResumeBindingOutcome bindWelcome(const Welcome& welcome, ID128 instance, const std::array<std::uint8_t, 32>& pin) override
     {
         ++bindings;
         if (onBind)
             onBind(welcome, instance, pin);
-        return !isRefusingBinding;
+        if (isRefusingBinding)
+            return ResumeBindingOutcome::Refused;
+        if (requiresCertificatePin && std::ranges::all_of(pin, [](auto byte) { return byte == 0; }))
+            return ResumeBindingOutcome::MemoryOnly;
+        return ResumeBindingOutcome::Bound;
     }
 
     [[nodiscard]] ResumeWriteOutcome write(const ResumeRecord& written) override
@@ -100,6 +104,7 @@ public:
     std::function<void()> onPurge;
     std::function<void(const Welcome&, ID128, const std::array<std::uint8_t, 32>&)> onBind;
     bool isRefusingBinding = false;
+    bool requiresCertificatePin = false;
     bool isLosingWrites = false;
     bool isRefusingWrites = false;
     bool isUncertainWrite = false;
@@ -183,6 +188,103 @@ std::vector<std::uint8_t> pictureOf(const Ubiquitty::Terminal& terminal)
 constexpr std::string_view rich = "\x1b[1;31mred\x1b[0m plain e\xcc\x81 \xe4\xb8\xad\xe6\x96\x87 \x1b]8;;https://example.org\x1b\\link\x1b]8;;\x1b\\ end\r\n";
 
 } // namespace
+
+TEST(anSSHAttachmentWithoutACertificatePinStillBecomesLive)
+{
+    Host host({ 41, 42 });
+    ObservedStore store;
+    store.requiresCertificatePin = true;
+    ClientAttachment client(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), nullptr, &store);
+    std::uint64_t now = 1;
+    attachFresh(host, client, now);
+    REQUIRE(client.connection());
+    CHECK_MSG(client.connection()->state() == ConnectionState::Attached, "SSH Welcome must not be refused because persistent TLS storage is unavailable");
+    REQUIRE(client.state() == ClientAttachmentState::Live);
+    REQUIRE(client.paneTerminal(paneID));
+    CHECK_EQ(store.writes, 0);
+    REQUIRE(client.send(paneID, raw("ssh input"), now));
+    pump(host, client, now);
+    CHECK(host.pane.writer.bytes() == "ssh input");
+}
+
+TEST(aPinnedAttachmentFallsBackToMemoryAndCanPersistAgain)
+{
+    Host host({ 41, 42 });
+    ObservedStore store;
+    store.requiresCertificatePin = true;
+    ReceiptObserver observer;
+    ClientAttachment client(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), &observer, &store);
+    const std::array<std::uint8_t, 32> pin { 9 };
+    client.setCertificatePin(pin);
+    std::uint64_t now = 1;
+    attachFresh(host, client, now);
+    REQUIRE(store.record);
+    drop(host, client, now);
+    const auto writes = store.writes;
+    client.setCertificatePin({});
+    REQUIRE(host.pane.source->appendEffect(BellEffect {}, clientInstance));
+    reconnect(host, client, now);
+    REQUIRE(client.state() == ClientAttachmentState::Live);
+    REQUIRE(client.paneTerminal(paneID));
+    CHECK(!store.record);
+    CHECK_EQ(store.writes, writes);
+    CHECK_EQ(observer.sequences.size(), 1u);
+    REQUIRE(client.send(paneID, raw("one"), now));
+    pump(host, client, now);
+    CHECK(host.pane.writer.bytes() == "one");
+    client.persist();
+    CHECK_EQ(store.writes, writes);
+
+    drop(host, client, now);
+    reconnect(host, client, now);
+    REQUIRE(client.state() == ClientAttachmentState::Live);
+    CHECK(!store.record);
+    CHECK_EQ(store.writes, writes);
+    CHECK_EQ(observer.sequences.size(), 1u);
+    CHECK(host.pane.writer.bytes() == "one");
+    REQUIRE(client.send(paneID, raw("two"), now));
+    pump(host, client, now);
+    CHECK(host.pane.writer.bytes() == "onetwo");
+
+    drop(host, client, now);
+    client.setCertificatePin(pin);
+    reconnect(host, client, now);
+    REQUIRE(client.state() == ClientAttachmentState::Live);
+    REQUIRE(store.record);
+    CHECK(store.record->certificatePin == pin);
+    CHECK(store.writes > writes);
+}
+
+TEST(memoryOnlyAdmissionRequiresRetiringThePreviousRecord)
+{
+    Host host({ 41, 42 });
+    ObservedStore store;
+    store.requiresCertificatePin = true;
+    ReceiptObserver observer;
+    ClientAttachment client(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), &observer, &store);
+    client.setCertificatePin({ 9 });
+    std::uint64_t now = 1;
+    attachFresh(host, client, now);
+    drop(host, client, now);
+    REQUIRE(store.record);
+    const auto writes = store.writes;
+    const auto picture = pictureOf(*client.paneTerminal(paneID));
+    store.isRefusingPurges = true;
+    client.setCertificatePin({});
+    REQUIRE(client.send(paneID, raw("held"), now));
+    REQUIRE(host.pane.source->appendEffect(BellEffect {}, clientInstance));
+    reconnect(host, client, now);
+    REQUIRE(client.connection());
+    CHECK(client.connection()->state() == ConnectionState::Closed);
+    CHECK(!client.connection()->welcome());
+    CHECK(observer.sequences.empty());
+    CHECK(host.pane.writer.bytes().empty());
+    CHECK(pictureOf(*client.paneTerminal(paneID)) == picture);
+    client.persist();
+    CHECK_EQ(store.writes, writes);
+    CHECK(store.record.has_value());
+    CHECK(store.purges > 0);
+}
 
 TEST(aWelcomeBindsTheStoreBeforeAnyRecordOrEffectInTheSameRead)
 {

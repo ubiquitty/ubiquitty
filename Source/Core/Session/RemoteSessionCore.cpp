@@ -67,6 +67,14 @@ constexpr std::size_t maxRawEventBytes = 16 * 1024;
 // the host's current one holds no record of the workspace.
 constexpr std::string_view restartedWithoutWorkspaceNotice = "Ubiquitty restarted on the host, and the saved workspace is no longer available.";
 
+/// Names the local decoder's rejection without substituting a peer's text.
+std::string readFailureNotice(const Protocol::Sync::SyncClientCore& core)
+{
+    const auto* screen = core.screen();
+    const auto detail = screen ? screen->localCloseDetail() : std::string_view {};
+    return detail.empty() ? "The connection ended on data that couldn’t be read." : "The connection ended: " + std::string(detail) + ".";
+}
+
 } // namespace
 
 std::string reattachRefusedNotice(std::uint32_t sessionID, Protocol::Sync::ByeReason reason)
@@ -2143,7 +2151,7 @@ void RemoteSessionCore::handleData(std::uint64_t generation, std::vector<std::ui
         // A Bye the host sent says why; what is shown is its reason, not a fault.
         const std::optional<Protocol::Sync::Bye> bye = screen ? screen->bye() : std::nullopt;
         if (!bye || bye->reason == Protocol::Sync::ByeReason::Normal) {
-            handleClose(generation, "The connection ended on data that couldn’t be read.");
+            handleClose(generation, readFailureNotice(*m_core));
             return;
         }
         handleClose(generation, std::string(Protocol::Sync::byeNotice(bye->reason)), reconnectDelayAfterHostClose(bye->reason));
@@ -2159,7 +2167,7 @@ void RemoteSessionCore::handleDatagram(std::uint64_t generation, std::span<const
     if (!m_ackSeen)
         return;
     if (!m_core->feedDatagram(std::as_bytes(bytes)))
-        handleClose(generation, "The connection ended on data that couldn’t be read.");
+        handleClose(generation, readFailureNotice(*m_core));
 }
 
 std::optional<double> RemoteSessionCore::reconnectDelayAfterHostClose(Protocol::Sync::ByeReason reason)

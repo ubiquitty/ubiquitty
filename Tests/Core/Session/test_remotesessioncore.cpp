@@ -955,6 +955,47 @@ TEST(test_connect_hello_ack)
     term.reset();
 }
 
+TEST(anUnreadableWelcomeReportsItsDecodeFailure)
+{
+    auto term = makeTerm();
+    FakeDispatcher dispatcher;
+    FakeFactory factory;
+    RecordingObserver observer;
+    RemoteSessionCore core(term.get(), &dispatcher, &factory, &observer);
+    core.start(0, 80, 24);
+    pumpConnect(factory.last(), dispatcher);
+
+    Protocol::Sync::FrameDecoder decoder;
+    decoder.append(helloAckFrame(4242));
+    const auto welcome = decoder.next();
+    REQUIRE(welcome && !welcome->body.empty());
+    std::vector<std::uint8_t> truncated;
+    REQUIRE(Protocol::Sync::appendFrame(truncated, Protocol::Sync::FrameKind::Welcome, 0, welcome->body.first(welcome->body.size() - 1)));
+    pumpData(factory.last(), dispatcher, truncated);
+
+    CHECK(core.state() == State::Reconnecting);
+    CHECK_MSG(observer.m_lastReason.find("an unreadable Welcome") != std::string::npos, observer.m_lastReason.c_str());
+}
+
+TEST(aFrameBeforeWelcomeNamesTheAdmissionFailure)
+{
+    auto term = makeTerm();
+    FakeDispatcher dispatcher;
+    FakeFactory factory;
+    RecordingObserver observer;
+    RemoteSessionCore core(term.get(), &dispatcher, &factory, &observer);
+    core.start(0, 80, 24);
+    pumpConnect(factory.last(), dispatcher);
+    pumpData(factory.last(), dispatcher, sentinelBytes("\nUBIQUITTY-SYNC\n"));
+    std::vector<std::uint8_t> probe;
+    std::vector<std::uint8_t> body;
+    Protocol::Sync::encode(body, Protocol::Sync::Probe { .time = 1 });
+    REQUIRE(Protocol::Sync::appendFrame(probe, Protocol::Sync::FrameKind::Probe, 0, body));
+    pumpData(factory.last(), dispatcher, probe);
+    CHECK(core.state() == State::Reconnecting);
+    CHECK_MSG(observer.m_lastReason.find("a Sync frame before Welcome") != std::string::npos, observer.m_lastReason.c_str());
+}
+
 /// A Welcome this client refuses ends the read it arrived in.
 ///
 /// The host's next frames are often in the same read: a refused daemon's screen

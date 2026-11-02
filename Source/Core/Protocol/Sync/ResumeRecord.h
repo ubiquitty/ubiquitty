@@ -120,6 +120,14 @@ enum class HistoryPersistence : std::uint8_t {
     Enabled
 };
 
+/// Whether an authenticated connection may keep a protected resume record.
+enum class ResumeBindingOutcome : std::uint8_t {
+    Bound,
+    /// The carrier is authenticated without the identity this store persists.
+    MemoryOnly,
+    Refused,
+};
+
 /// Where a client window's resume record is kept. One thread uses a store.
 /// Calls complete synchronously and must not mutate or destroy the attached
 /// client, directly or through callbacks, or reenter this store. The caller
@@ -143,8 +151,10 @@ public:
     ///   - welcome: The validated Welcome from the authenticated carrier.
     ///   - clientInstance: The stable client identity used by this connection.
     ///   - certificatePin: The pin verified by this carrier, not peer payload.
-    /// - Returns: Whether the exact current identity is authorized for storage.
-    [[nodiscard]] virtual bool bindWelcome(const Welcome& welcome, ID128 clientInstance, const std::array<std::uint8_t, 32>& certificatePin) = 0;
+    /// - Returns: Bound for authorized storage, MemoryOnly for a live connection
+    ///   whose old record must first be retired, or Refused for an identity or
+    ///   authorization failure. MemoryOnly never authorizes a persistent write.
+    [[nodiscard]] virtual ResumeBindingOutcome bindWelcome(const Welcome& welcome, ID128 clientInstance, const std::array<std::uint8_t, 32>& certificatePin) = 0;
 
     /// Replaces the stored record and reports its commit state.
     ///
@@ -170,8 +180,8 @@ class MemoryResumeRecordStore final : public ResumeRecordStore {
 public:
     /// Accepts an identity for this explicitly process-local store.
     ///
-    /// - Returns: True; no persistent authority is created.
-    [[nodiscard]] bool bindWelcome(const Welcome&, ID128, const std::array<std::uint8_t, 32>&) override { return true; }
+    /// - Returns: Bound; no persistent authority is created.
+    [[nodiscard]] ResumeBindingOutcome bindWelcome(const Welcome&, ID128, const std::array<std::uint8_t, 32>&) override { return ResumeBindingOutcome::Bound; }
 
     /// Stores a copy of the record.
     ///

@@ -1256,6 +1256,14 @@ shown pane takes its checkpoint, and a hidden one costs nothing.
     clients persist, below).
   - It is rewritten after every `Welcome`, before any input is sent on the new
     connection.
+  - A protected store bound to a TLS certificate cannot persist an SSH-stdio
+    connection, whose peer is authenticated by SSH instead. It returns
+    `ResumeBindingOutcome::MemoryOnly`; Core must retire the previous stored
+    record before accepting the Welcome. The live picture, resume secret,
+    effect receipts and input ordering then remain in memory across reconnects,
+    with no persistent writes. A later pinned carrier binds and commits a new
+    record before releasing input. Identity, authorization and retirement
+    failures still refuse admission; lack of a TLS pin alone does not.
   - It is purged with the history cache on `HistoryReset`.
   - The stored record names the wire version that encoded its pictures. A
     different wire version is refused, so an app moving from wire 1 to wire 2

@@ -58,7 +58,7 @@ void ClientAttachment::restore(const HeldAttachment& held)
 
 bool ClientAttachment::restoreFromStore()
 {
-    if (m_hasPendingRecordPurge || m_isStoreBindingRefused || m_connection || m_held)
+    if (m_hasPendingRecordPurge || m_isStoreBindingRefused || m_isMemoryOnly || m_connection || m_held)
         return false;
     std::optional<ResumeRecord> record = m_store ? m_store->read() : std::nullopt;
     if (!record || record->panes.size() > maxPanesPerConnection)
@@ -309,7 +309,7 @@ void ClientAttachment::copyHistoryTo(ID128 paneID, Ubiquitty::Terminal& destinat
 
 HistoryPurgeOutcome ClientAttachment::purge(const HistoryKey& retired, std::uint64_t)
 {
-    if (!m_store)
+    if (!m_store || m_isMemoryOnly)
         return HistoryPurgeOutcome::Purged;
     // A clear is a purge before anything else is applied: the record goes
     // now, and is written again, without the pane's picture, once the read
@@ -324,13 +324,13 @@ HistoryPurgeOutcome ClientAttachment::purge(const HistoryKey& retired, std::uint
 bool ClientAttachment::purgeRecord()
 {
     m_hasCommittedRecord = false;
-    m_hasPendingRecordPurge = m_store && m_store->purge() != ResumePurgeOutcome::Purged;
+    m_hasPendingRecordPurge = m_store && !m_isMemoryOnly && m_store->purge() != ResumePurgeOutcome::Purged;
     return !m_hasPendingRecordPurge;
 }
 
 bool ClientAttachment::commitEffectReceipt(ID128 paneID, EffectReceiptState state)
 {
-    if (!m_store)
+    if (!m_store || m_isMemoryOnly)
         return true;
     if (!m_connection || !m_connection->welcome() || !m_connection->handleForPane(paneID))
         return false;
@@ -350,7 +350,7 @@ bool ClientAttachment::commitEffectReceipt(ID128 paneID, EffectReceiptState stat
 void ClientAttachment::writeRecord(std::optional<std::pair<ID128, EffectReceiptState>> receipt)
 {
     m_isRecordStale = false;
-    if (!m_store)
+    if (!m_store || m_isMemoryOnly)
         return;
     m_hasCommittedRecord = false;
     if (m_hasPendingRecordPurge && !purgeRecord())
@@ -644,7 +644,7 @@ std::expected<std::uint64_t, InputRefusal> ClientAttachment::send(ID128 paneID, 
     if (isEnded(paneID))
         return std::unexpected(InputRefusal::PaneEnded);
     const HeldPane* known = findHeldPane(paneID);
-    const bool isCarried = m_state == ClientAttachmentState::Live && (!m_store || m_hasCommittedRecord) && m_connection && m_connection->handleForPane(paneID) != 0 && (!known || known->inDoubt.empty());
+    const bool isCarried = m_state == ClientAttachmentState::Live && (!m_store || m_isMemoryOnly || m_hasCommittedRecord) && m_connection && m_connection->handleForPane(paneID) != 0 && (!known || known->inDoubt.empty());
     // Input that cannot go now waits, within the bound; past it the event is
     // refused so its sender knows, rather than lost.
     if (!isCarried && unsentBytes() + intentBytes(intent) > maxLostInputBytes)
@@ -800,7 +800,16 @@ bool ClientAttachment::acceptWelcome(const Welcome& welcome)
     if (welcome.admission == AttachmentAdmission::AwaitingConsent || isUnboundTarget(welcome.selection.target))
         return true;
     m_hasCommittedRecord = false;
-    m_isStoreBindingRefused = m_store && !m_store->bindWelcome(welcome, m_identity.clientInstance, m_certificatePin);
+    m_isMemoryOnly = false;
+    const auto binding = m_store ? m_store->bindWelcome(welcome, m_identity.clientInstance, m_certificatePin) : ResumeBindingOutcome::Bound;
+    if (binding == ResumeBindingOutcome::MemoryOnly) {
+        // Welcome rotates the secret. No record carrying the previous
+        // secret may survive a connection that cannot commit its successor.
+        m_isStoreBindingRefused = !purgeRecord();
+        m_isMemoryOnly = !m_isStoreBindingRefused;
+        return !m_isStoreBindingRefused;
+    }
+    m_isStoreBindingRefused = binding == ResumeBindingOutcome::Refused;
     if (m_isStoreBindingRefused)
         (void)purgeRecord();
     return !m_isStoreBindingRefused;
@@ -914,7 +923,7 @@ void ClientAttachment::flush(HeldPane& pane, std::uint64_t now)
 {
     // New input waits behind events in doubt until the person decides, so no
     // later event is written before them.
-    if (m_state != ClientAttachmentState::Live || (m_store && !m_hasCommittedRecord) || !m_connection || !pane.inDoubt.empty())
+    if (m_state != ClientAttachmentState::Live || (m_store && !m_isMemoryOnly && !m_hasCommittedRecord) || !m_connection || !pane.inDoubt.empty())
         return;
     const std::uint32_t handle = m_connection->handleForPane(pane.paneID);
     if (handle == 0)

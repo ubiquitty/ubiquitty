@@ -3604,6 +3604,9 @@ public:
     /// client closed with `VersionMismatch` on a Welcome.
     [[nodiscard]] const std::optional<PeerBuild>& refusedHostBuild() const { return m_refusedHostBuild; }
 
+    /// The bounded local rejection detail, independent of any peer's Bye.
+    [[nodiscard]] std::string_view localCloseDetail() const { return m_localCloseDetail; }
+
     /// The sentence a frontend shows for a closed connection, empty while open.
     [[nodiscard]] std::string_view notice() const;
 
@@ -4132,6 +4135,7 @@ private:
     std::optional<Welcome> m_welcome;
     std::optional<Bye> m_receivedBye;
     std::optional<PeerBuild> m_refusedHostBuild;
+    std::string m_localCloseDetail;
     std::optional<ConsentStatusPhase> m_ownConsentPhase;
     std::unique_ptr<const OSC::TextSizing::ProportionalFaceFacts> m_proportionalFaces;
     bool m_areProportionalFacesSent = false;

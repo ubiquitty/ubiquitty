@@ -57,18 +57,18 @@ public:
         m_store.emplace(m_path, scope, pin, Ubiquitty::Apple::sealedStore(), Ubiquitty::Apple::restoreAuthorization(), cap, cap);
     }
 
-    bool bindWelcome(const Sync::Welcome& welcome, Sync::ID128 client, const std::array<std::uint8_t, 32>& pin) override
+    Sync::ResumeBindingOutcome bindWelcome(const Sync::Welcome& welcome, Sync::ID128 client, const std::array<std::uint8_t, 32>& pin) override
     {
         // A record is kept only for a carrier that pinned its peer.
         if (std::ranges::all_of(pin, [](auto byte) { return byte == 0; }))
-            return false;
-        if (m_store && !m_store->bindWelcome(welcome, client, pin)) {
+            return Sync::ResumeBindingOutcome::MemoryOnly;
+        if (m_store && m_store->bindWelcome(welcome, client, pin) != Sync::ResumeBindingOutcome::Bound) {
             if (purge() != Sync::ResumePurgeOutcome::Purged)
-                return false;
+                return Sync::ResumeBindingOutcome::Refused;
             m_store.reset();
         }
         if (!m_hooks.bind(m_hooks.context, welcome.hostInstanceID.low, welcome.hostInstanceID.high, welcome.principal.data(), welcome.principal.size(), pin.data(), pin.size()))
-            return false;
+            return Sync::ResumeBindingOutcome::Refused;
         if (!m_store) {
             std::array<std::uint8_t, 32> principal;
             Ubiquitty::Crypto::sha256({ reinterpret_cast<const std::uint8_t*>(welcome.principal.data()), welcome.principal.size() }, principal);

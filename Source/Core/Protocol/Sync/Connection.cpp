@@ -4729,6 +4729,7 @@ void ClientConnection::receiveStream(std::span<const std::uint8_t> bytes, std::u
     bool hasFrame = false;
     FrameHeader header;
     EnvelopeError error = EnvelopeError::None;
+    std::string_view refusalDetail = "an unreadable Sync frame header";
     const auto result = m_decoder.consume(bytes, [&](std::span<const std::uint8_t> prefix) {
         switch (readFrameHeader(prefix, header, error)) {
         case FrameHeaderState::NeedsMore:
@@ -4741,6 +4742,8 @@ void ClientConnection::receiveStream(std::span<const std::uint8_t> bytes, std::u
         if (directionOf(header.kind) == Direction::ClientToHost
             || (m_state == ConnectionState::Greeting && header.kind != FrameKind::Welcome && header.kind != FrameKind::Bye)
             || (m_state != ConnectionState::Greeting && header.kind == FrameKind::Welcome)) {
+            refusalDetail = directionOf(header.kind) == Direction::ClientToHost ? "a client-only Sync frame from the host"
+                : m_state == ConnectionState::Greeting ? "a Sync frame before Welcome" : "a repeated Welcome";
             error = EnvelopeError::Malformed;
             return FrameHeaderDecision { .state = FrameHeaderDecision::State::Refused };
         }
@@ -4748,6 +4751,7 @@ void ClientConnection::receiveStream(std::span<const std::uint8_t> bytes, std::u
             && ((header.kind != FrameKind::Notify && header.kind != FrameKind::Probe && header.kind != FrameKind::Echo && header.kind != FrameKind::Bye)
                 || (header.kind == FrameKind::Notify && (header.bodyBytes > maxConsentStatusBytes
                     || (m_ownConsentPhase && *m_ownConsentPhase != ConsentStatusPhase::Pending))))) {
+            refusalDetail = "a Sync frame before attachment consent";
             error = EnvelopeError::Malformed;
             return FrameHeaderDecision { .state = FrameHeaderDecision::State::Refused };
         }
@@ -4768,7 +4772,11 @@ void ClientConnection::receiveStream(std::span<const std::uint8_t> bytes, std::u
         return;
     settleInputWait();
     if (result.state == FrameIngress::State::Refused) {
-        close(m_decoder.error() == FrameIngressError::AllocationFailed ? ByeReason::TransferRefused : byeReasonOf(error), {});
+        if (m_decoder.error() == FrameIngressError::AllocationFailed)
+            close(ByeReason::TransferRefused, "the Sync frame could not be allocated");
+        else
+            close(byeReasonOf(error), error == EnvelopeError::Oversize ? "a Sync frame exceeds the receive limit" : error == EnvelopeError::UnknownKind ? "an unknown Sync frame kind"
+                                                                                                                                                        : refusalDetail);
         return;
     }
     // The host's window retires stream bytes only on an Ack, so bytes that
@@ -7612,6 +7620,8 @@ void ClientConnection::send(FrameKind kind, std::uint32_t channel, std::span<con
 
 void ClientConnection::close(ByeReason reason, std::string_view detail)
 {
+    constexpr std::size_t maxLocalCloseDetailBytes = 512;
+    m_localCloseDetail.assign(detail.substr(0, maxLocalCloseDetailBytes));
     for (auto& request : m_clipboardReads)
         request.reset();
     for (const auto& replica : m_panes) {
