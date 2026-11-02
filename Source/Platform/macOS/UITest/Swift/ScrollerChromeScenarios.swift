@@ -373,12 +373,26 @@ enum ScrollerChromeScenarios {
                     return
                 }
                 defer { window.close() }
-                guard fillHistory(t, surface) else { return }
+                surface.send("for i in $(seq 1 200); do echo scroller-line-$i; done; printf 'SCROLLER-HISTORY-READY\\n'; read -r _\n")
+                defer { surface.send("\n") }
+                guard
+                    t.wait(
+                        until: {
+                            surface.drive.readSnapshot().scrollbackCount > 60
+                                && surface.gridTextForTesting().contains("SCROLLER-HISTORY-READY")
+                        },
+                        timeout: 10
+                    )
+                else {
+                    t.expect(false, desc: "the shell finishes its history before the wheel comparison")
+                    return
+                }
                 var policy = surface.wheelPolicy
                 policy.trackpadSpeed = 1
                 surface.wheelPolicy = policy
                 surface.offsetView(byLines: 50)
                 let startOffset = surface.viewOffset
+                let startHistory = surface.drive.readSnapshot().scrollbackCount
                 let reference = NSScrollView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
                 reference.hasVerticalScroller = true
                 content.addSubview(reference)
@@ -406,6 +420,11 @@ enum ScrollerChromeScenarios {
                 }
                 let nativeDistance = abs(reference.contentView.bounds.minY - startOrigin)
                 let terminalDistance = Double(abs(surface.viewOffset - startOffset)) * policy.pointsPerLine
+                let endHistory = surface.drive.readSnapshot().scrollbackCount
+                t.expect(
+                    startHistory == endHistory,
+                    desc: "the shell adds no history during the wheel comparison (\(startHistory) to \(endHistory))"
+                )
                 t.expect(
                     nativeDistance > 0 && abs(nativeDistance - terminalDistance) < policy.pointsPerLine,
                     desc: "native travel \(nativeDistance) pt and terminal travel \(terminalDistance) pt differ by less than one row"

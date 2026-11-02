@@ -56,6 +56,8 @@ public final class PaneChromeScenarios: NSObject {
         UBUITestRegister("swift_shell_glass_pane_headers_share_the_window_backdrop") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
+                SystemDisplayOptions.pinForTesting(reduceMotion: false, reduceTransparency: false)
+                defer { SystemDisplayOptions.unpinForTesting() }
                 let saved = t.configureAppending("[appearance]\nbackground_opacity = 0.0\nblur_radius = 20.0\n")
                 defer { t.restoreConfiguration(saved) }
                 guard let shell = TerminalWindowController.spawn(), let window = shell.window else {

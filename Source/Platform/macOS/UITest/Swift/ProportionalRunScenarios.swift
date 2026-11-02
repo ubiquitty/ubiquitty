@@ -107,7 +107,17 @@ enum ProportionalRunScenarios {
                 // Columns: W W W, a space, i i i, a space, then Hamburg from
                 // column 8 — H a m b u r g — so m is column 10 and b column 11.
                 surface.feed(Data("\u{1b}[H\u{1b}[2J\u{1b}[?25lWWW iii Hamburg\r\nsecond row\r\n".utf8))
-                t.pump(0.5)
+                t.expect(
+                    t.wait(
+                        until: {
+                            guard surface.gridTextForTesting().contains("WWW iii Hamburg") else { return false }
+                            _ = surface.renderedFrameForTesting()
+                            return surface.letterExtentForTesting(row: 0, column: 0)?.isLetterRow == true
+                        },
+                        timeout: 5
+                    ),
+                    desc: "the frame lays out the published SF Pro row as letters"
+                )
                 guard let w = surface.letterExtentForTesting(row: 0, column: 0),
                     let i = surface.letterExtentForTesting(row: 0, column: 4),
                     let m = surface.letterExtentForTesting(row: 0, column: 10)

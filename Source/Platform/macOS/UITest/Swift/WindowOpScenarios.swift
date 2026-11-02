@@ -295,8 +295,14 @@ enum WindowOpScenarios {
                 surface.feed(Data("\u{1b}c".utf8))
                 t.expect(surface.drive.withTerminal { $0.windowIconified } == true, desc: "RIS preserves the native iconified state")
                 window.deminiaturize(nil)
-                t.pump(0.3)
-                t.expect(surface.drive.withTerminal { $0.windowIconified } == false, desc: "native restoration clears the iconified state")
+                guard t.wait(until: { !window.isMiniaturized }, timeout: 5) else {
+                    t.refuse("WindowServer did not restore a minimized test window")
+                    return
+                }
+                t.expect(
+                    t.wait(until: { surface.drive.withTerminal { !$0.windowIconified } == true }, timeout: 5),
+                    desc: "native restoration clears the iconified state"
+                )
             }
         }
         UBUITestRegister("swift_shell_a_program_moves_and_sizes_its_window") { context in

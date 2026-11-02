@@ -123,14 +123,9 @@ int main(int argc, char** argv)
         _exit(127);
     }
 
-    bool isDaemonUp = false;
-    for (int i = 0; i < 300 && !isDaemonUp; ++i) {
-        struct stat st;
-        if (::stat(sockPath.c_str(), &st) == 0)
-            isDaemonUp = true;
-        else
-            ::usleep(10 * 1000);
-    }
+    // The socket file exists from bind(), before listen(); only an accepted
+    // connection says the daemon is up.
+    const bool isDaemonUp = waitForDaemonReady(sockPath);
 
     bool ok = false;
     do {

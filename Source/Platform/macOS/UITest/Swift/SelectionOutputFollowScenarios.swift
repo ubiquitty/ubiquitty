@@ -62,7 +62,20 @@ enum SelectionOutputFollowScenarios {
         UBUITestRegister("swift_shell_held_drag_follows_real_output_with_a_stationary_mouse") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
-                guard let shell = TerminalWindowController.spawn(),
+                let trigger = NSTemporaryDirectory() + "ubiquitty-drag-output-\(UUID().uuidString)"
+                defer { try? FileManager.default.removeItem(atPath: trigger) }
+                let script =
+                    "import os, sys, time\n"
+                    + "for i in range(200): os.write(1, f'filler-{i + 1}\\r\\n'.encode())\n"
+                    + "os.write(1, b'anchor\\r\\nmiddle\\r\\npointer\\r\\n')\n"
+                    + "while not os.path.exists(sys.argv[1]): time.sleep(0.02)\n"
+                    + "os.write(1, b'tail-line\\r\\nTAIL-WRITE-COMPLETE\\r\\n')\n"
+                guard
+                    let shell = TerminalWindowController.spawn(
+                        arguments: ["/usr/bin/python3", "-u", "-c", script, trigger],
+                        localePolicy: .auto,
+                        sessionLifetime: .outlivesChild
+                    ),
                     let window = shell.window,
                     let content = window.contentView,
                     let surface = terminalSurface(under: content)
@@ -79,42 +92,21 @@ enum SelectionOutputFollowScenarios {
                     return
                 }
 
-                // Fill well past the grid so the cursor is genuinely at the
-                // bottom margin -- not merely on a low row of a screen with
-                // headroom below it -- before the three marker lines land as
-                // its last three rows. Only a press held at that margin can
-                // show a later scroll walking new content beneath it.
-                let fillerLines = rows + 20
-                surface.send(
-                    "for i in $(seq 1 \(fillerLines)); do printf 'filler-%d\\r\\n' \"$i\"; done; "
-                        + "printf 'anchor\\r\\nmiddle\\r\\npointer'\n"
-                )
-                // Only lines past the first screenful evict into scrollback,
-                // so the reachable count is `fillerLines - rows`, not
-                // `fillerLines` -- waiting for the larger number would never
-                // return. A count well under that floor is still proof the
-                // burst is under way; the settle pump after it covers the
-                // last few lines, including the three markers.
+                // The writer fills beyond the grid and parks after its three
+                // markers, so no login prompt can move the selection anchor.
                 var scrollback = 0
                 for _ in 0..<80 {
                     t.pump(0.1)
                     scrollback = Int(surface.drive.readSnapshot().scrollbackCount)
-                    if scrollback >= 15 { break }
+                    if scrollback >= 15 && surface.gridTextForTesting().contains("pointer") { break }
                 }
-                guard scrollback >= 15 else {
-                    t.expect(false, desc: "the filler command produced scrollback (got \(scrollback))")
+                guard scrollback >= 15 && surface.gridTextForTesting().contains("pointer") else {
+                    t.expect(false, desc: "the writer produced its marker rows and scrollback (got \(scrollback))")
                     return
                 }
-                t.pump(0.5)
                 t.expect(surface.viewOffset == 0, desc: "the view stayed at the live tail while it filled")
 
-                // The shell returns to its prompt after the compound command
-                // finishes, and since the command's last byte leaves the
-                // cursor mid-line, the shell's own reflex (a reverse-video
-                // continuation mark, then a fresh prompt line) adds one more
-                // scroll on top of the three marker rows -- settled by the
-                // time the press below reads the grid, so "pointer" sits one
-                // row above the grid's own last row rather than on it.
+                // The final newline leaves the pointer one row above the tail.
                 let anchorRow = rows - 4
                 let pointerRow = rows - 2
                 guard let anchorViewPoint = surface.viewPoint(forRow: anchorRow, column: 0),
@@ -156,16 +148,14 @@ enum SelectionOutputFollowScenarios {
                     desc: "the drag spans from the press to the release point (got \(selectedBeforeOutput.debugDescription))"
                 )
 
-                // The mouse does not move again. A short command's own typed
-                // echo plus its output is enough to scroll the live tail by
-                // more than one row while the gesture stays open.
-                surface.send("echo tail-line\n")
-                var selectedAfterOutput = ""
-                for _ in 0..<50 {
-                    t.pump(0.1)
-                    selectedAfterOutput = surface.selectedText ?? ""
-                    if selectedAfterOutput.contains("tail-line") { break }
-                }
+                // The mouse does not move again. The marker follows the complete
+                // tail line, with no shell echo or startup text in the selection.
+                _ = FileManager.default.createFile(atPath: trigger, contents: Data())
+                t.expect(
+                    t.wait(until: { surface.gridTextForTesting().contains("TAIL-WRITE-COMPLETE") }, timeout: 5),
+                    desc: "the complete tail line reaches the grid before the selection is read"
+                )
+                let selectedAfterOutput = surface.selectedText ?? ""
 
                 t.expect(
                     selectedAfterOutput.contains("anchor"),

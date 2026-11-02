@@ -1058,6 +1058,16 @@ if(TARGET test_web_terminal)
     set_tests_properties(test_web_terminal PROPERTIES TIMEOUT 300)
 endif()
 
+# test_sync_handles drives 100,000 bind and unbind round trips through a whole
+# Sync link. The count is the property under test: the handle slots stay at
+# three however many rebindings pass. It takes about 30 seconds in a Linux
+# Debug build on a fast workstation, and it ran past the shared bound on a
+# hosted ubuntu-24.04 runner beside the rest of the suite. It takes its own
+# bound for the reason above.
+if(TEST test_sync_handles)
+    set_tests_properties(test_sync_handles PROPERTIES TIMEOUT 300)
+endif()
+
 # ----------------------------------------------------------------------
 # The Rule-10 layer boundary, tried by the compiler.
 # check-core-layer-partition.sh proves that each Core source has exactly one

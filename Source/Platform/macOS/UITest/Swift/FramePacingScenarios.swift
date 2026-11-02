@@ -679,7 +679,24 @@ enum FramePacingScenarios {
         UBUITestRegister("swift_shell_drives_frames_while_output_flows") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
-                guard let shell = TerminalWindowController.spawn(),
+                let start = NSTemporaryDirectory() + "ubiquitty-frame-start-\(UUID().uuidString)"
+                let stop = NSTemporaryDirectory() + "ubiquitty-frame-stop-\(UUID().uuidString)"
+                defer {
+                    try? FileManager.default.removeItem(atPath: start)
+                    try? FileManager.default.removeItem(atPath: stop)
+                }
+                let script =
+                    "import os, sys, time\n"
+                    + "while not os.path.exists(sys.argv[1]): time.sleep(0.01)\n"
+                    + "while not os.path.exists(sys.argv[2]):\n"
+                    + "    os.write(1, b'flood-line\\r\\n' * 32)\n"
+                    + "    time.sleep(0.01)\n"
+                guard
+                    let shell = TerminalWindowController.spawn(
+                        arguments: ["/usr/bin/python3", "-u", "-c", script, start, stop],
+                        localePolicy: .auto,
+                        sessionLifetime: .outlivesChild
+                    ),
                     let window = shell.window,
                     let content = window.contentView,
                     let surface = terminalSurface(under: content)
@@ -705,7 +722,7 @@ enum FramePacingScenarios {
                 // below is that the drive stays up WHILE output flows, and a
                 // loop that finishes in half a second stops it for the right
                 // reason at the wrong moment.
-                surface.send("yes flood-line\n")
+                _ = FileManager.default.createFile(atPath: start, contents: Data())
                 t.expect(
                     t.wait(until: { surface.isDrivingFramesForTesting }, timeout: 5.0),
                     desc: "output starts the drive"
@@ -729,7 +746,7 @@ enum FramePacingScenarios {
                 // next tick reads that and stops the clock — a terminal that
                 // kept a timer alive for a screen nobody is changing is the
                 // cost this whole mechanism exists to avoid.
-                surface.send("\u{03}")
+                _ = FileManager.default.createFile(atPath: stop, contents: Data())
                 t.expect(
                     t.wait(until: { !surface.isDrivingFramesForTesting }, timeout: 5.0),
                     desc: "and silence stops it again"

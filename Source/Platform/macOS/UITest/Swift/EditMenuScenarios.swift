@@ -412,7 +412,12 @@ enum EditMenuScenarios {
         UBUITestRegister("swift_shell_edit_menu_copy_writes_the_selection") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
-                guard let shell = TerminalWindowController.spawn(),
+                guard
+                    let shell = TerminalWindowController.spawn(
+                        arguments: ["/bin/sh", "-c", "sleep 60"],
+                        localePolicy: .auto,
+                        sessionLifetime: .outlivesChild
+                    ),
                     let content = shell.window?.contentView,
                     let surface = terminalSurface(under: content)
                 else {

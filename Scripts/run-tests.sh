@@ -83,12 +83,9 @@ usage() {
 
 ubq_list_stanzas() {
     # Only host-supported names become CTest entries or accepted filters.
-    awk -v platform="$(uname -s)" -f "$ROOT/Scripts/stanza-declarations.awk" -f /dev/stdin "$0" <<'AWK' | LC_ALL=C sort -u
-        {
-            name = stanzaName($0)
-            if (name != "" && stanzaIsAvailable($0, platform)) print name
-        }
-AWK
+    awk -v mode=list -v platform="$(uname -s)" \
+        -f "$ROOT/Scripts/stanza-declarations.awk" \
+        -f "$ROOT/Scripts/stanza-inventories.awk" "$0" | LC_ALL=C sort -u
 }
 
 for arg in "$@"; do
@@ -130,43 +127,8 @@ for arg in "$@"; do
             # mode arriving through the spelling rather than through the
             # directory. The assignments are collected first and the references
             # resolved against them.
-            awk -f "$ROOT/Scripts/stanza-declarations.awk" -f /dev/stdin "$0" <<'AWK' | LC_ALL=C sort -u >"$serial_list"
-                # Two shapes, because a stanza may name its tree either way:
-                # `$ROOT/build/<name>` inside the checkout, and
-                # `$UBQ_BUILD_ROOT/<name>` under the build root.
-                #
-                # Both are spelled out rather than generalised to any
-                # `$<something>ROOT/<dir>`. That looser form also matches
-                # `$ROOT/Tests` and `$ROOT/Source`, which are source trees, and
-                # locking on those serializes most of the suite against nothing.
-                # A wrong lock is as expensive as a missing one, in the other
-                # direction: a missing lock costs phantom flakiness, and an
-                # over-broad one costs every run forever.
-                /^[A-Za-z_][A-Za-z0-9_]*="\$\{?([A-Za-z_][A-Za-z0-9_]*BUILD_ROOT\}?\/|ROOT\}?\/build\/)[A-Za-z0-9_-]+"/ {
-                    split($0, parts, "=")
-                    match($0, /\/[A-Za-z0-9_-]+"$/)
-                    treeForVariable[parts[1]] = substr($0, RSTART + 1, RLENGTH - 2)
-                }
-                stanzaName($0) != "" {
-                    for (d in seen) print name, d
-                    delete seen
-                    name = stanzaName($0)
-                }
-                name != "" && match($0, /(BUILD_ROOT\}?\/|ROOT\}?\/build\/)[A-Za-z0-9_-]+/) {
-                    tree = substr($0, RSTART, RLENGTH)
-                    sub(/^.*\//, "", tree)
-                    seen[tree] = 1
-                }
-                name != "" {
-                    # Bounded on the right, so HOST_TEST_BUILD does not answer for
-                    # a HOST_TEST_BUILD_QUIC that shares its prefix.
-                    for (v in treeForVariable) {
-                        if ($0 ~ ("\\$\\{?" v "\\}?([^A-Za-z0-9_]|$)"))
-                            seen[treeForVariable[v]] = 1
-                    }
-                }
-                END { for (d in seen) print name, d }
-AWK
+            awk -v mode=serial -f "$ROOT/Scripts/stanza-declarations.awk" \
+                -f "$ROOT/Scripts/stanza-inventories.awk" "$0" | LC_ALL=C sort -u >"$serial_list"
             # A safety list that silently empties is worse than no list: every
             # lock disappears and everything downstream still reports success.
             # A detector that goes blind when build output moves says nothing.
@@ -200,43 +162,22 @@ AWK
             # next one. A stanza handed the binary by an enclosing block or a
             # variable another stanza set is not ordered after the fixture, and
             # under ctest ubq_refuse_unordered_build stops it building one.
-            awk -f "$ROOT/Scripts/stanza-declarations.awk" -f /dev/stdin "$0" <<'AWK' | LC_ALL=C sort -u
-                stanzaName($0) != "" {
-                    if (needs && name != "host_binary") print name
-                    needs = 0
-                    name = stanzaName($0)
-                }
-                name != "" && /ubq_(agent_)?host_binary/ { needs = 1 }
-                END { if (needs && name != "host_binary") print name }
-AWK
+            awk -v mode=host -f "$ROOT/Scripts/stanza-declarations.awk" \
+                -f "$ROOT/Scripts/stanza-inventories.awk" "$0" | LC_ALL=C sort -u
             exit 0 ;;
         --list-agent-binary-stanzas)
             # Stanzas that run the built agent, derived from the call exactly
             # as the Host list above is, and bounded the same way.
-            awk -f "$ROOT/Scripts/stanza-declarations.awk" -f /dev/stdin "$0" <<'AWK' | LC_ALL=C sort -u
-                stanzaName($0) != "" {
-                    if (needs && name != "agent_binary") print name
-                    needs = 0
-                    name = stanzaName($0)
-                }
-                name != "" && /ubq_agent_binary/ { needs = 1 }
-                END { if (needs && name != "agent_binary") print name }
-AWK
+            awk -v mode=agent -f "$ROOT/Scripts/stanza-declarations.awk" \
+                -f "$ROOT/Scripts/stanza-inventories.awk" "$0" | LC_ALL=C sort -u
             exit 0 ;;
         --list-quic-dependency-stanzas)
             # Stanzas that decide whether they can run by inspecting the shared
             # QUIC archives. CTest makes them wait for the dependency fixture;
             # deriving the list from the probe keeps a newly added consumer
             # from racing the cold-cache build.
-            awk -f "$ROOT/Scripts/stanza-declarations.awk" -f /dev/stdin "$0" <<'AWK' | LC_ALL=C sort -u
-                stanzaName($0) != "" {
-                    if (needs && name != "quic_deps_fixture") print name
-                    needs = 0
-                    name = stanzaName($0)
-                }
-                name != "" && /quic_deps_present/ { needs = 1 }
-                END { if (needs && name != "quic_deps_fixture") print name }
-AWK
+            awk -v mode=quic -f "$ROOT/Scripts/stanza-declarations.awk" \
+                -f "$ROOT/Scripts/stanza-inventories.awk" "$0" | LC_ALL=C sort -u
             exit 0 ;;
         --list-stanzas)
             ubq_list_stanzas

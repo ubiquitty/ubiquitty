@@ -1734,13 +1734,14 @@ enum RemoteWorkspaceScenarios {
             desc: "a stale enable acknowledgement cannot undo the selected remote source"
         )
 
-        rootSurface.send("printf 'remote-history-line\\n%.0s' {1..120}\n")
+        rootSurface.send("printf 'remote-history-line\\n%.0s' {1..120}; printf 'REMOTE-HISTORY-READY\\n'\n")
         // Sync mirrors a screen of history eagerly and pulls older rows on scroll.
         t.expect(
             t.wait(
                 until: {
                     let snapshot = rootSurface.drive.readSnapshot()
-                    return snapshot.rows > 0 && snapshot.scrollbackCount >= snapshot.rows
+                    return snapshot.rows > 0 && snapshot.scrollbackCount >= 100
+                        && rootSurface.gridTextForTesting().contains("REMOTE-HISTORY-READY")
                 },
                 timeout: 10
             ),
@@ -1748,12 +1749,19 @@ enum RemoteWorkspaceScenarios {
                 "host history reaches the remote mirror before wheel input "
                 + "(\(rootSurface.drive.readSnapshot().scrollbackCount) history rows, \(rootSurface.drive.readSnapshot().rows) visible rows)"
         )
-        if let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 5, wheel2: 0, wheel3: 0),
-            let wheel = NSEvent(cgEvent: event)
-        {
+        let makeWheel = { () -> NSEvent? in
+            guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 5, wheel2: 0, wheel3: 0)
+            else { return nil }
+            return NSEvent(cgEvent: event)
+        }
+        if let wheel = makeWheel() {
             rootSurface.scrollWheel(with: wheel)
+            t.expect(
+                t.wait(until: { rootSurface.viewOffset > 0 }, timeout: 5),
+                desc:
+                    "remote primary-screen wheel reaches mirrored history (offset \(rootSurface.viewOffset), history \(rootSurface.drive.readSnapshot().scrollbackCount))"
+            )
             t.pump(0.2)
-            t.expect(rootSurface.viewOffset > 0, desc: "remote primary-screen wheel reaches mirrored history")
             t.expect(
                 t.wait(until: { rootSurface.drive.readSnapshot().scrollbackCount > 60 }, timeout: 10),
                 desc: "scrolling pulls older host history into the remote mirror"
@@ -1763,18 +1771,39 @@ enum RemoteWorkspaceScenarios {
                 t.wait(until: { rootSurface.drive.readSnapshot().modes.alternateScreenActive }, timeout: 10),
                 desc: "host alternate-screen state reaches the remote input route"
             )
-            rootSurface.scrollWheel(with: wheel)
+            guard let alternateWheel = makeWheel() else {
+                t.expect(false, desc: "a remote alternate-screen wheel event can be created")
+                return
+            }
+            rootSurface.scrollWheel(with: alternateWheel)
             t.pump(0.2)
             t.expect(rootSurface.viewOffset == 0, desc: "remote alternate screen cannot expose primary history")
             t.expect(rootSurface.verticalOverscroll == 0, desc: "remote alternate screen does not bounce")
-            rootSurface.send("printf '\\033[?1049l'\n")
+            rootSurface.send("printf '\\033[?1049lPRIMARY-READY'; read -r _\n")
             t.expect(
-                t.wait(until: { !rootSurface.drive.readSnapshot().modes.alternateScreenActive }, timeout: 10),
+                t.wait(
+                    until: {
+                        let snapshot = rootSurface.drive.readSnapshot()
+                        return !snapshot.modes.alternateScreenActive
+                            && Ubiquitty.Runtime.viewOffsetLimit(snapshot) > 0
+                            && rootSurface.gridTextForTesting().contains("PRIMARY-READY")
+                    },
+                    timeout: 10
+                ),
                 desc: "host return to primary screen reaches the remote mirror"
             )
-            rootSurface.scrollWheel(with: wheel)
-            t.pump(0.2)
-            t.expect(rootSurface.viewOffset > 0, desc: "remote history remains reachable after leaving alternate screen")
+            guard let returnWheel = makeWheel() else {
+                t.expect(false, desc: "a remote primary-screen wheel event can be created")
+                return
+            }
+            rootSurface.scrollWheel(with: returnWheel)
+            t.expect(
+                t.wait(until: { rootSurface.viewOffset > 0 }, timeout: 5),
+                desc:
+                    "remote history remains reachable after leaving alternate screen "
+                    + "(offset \(rootSurface.viewOffset), limit \(Ubiquitty.Runtime.viewOffsetLimit(rootSurface.drive.readSnapshot())))"
+            )
+            rootSurface.send("\n")
         } else {
             t.expect(false, desc: "a remote scroll wheel event can be created")
         }
@@ -2091,6 +2120,10 @@ enum RemoteWorkspaceScenarios {
         }
         tabCancel.performClick(nil)
         t.expect(t.wait(until: { tabWindow.attachedSheet == nil }, timeout: 3), desc: "Cancel leaves both tabs attached")
+        guard t.wait(until: { closingTab.remoteSurface?.drive.pendingRemoteWindowCloseToken == 0 }, timeout: 3) else {
+            t.expect(false, desc: "Cancel consumes the first captured close before another is prepared")
+            return
+        }
         t.expect(survivor.drive.remoteWorkspaceTabCount(of: surface) == 2, desc: "cancelling closes no host tab")
         tabClose.performClick(nil)
         t.expect(!closingTab.isClosedForTesting, desc: "a cancelled close button cannot be reused")
@@ -2101,13 +2134,20 @@ enum RemoteWorkspaceScenarios {
             t.expect(false, desc: "closing again offers a fresh tab close choice")
             return
         }
+        guard confirmedTabClose.isEnabled && closingTab.remoteSurface?.drive.pendingRemoteWindowCloseToken != 0 else {
+            t.expect(false, desc: "the second close choice owns a current host tab")
+            return
+        }
         confirmedTabClose.performClick(nil)
         t.expect(
             t.wait(
                 until: { survivor.drive.remoteWorkspaceTabCount(of: surface) == 1 && closingTab.isClosedForTesting },
                 timeout: 20
             ),
-            desc: "closing the host tab closes its native projection"
+            desc:
+                "closing the host tab closes its native projection "
+                + "(tabs \(survivor.drive.remoteWorkspaceTabCount(of: surface)), closed \(closingTab.isClosedForTesting), "
+                + "outcome \(String(describing: closingTab.remoteSurface?.drive.remoteWorkspaceCloseOutcome)))"
         )
         t.expect((window.window?.tabGroup?.windows.count ?? 1) == 1, desc: "one window is left in the group")
         t.expect(

@@ -79,8 +79,10 @@ enum PixelReportScenarios {
                 }
                 defer { window.close() }
                 t.pump(0.8)
-                guard let box = surface.gridFitBoxForTesting else {
-                    t.expect(false, desc: "the surface knows its grid box")
+                guard let box = surface.gridFitBoxForTesting,
+                    let frameInsets = surface.gridFrameInsetsForTesting
+                else {
+                    t.expect(false, desc: "the surface knows its grid box and the drawn origin")
                     return
                 }
                 t.expect(box.insets.left > 0 && box.insets.top >= 0, desc: "padding is on (left \(box.insets.left), top \(box.insets.top))")
@@ -97,8 +99,8 @@ enum PixelReportScenarios {
                     t.expect(false, desc: "the surface locates the cell")
                     return
                 }
-                let expectedX = Int(((point.x - box.insets.left) * scale).rounded(.down)) + 1
-                let expectedY = Int(((point.y - box.insets.top) * scale).rounded(.down)) + 1
+                let expectedX = Int(floor((Float(point.x) - Float(frameInsets.left)) * Float(scale))) + 1
+                let expectedY = Int(floor((Float(point.y) - Float(frameInsets.top)) * Float(scale))) + 1
                 let inWindow = surface.convert(point, to: nil)
                 if let press = mouseEvent(.leftMouseDown, in: window, at: inWindow) {
                     surface.mouseDown(with: press)

@@ -39,7 +39,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -253,17 +252,11 @@ int main(int argc, char** argv)
     // so the QUIC port is up by then); then a small margin before the first
     // Initial. The PTO retransmit below covers any residual race.
     std::string sockPath = macHome + "/" + Ubiquitty::Host::socketLeafForBinary(hostBin);
-    bool up = false;
-    for (int i = 0; i < 300; ++i) { // up to ~3s
-        struct stat st;
-        if (::stat(sockPath.c_str(), &st) == 0) {
-            up = true;
-            break;
-        }
-        ::usleep(10 * 1000);
-    }
+    // The socket file exists from bind(), before listen(); only an accepted
+    // connection says the daemon is up.
+    const bool up = Ubiquitty::HostTest::waitForDaemonReady(sockPath);
     if (!up) {
-        std::fprintf(stderr, "daemon did not come up (no host.sock)\n");
+        std::fprintf(stderr, "daemon did not accept a connection on host.sock\n");
         ::kill(daemon, SIGKILL);
         ::waitpid(daemon, nullptr, 0);
         return 1;

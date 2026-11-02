@@ -105,13 +105,9 @@ int main(int argc, char** argv)
         ::execv(hostBinary, args);
         _exit(127);
     }
-    bool isDaemonUp = false;
-    for (int attempt = 0; attempt < 300 && !isDaemonUp; ++attempt) {
-        struct stat st;
-        isDaemonUp = ::stat(sockPath.c_str(), &st) == 0;
-        if (!isDaemonUp)
-            ::usleep(10 * 1000);
-    }
+    // The socket file exists from bind(), before listen(); only an accepted
+    // connection says the daemon is up.
+    const bool isDaemonUp = Ubiquitty::HostTest::waitForDaemonReady(sockPath);
     double latency = -1;
     do {
         CHECK_MSG(isDaemonUp, "the daemon came up");

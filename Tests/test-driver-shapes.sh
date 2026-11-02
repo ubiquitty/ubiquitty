@@ -13,6 +13,13 @@ cd "$ROOT" || exit 1
 
 FAILURES=0
 
+# An awk program reopened through fd 0 can vanish under parallel CTest.
+stdin_source="$(printf '/dev/%s' stdin)"
+if grep -nF -- "$stdin_source" Scripts/run-tests.sh Tests/test-driver-shapes.sh; then
+    echo "test-driver-shapes: FAILED — awk programs must live in source files" >&2
+    exit 1
+fi
+
 shape() { # <description> <stanza>
     local what="$1" stanza="$2"
     printf '  %-14s %-26s ' "$what" "$stanza"
@@ -40,19 +47,8 @@ shape() { # <description> <stanza>
 # enclosing stanza name so a match inside a body is attributed to the stanza it
 # is in rather than to the last one declared.
 first_stanza_of() { # <awk pattern matching a line inside the body>
-    awk -v want="$1" -v platform="$(uname -s)" \
-        -f Scripts/stanza-declarations.awk -f /dev/stdin Scripts/run-tests.sh <<'AWK'
-    {
-        declaration = stanzaName($0)
-        if (declaration != "") {
-            name = declaration
-            if (!stanzaIsAvailable($0, platform) || name ~ /_fixture$/) { name = ""; next }
-            if (want == "@inline" && $0 ~ /^[ \t]*build_and_run /) { print name; exit }
-            next
-        }
-        if (name != "" && want != "@inline" && $0 ~ want) { print name; exit }
-    }
-AWK
+    awk -v mode=shape -v want="$1" -v platform="$(uname -s)" \
+        -f Scripts/stanza-declarations.awk -f Scripts/stanza-inventories.awk Scripts/run-tests.sh
 }
 
 echo "test-driver-shapes: one stanza per build route"

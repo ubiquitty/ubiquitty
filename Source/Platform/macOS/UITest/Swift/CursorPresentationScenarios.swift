@@ -694,6 +694,8 @@ enum CursorPresentationScenarios {
         UBUITestRegister("swift_shell_a_cursor_motion_preference_reaches_the_terminal") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
+                SystemDisplayOptions.pinForTesting(reduceMotion: false, reduceTransparency: false)
+                defer { SystemDisplayOptions.unpinForTesting() }
                 guard let shell = TerminalWindowController.spawn() else {
                     t.expect(false, desc: "a Swift-shell window opens")
                     return

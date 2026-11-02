@@ -294,9 +294,11 @@ public final class TerminalScroller: NSView {
         } else {
             offset = 0
         }
-        guard offset != overscrollOffset else { return }
-        overscrollOffset = offset
-        onOverscrollChange?(offset)
+        // Clip-origin rounding at an edge is not an elastic gesture.
+        let settledOffset = abs(offset) <= max(1, maximum) * CGFloat.ulpOfOne * 16 ? 0 : offset
+        guard settledOffset != overscrollOffset else { return }
+        overscrollOffset = settledOffset
+        onOverscrollChange?(settledOffset)
     }
 
     private func layoutScroller() {

@@ -527,7 +527,10 @@ enum WelcomeActionScenarios {
                 // the buttons, on the row the shell's output took.
                 // The action row may split on a narrow window; Accessibility
                 // is the last action in either layout.
-                let buttonsRow = rows.lastIndex { $0.contains("A") } ?? rows.count
+                guard let buttonsRow = cell(ofTarget: "ubiquitty:action/accessibility", in: surface)?.row else {
+                    t.expect(false, desc: "the Welcome action row declares its Accessibility link")
+                    return
+                }
                 t.expect(
                     t.wait(
                         until: {

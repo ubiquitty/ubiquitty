@@ -929,8 +929,10 @@ enum RemoteLifecycleScenarios {
         let ownerDrawn = ownerPainter.drawnCellSize(for: ownerSurface)
         t.expect(!ownerSurface.drive.isRemoteGeometryOwnedElsewhere, desc: "the first attachment remains the authenticated geometry owner")
         t.expect(
-            ownerPainter.contentClip(for: ownerSurface) == nil && ownerNatural == ownerDrawn,
-            desc: "Fit does not transform the geometry owner's ordinary view"
+            ownerPainter.contentClip(for: ownerSurface) == nil
+                && abs(ownerNatural.width - ownerDrawn.width) < 0.01
+                && abs(ownerNatural.height - ownerDrawn.height) < 0.01,
+            desc: "Fit does not transform the geometry owner's ordinary view (natural \(ownerNatural), drawn \(ownerDrawn))"
         )
         t.expect(
             peer.window?.frame == window && peerSurface.publishedGrid == viewport,

@@ -1555,6 +1555,8 @@ enum LinkScenarios {
                 window.makeKeyAndOrderFront(nil)
                 t.pump(0.3)
 
+                var opened: [String] = []
+                surface.linkOpener = { opened.append($0) }
                 surface.feed(Data("\u{1b}[H\u{1b}[2J".utf8))
                 surface.feed(
                     Data("\u{1b}]8;;https://example.com/swallow\u{1b}\\LINK\u{1b}]8;;\u{1b}\\ plain\r\n".utf8)
@@ -1582,6 +1584,7 @@ enum LinkScenarios {
                     !surface.didPressOpenALink,
                     desc: "and its release is spent on the same gesture rather than reported alone"
                 )
+                t.expect(opened == ["https://example.com/swallow"], desc: "the gesture opens its link once")
             }
         }
     }
