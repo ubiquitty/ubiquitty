@@ -1122,7 +1122,8 @@ static void emitCharacter(Ubiquitty::Terminal& t, uint32_t codePoint, uint32_t c
     // both the last and incoming code points are below that, graphemeExtends can
     // only return false — skip the whole check on the dominant ASCII/Latin-1 path
     // (the integer test short-circuits before clusterIsLive's field loads).
-    if ((codePoint >= 0x300 || t.parser.clusterLast >= 0x300) && clusterIsLive(t) && Ubiquitty::Unicode::graphemeExtends(&t.parser.clusterState, t.parser.clusterLast, codePoint)) {
+    const bool shouldAskClusterRules = (codePoint >= 0x300 || t.parser.clusterLast >= 0x300) && clusterIsLive(t);
+    if (shouldAskClusterRules && Ubiquitty::Unicode::graphemeExtends(&t.parser.clusterState, t.parser.clusterLast, codePoint)) {
         const bool hasMulticell = t.grid->rowMeta(t.parser.clusterRow).has(RowFlag::HasMulticell);
         captureGraphicCells(t, t.parser.clusterRow, hasMulticell ? 0 : t.parser.clusterColumn - 2,
             hasMulticell ? t.columns - 1 : t.parser.clusterColumn + 2);
@@ -1143,8 +1144,17 @@ static void emitCharacter(Ubiquitty::Terminal& t, uint32_t codePoint, uint32_t c
     // in an SGR-76 forced run stay monochrome.
     const VT::AttributeSet penAttributes = s->pen.attributes - VT::Attribute::Emoji;
 
-    if (width == 0)
+    if (width == 0) {
+        // The rules put a boundary before this code point, so the open cluster
+        // ends here though the code point takes no cell. The break state has
+        // moved past it, and a cluster left open would take the next code point
+        // under the rule that follows this one, as GB9b joins whatever comes
+        // after a Prepend. A code point the fast reject passed over leaves the
+        // state where it was, and the cluster stays open.
+        if (shouldAskClusterRules)
+            clusterReset(t);
         return;
+    }
     // A double-width or double-height line shows only its left half, so text
     // wraps at the middle of it, as DEC STD 070 and xterm have it.
     int rightMargin = effectiveRightVisible(t);

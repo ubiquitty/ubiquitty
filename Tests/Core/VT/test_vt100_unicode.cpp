@@ -20,6 +20,7 @@
 
 #include <cstdio>
 #include <memory>
+#include <string_view>
 
 TEST(testArabicDisplayRow)
 {
@@ -213,6 +214,45 @@ TEST(testDefaultIgnorableCodepointsAreDropped)
         CHECK(codePoints[1] == 0x0301);
         CHECK(codePoints[2] == 0x034F); // CGJ consumed by clustering, not dropped
         CHECK(codePoints[3] == 0x0308);
+    }
+}
+
+TEST(testDroppedZeroWidthCodePointEndsTheOpenCluster)
+{
+    // A zero-width code point the rules put a boundary before takes no cell and
+    // ends the open cluster, so what follows it never joins an earlier cell. A
+    // Prepend is the case that tests it: GB9b joins the code point after it, and
+    // that code point must start a cell of its own rather than land in the
+    // cluster before the Prepend. A zero-width code point the rules never weigh
+    // leaves the cluster open. Each case holds at every chunking.
+    struct Case {
+        const char* name;
+        std::string_view bytes;
+        int clusterLength; // code points the first cell keeps
+        int clusterColumns; // columns the first cell spans
+        uint32_t next; // the code point that must start the next cell, or 0
+        int cursor;
+    };
+    const Case cases[] = {
+        { "flag, Prepend U+0605, ideograph", "\xF0\x9F\x87\xAF\xF0\x9F\x87\xB5\xD8\x85\xE8\xBF\xB2", 2, 2, 0x8FF2, 4 },
+        { "letter, Prepend U+0605, Greek letter", "a\xD8\x85\xCE\xB1", 1, 1, 0x03B1, 2 },
+        { "ideograph, Prepend U+070F, Greek letter", "\xE4\xBD\xA0\xDC\x8F\xCE\xB1", 1, 2, 0x03B1, 3 },
+        // Both the letter and SOFT HYPHEN sit below every rule's range, so the
+        // soft hyphen is dropped unweighed and the acute still joins the letter.
+        { "letter, SOFT HYPHEN, combining acute", "a\xC2\xAD\xCC\x81", 2, 1, 0, 1 },
+    };
+    for (const Case& test : cases) {
+        for (const std::size_t chunk : { test.bytes.size(), std::size_t { 1 } }) {
+            Ubiquitty::Terminal t;
+            Ubiquitty::hardReset(t);
+            for (std::size_t offset = 0; offset < test.bytes.size(); offset += chunk)
+                Ubiquitty::processBytes(&t, test.bytes.substr(offset, chunk));
+            uint32_t codePoints[16];
+            CHECK_MSG(Ubiquitty::cellClusterCodePoints(&t, cell(t, 0, 0), codePoints, 16) == test.clusterLength, test.name);
+            if (test.next != 0)
+                CHECK_MSG(cell(t, 0, test.clusterColumns)->codePoint == test.next, test.name);
+            CHECK_MSG(t.screens.active->cursorX == test.cursor, test.name);
+        }
     }
 }
 
