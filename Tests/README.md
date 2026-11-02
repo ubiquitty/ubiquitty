@@ -272,7 +272,7 @@ reviewing baseline changes.
 
 ## Fuzzing
 
-The bounded parser, image, and Sync fuzz targets run in CI:
+The bounded parser, image, and Sync fuzz targets run in the Linux battery:
 
 ```sh
 ./Scripts/run-tests.sh --with-fuzz

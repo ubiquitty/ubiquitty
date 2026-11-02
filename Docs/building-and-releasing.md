@@ -501,7 +501,7 @@ and an `-all_load` link probe. The test scripts install and launch the simulator
 app on a simulator owned by this checkout. The UI suite drives the actual host
 editor and terminal gestures. Live SSH/QUIC cases need the credentials described
 in `Scripts/run-ios-ui-tests.sh`; without them those cases report skips.
-CI includes `ios-build`, `ios-smokes`, and `ios-ui` in the Apple battery.
+The Apple battery includes `ios-build`, `ios-smokes`, and `ios-ui`.
 
 For interactive development, run `./Scripts/generate-xcode-workspace.sh --ios-only`,
 open `UbiquittyIOS.xcworkspace`, and select `UbiquittyIOSApp` with an iPhone, an
@@ -789,8 +789,11 @@ it does not establish runtime safety or feature completeness.
 
 ### Workflows
 
-- `.github/workflows/ci.yml` — tests, coverage, fuzz, style, portable snapshots
-  on Linux, and portable plus CoreText/Metal snapshots on macOS for every PR.
+- `.github/workflows/ci.yml` — the preflight (style, workflow files, names) on
+  every push and pull request. Its Linux and Apple batteries, which hold the
+  tests, coverage, fuzz and snapshots, are off on hosted runners: their timing
+  bounds are not loosened to fit slower machines, and the maintainers run them
+  before every landing (`python3 Scripts/ci_batteries.py run linux|apple`).
 
 
 ### Runners and fork pull requests

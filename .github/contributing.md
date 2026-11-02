@@ -82,9 +82,10 @@ A change is ready when `run-tests.sh` and `check-style.py` both pass, relevant
 snapshot catalogs are green, and the affected frontends build clean. Follow the
 [snapshot workflow](../Tests/Snapshots/README.md) when fixing rendering bugs,
 adding visual cases, or introducing renderer features; baseline replacement is
-a reviewed part of the code change, never a way to silence a mismatch. CI runs
-the portable snapshot catalog on Linux and both portable and native catalogs on
-macOS.
+a reviewed part of the code change, never a way to silence a mismatch. Hosted
+CI runs the preflight checks and the secret scan. The maintainers run the test
+batteries, snapshot catalogs included, on their own Linux and macOS machines
+before every landing.
 
 ## Coding standards
 

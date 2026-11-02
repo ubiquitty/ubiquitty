@@ -120,7 +120,11 @@ jobs:
   linux:
     name: Linux battery
     needs: preflight
-    if: needs.preflight.outputs.linux == 'true'
+    # Not run on hosted runners. Their slower, shared machines miss timing bounds
+    # the suite holds to on the maintainers' machines, and a test is not loosened
+    # to fit them. The maintainers run this battery before every landing;
+    # `python3 Scripts/ci_batteries.py run linux` runs it locally.
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
@@ -214,7 +218,11 @@ jobs:
   apple:
     name: Apple battery
     needs: preflight
-    if: needs.preflight.outputs.apple == 'true'
+    # Not run on hosted runners. Their slower, shared machines miss timing bounds
+    # the suite holds to on the maintainers' machines, and a test is not loosened
+    # to fit them. The maintainers run this battery before every landing;
+    # `python3 Scripts/ci_batteries.py run apple` runs it locally.
+    if: ${{ false }}
     runs-on: xcode-27
     timeout-minutes: 180
     env:
@@ -267,7 +275,8 @@ jobs:
   host-linux-arm64:
     name: Linux host build (glibc-arm64)
     needs: preflight
-    if: needs.preflight.outputs.linux == 'true'
+    # Not run on hosted runners, for the reason the Linux battery states.
+    if: ${{ false }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     continue-on-error: true

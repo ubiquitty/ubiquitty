@@ -192,9 +192,12 @@ class DraftWorkflowTests(unittest.TestCase):
         enabled = ci.scheduled_jobs(invocation)
         invocation["vars"]["UBQ_HOSTED_RUNNERS"] = "false"
         self.assertEqual(ci.scheduled_jobs(invocation), enabled)
-        self.assertIn("host-linux-arm64", enabled)
-        self.assertIn("coverage", ci.jobs)
-        self.assertNotIn("coverage", enabled)
+        # Hosted runners run the preflight alone; the batteries stay defined so a
+        # maintainer can run them by hand, and each is off rather than removed.
+        self.assertEqual(enabled, {"preflight"})
+        for name in ("linux", "apple", "host-linux-arm64", "coverage"):
+            self.assertIn(name, ci.jobs)
+            self.assertNotIn(name, enabled)
 
     def test_workflows_have_no_self_hosted_runner_fallback(self):
         runners = {}
