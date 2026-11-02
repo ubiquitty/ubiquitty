@@ -13,14 +13,18 @@
 
 #include "Core/Terminal.h"
 #include "Core/TerminalOperations.h"
+#include "Core/Unicode/UTF8Encoder.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #if defined(__APPLE__)
 #include <pthread/qos.h>
 #endif
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -46,6 +50,62 @@ struct Corpus {
     const char* name;
     std::string bytes;
 };
+
+// Fixed seeds, so every run and both arms of an A/B parse the same bytes.
+std::uint32_t nextRandom(std::uint64_t& state)
+{
+    state = state * 6364136223846793005ull + 1442695040888963407ull;
+    return static_cast<std::uint32_t>(state >> 33);
+}
+
+// Lines of words two to ten letters long, one alphabet to a line, each line
+// short of the grid so none wraps.
+std::string multiscriptWords()
+{
+    constexpr std::uint32_t alphabets[][2] = {
+        { 0x430, 0x44F }, // Cyrillic
+        { 0x3B1, 0x3C9 }, // Greek
+        { 0xE0, 0xFE }, // Latin-1 lowercase
+        { 0x561, 0x586 }, // Armenian
+    };
+    std::uint64_t state = 0x5EED0001;
+    std::string unit;
+    for (int line = 0; line < 2048; ++line) {
+        const auto& alphabet = alphabets[nextRandom(state) % std::size(alphabets)];
+        const int target = 30 + static_cast<int>(nextRandom(state) % (benchColumns - 32));
+        for (int used = 0; used < target;) {
+            const int word = std::min(2 + static_cast<int>(nextRandom(state) % 9), target - used);
+            for (int letter = 0; letter < word; ++letter)
+                Ubiquitty::Unicode::appendUTF8(unit, alphabet[0] + nextRandom(state) % (alphabet[1] - alphabet[0] + 1));
+            used += word + 1;
+            unit += ' ';
+        }
+        unit += "\r\n";
+    }
+    return unit;
+}
+
+// Letters with a combining mark on about one in six, the way decomposed text
+// carries them, in words, each line short of the grid.
+std::string sparseMarks()
+{
+    std::uint64_t state = 0x5EED0002;
+    std::string unit;
+    for (int line = 0; line < 2048; ++line) {
+        const int target = 30 + static_cast<int>(nextRandom(state) % (benchColumns - 32));
+        for (int used = 0; used < target; ++used) {
+            Ubiquitty::Unicode::appendUTF8(unit, nextRandom(state) % 2 ? 0xE0 + nextRandom(state) % 0x1F : 0x430 + nextRandom(state) % 0x20);
+            if (nextRandom(state) % 6 == 0)
+                Ubiquitty::Unicode::appendUTF8(unit, 0x300 + nextRandom(state) % 0x10);
+            if (nextRandom(state) % 7 == 0) {
+                unit += ' ';
+                ++used;
+            }
+        }
+        unit += "\r\n";
+    }
+    return unit;
+}
 
 std::vector<Corpus> buildCorpora(std::size_t targetBytes)
 {
@@ -129,6 +189,15 @@ std::vector<Corpus> buildCorpora(std::size_t targetBytes)
         unit += "\n";
         corpora.push_back({ "legacy_graphics", repeatToBytes(unit, targetBytes) });
     }
+
+    // Prose outside ASCII: every multibyte run is one word between spaces, so a
+    // decoder that pays off only on long runs never meets one here.
+    corpora.push_back({ "multiscript_words", repeatToBytes(multiscriptWords(), targetBytes) });
+
+    // Marks scattered through words: the batched writer hands each mark to the
+    // cluster path and takes the row back after it, the hand-off a corpus with
+    // a mark on every cell or on none never makes.
+    corpora.push_back({ "combining_sparse", repeatToBytes(sparseMarks(), targetBytes) });
 
     return corpora;
 }
