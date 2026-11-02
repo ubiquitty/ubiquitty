@@ -95,6 +95,11 @@ Each host is the file that release's app bundles, byte for byte, and
 Releases carry no iOS, Web, wscons, Emacs or Neovim build, and no Intel macOS build
 or host.
 
+The Mac app supports a Mac with Apple silicon running macOS 26 or later. Using an
+earlier version of macOS or an Intel-based Mac? We're looking for contributors to
+bring Ubiquitty there; [Contributing](.github/contributing.md) describes how to
+start.
+
 ### Build from source
 
 [Building](#building) and the [platform build guide](Docs/platform-builds.md)
