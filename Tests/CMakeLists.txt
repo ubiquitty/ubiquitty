@@ -904,15 +904,16 @@ add_test(NAME ubq_build
         -P ${CMAKE_CURRENT_SOURCE_DIR}/run_build_fixture.cmake)
 #
 # The bound stops a wedged compile from holding the runner; it is not the
-# deadlock detector, which is UBIQUITTY_TEST_TIMEOUT below, per entry. A 2-vCPU
-# hosted runner with a cold cache needs close to 1800 seconds, and a build cut
+# deadlock detector, which is UBIQUITTY_TEST_TIMEOUT below, per entry. A hosted
+# ubuntu-24.04 runner with an empty compiler cache reached 1303 of 2441 build
+# steps in 1800 seconds, so its cold build needs about 3400, and a build cut
 # off near its end loses every entry to the build, which says nothing about the
 # code under test. The bound has to fit the COLD build, because a warm one is
 # never near it and a cold one is exactly the case that should still finish —
 # after a cache eviction, a compiler change, or a first run on a new image.
 set_tests_properties(ubq_build PROPERTIES
     FIXTURES_SETUP ubq_build_fixture
-    TIMEOUT 1800)
+    TIMEOUT 5400)
 
 # A hang has to fail, and fail quickly. Some tests pass an indefinite timeout on
 # purpose — Tests/PAL/test_poll.cpp does, so a backend that parks where the
@@ -944,6 +945,9 @@ if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # a version bump alone breaks the test build. Whole-module keeps no
     # incremental state to go stale.
     add_compile_options("$<$<COMPILE_LANGUAGE:Swift>:-wmo>")
+    # These executables compile kit sources directly, and a kit declaration
+    # with package access needs the package name the kits build under.
+    add_compile_options("$<$<COMPILE_LANGUAGE:Swift>:SHELL:-package-name ubiquitty>")
     add_executable(test_rich_text_native_geometry
         ${CMAKE_SOURCE_DIR}/Source/UbiquittyRenderKit/RichTextGeometry.swift
         ${CMAKE_SOURCE_DIR}/Tests/Platform/test_rich_text_native_geometry.swift)

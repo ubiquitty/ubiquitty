@@ -4,13 +4,12 @@
 import CoreText
 import Foundation
 
-/// Immutable local font handles shared by enumeration and named-family lookup.
-/// A renderer rebuild replaces this snapshot after a font-registration change.
-struct RichTextFontCatalog {
+/// Immutable process-wide installed and bundled font inventory.
+package struct RichTextFontCatalog {
     let families: [String]
     private let fonts: [String: [CTFont]]
 
-    init(additionalFamilies: [[CTFont]] = []) {
+    package init(additionalFamilies: [[CTFont]] = []) {
         var fonts: [String: [CTFont]] = [:]
         let available = (CTFontManagerCopyAvailableFontFamilyNames() as? [String]) ?? []
         for family in available where Self.isRepresentable(family) {

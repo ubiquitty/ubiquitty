@@ -1609,6 +1609,32 @@ TEST(sessionWithoutAHostSendsNoPasteAndClaimsNoProgress)
     releaseTerminalSession(session);
 }
 
+TEST(aPublishedRichTextCatalogRequestsOneReplacementFrame)
+{
+    auto* session = Ubiquitty::Runtime::TerminalSession::make();
+    REQUIRE(session != nullptr);
+    session->start(24, 80);
+    auto* terminal = session->terminal();
+    REQUIRE(terminal != nullptr);
+    Ubiquitty::RichText::TypographyFacts facts;
+    facts.cellWidth = 8 * 64;
+    facts.cellHeight = 16 * 64;
+    CHECK(session->publishTypography(facts));
+    CHECK(!session->fontCatalogBecameReady(1, 2));
+    CHECK(terminal->richTextBlocks.tryReserve(Ubiquitty::ScreenMode::Primary, 1).has_value());
+    Ubiquitty::RichText::Block block;
+    block.serial = 1;
+    block.width = 1;
+    block.height = 1;
+    terminal->richTextBlocks.restore(Ubiquitty::ScreenMode::Primary, std::move(block));
+    const auto before = terminal->typography.epoch;
+    CHECK(session->fontCatalogBecameReady(2, 3));
+    CHECK_EQ(terminal->typography.epoch, before + 1);
+    CHECK(!session->fontCatalogBecameReady(2, 3));
+    CHECK_EQ(terminal->typography.epoch, before + 1);
+    releaseTerminalSession(session);
+}
+
 /// A session fed by its embedder, with no stream of its own, answers the host's
 /// queries through the reply sink the embedder installs: an SSH carrier on iOS
 /// feeds host bytes in and sends the replies out. Without one, the replies sit

@@ -210,8 +210,13 @@ before allocating. Request keys remain strict. Limits describe supported work;
 ### Font catalog
 
 Programs can enumerate usable family names from the same selected per-pane
-renderer that answers measurements. This is its actual font environment, which
-may differ from both the host's operating system and another attached viewer.
+renderer that answers measurements. Native clients share one process-wide
+installed and bundled family inventory; each renderer adds the class faces it
+actually draws. The resulting names may differ from another attached viewer.
+The native inventory is built off the main and render threads on first rich-text
+use. A query while it is being built returns `s=stale` for a retry. Named runs
+use their class fallback until publication; Core then invalidates their layout
+and requests one replacement frame.
 
 ```
 OSC 7404 ; a=f:i=<id>:b=<offset>:n=<count>:E=<epoch>:e=1 ST
@@ -767,8 +772,8 @@ offset, total and bounded UTF-8 family identifiers. The host also checks that th
 scope matches that pane's publication and constructs the hex-encoded OSC reply
 itself. Catalog responses have their own smaller assembly bound, derived from
 their page byte and count limits; a catalog request cannot admit a geometry-sized
-assembly. Handover preserves catalog capability and renderer identity, while a
-native catalog snapshot remains owned by its renderer.
+assembly. Handover preserves catalog capability and renderer identity. Native
+renderers borrow their process-wide inventory and add their own class faces.
 Pending queries and completed outcomes waiting for output space block handover.
 The host can transfer after their outcome has entered the carried PTY output, or
 refuse handover when its quiescence deadline expires; it cannot discard the query

@@ -36,12 +36,23 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sys/mman.h>
 #include <unistd.h>
 
 namespace Ubiquitty::Linux {
 
 namespace {
 constexpr VkFormat imageFormat = VK_FORMAT_R8G8B8A8_UNORM; // matches GDK_MEMORY_R8G8B8A8
+
+bool canMapExportedFrame(int fileDescriptor, std::size_t length)
+{
+    // GTK accepts a dma-buf's format before its software importer maps it.
+    // A mapping refusal there cannot be reported back to this renderer.
+    void* mapping = ::mmap(nullptr, length, PROT_READ, MAP_SHARED, fileDescriptor, 0);
+    if (mapping == MAP_FAILED)
+        return false;
+    return ::munmap(mapping, length) == 0;
+}
 
 // The directory the executable lives in — the SPIR-V shaders are written
 // next to the binary by the build (build/linux/cell.*.spv etc.).
@@ -249,6 +260,14 @@ bool VulkanRenderer::ensureExportSlots(uint32_t width, uint32_t height)
         descriptorInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
         if (m_getMemoryFileDescriptor(m_device, &descriptorInfo, &slot.fileDescriptor) != VK_SUCCESS)
             return refuseExport("step 5");
+        if (!std::in_range<std::size_t>(req.size))
+            return refuseExport("import mapping size");
+        const auto allocationSize = static_cast<std::size_t>(req.size);
+        const bool canImport = m_canImportFrame
+            ? m_canImportFrame(m_frameImportContext, slot.fileDescriptor, allocationSize)
+            : canMapExportedFrame(slot.fileDescriptor, allocationSize);
+        if (!canImport)
+            return refuseExport("import mapping refused");
         VkImageSubresource subresource {};
         subresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         VkSubresourceLayout layout {};

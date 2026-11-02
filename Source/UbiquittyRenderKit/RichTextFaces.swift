@@ -19,33 +19,92 @@ import AppKit
 import UIKit
 #endif
 
-/// One renderer's font inventory, built when a program first names or queries a family.
-///
-/// The parser and frame renderer can ask concurrently. The lock publishes one
-/// immutable snapshot to both, and a renderer invalidated by font registration
-/// receives a new cache with its replacement faces.
-private final class RichTextFontCatalogCache: @unchecked Sendable {
-    private let additionalFamilies: [[CTFont]]
+/// One process-wide inventory. Its lock protects publication, never font discovery.
+package final class RichTextFontCatalogCache: @unchecked Sendable {
+    package static let shared = RichTextFontCatalogCache()
+    package static let readyNotification = Notification.Name("UbiquittyRichTextFontCatalogReady")
+
     private let lock = NSLock()
     private var snapshot: RichTextFontCatalog?
+    private var isBuilding = false
+    private var revision: UInt64 = 0
+    private var publishedGeneration: UInt64 = 0
+    private let build: @Sendable () -> RichTextFontCatalog
+    private var registeredFontsObserver: NSObjectProtocol?
 
-    init(additionalFamilies: [[CTFont]]) {
-        self.additionalFamilies = additionalFamilies
+    package init(
+        build: @escaping @Sendable () -> RichTextFontCatalog = {
+            let bundled = Ubiquitty.Rendering.bundledFontFamilies()
+                .compactMap {
+                    FontFaces.shippedStyles(family: String($0), size: 12)
+                }
+            return RichTextFontCatalog(additionalFamilies: bundled)
+        }
+    ) {
+        self.build = build
+        registeredFontsObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name(kCTFontManagerRegisteredFontsChangedNotification as String),
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.invalidate()
+        }
     }
 
-    func catalog() -> RichTextFontCatalog {
+    deinit {
+        if let registeredFontsObserver {
+            NotificationCenter.default.removeObserver(registeredFontsObserver)
+        }
+    }
+
+    /// Starts discovery on demand and returns the published snapshot immediately.
+    package func catalog() -> RichTextFontCatalog? {
         lock.lock()
-        defer { lock.unlock() }
-        if let snapshot { return snapshot }
-        let built = RichTextFontCatalog(additionalFamilies: additionalFamilies)
-        snapshot = built
-        return built
+        if let snapshot {
+            lock.unlock()
+            return snapshot
+        }
+        if !isBuilding {
+            isBuilding = true
+            let requestedRevision = revision
+            DispatchQueue.global(qos: .userInitiated)
+                .async { [self] in
+                    let built = build()
+                    lock.lock()
+                    guard revision == requestedRevision else {
+                        lock.unlock()
+                        return
+                    }
+                    snapshot = built
+                    publishedGeneration &+= 1
+                    isBuilding = false
+                    lock.unlock()
+                    NotificationCenter.default.post(name: Self.readyNotification, object: self)
+                }
+        }
+        lock.unlock()
+        return nil
     }
 
-    var hasBuiltSnapshot: Bool {
+    /// Retires an inventory after CoreText's registered-font set changes.
+    package func invalidate() {
+        lock.lock()
+        revision &+= 1
+        snapshot = nil
+        isBuilding = false
+        lock.unlock()
+    }
+
+    package var hasBuiltSnapshot: Bool {
         lock.lock()
         defer { lock.unlock() }
         return snapshot != nil
+    }
+
+    package var generation: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return publishedGeneration
     }
 }
 
@@ -59,13 +118,14 @@ package struct RichTextFaces {
     private let gridStyles: [CTFont]
     private let sansStyles: [CTFont]
     private let serifStyles: [CTFont]
+    private let namedClassStyles: [(family: String, styles: [CTFont])]
     /// The configured proportional family, or empty for the platform's UI face.
     package let proportionalFamilyName: String
     private let catalogCache: RichTextFontCatalogCache
-    var catalog: RichTextFontCatalog { catalogCache.catalog() }
+    var catalog: RichTextFontCatalog? { catalogCache.catalog() }
     package var hasBuiltCatalog: Bool { catalogCache.hasBuiltSnapshot }
 
-    package init(grid: FontFaces, proportionalFamilyName: String) {
+    package init(grid: FontFaces, proportionalFamilyName: String, catalogCache: RichTextFontCatalogCache = .shared) {
         self.grid = grid[Ubiquitty.Rendering.FontFace.Regular]
         self.gridStyles = [
             grid[Ubiquitty.Rendering.FontFace.Regular],
@@ -74,12 +134,7 @@ package struct RichTextFaces {
             grid[Ubiquitty.Rendering.FontFace.BoldItalic],
         ]
         self.proportionalFamilyName = proportionalFamilyName
-        var bundledStyles: [String: [CTFont]] = [:]
-        for family in Ubiquitty.Rendering.bundledFontFamilies() {
-            let name = String(family)
-            if let styles = FontFaces.shippedStyles(family: name, size: 12) { bundledStyles[name] = styles }
-        }
-        if let shipped = bundledStyles[proportionalFamilyName.trimmingCharacters(in: .whitespaces)] {
+        if let shipped = FontFaces.shippedStyles(family: proportionalFamilyName, size: 12) {
             sansStyles = shipped
         } else {
             let base =
@@ -89,9 +144,20 @@ package struct RichTextFaces {
             sansStyles = Self.classStyles(of: base)
         }
         serifStyles = Self.classStyles(of: Self.serifFace(size: 12))
-        catalogCache = RichTextFontCatalogCache(
-            additionalFamilies: [gridStyles, sansStyles, serifStyles] + Array(bundledStyles.values)
-        )
+        namedClassStyles = [gridStyles, sansStyles, serifStyles]
+            .map {
+                (CTFontCopyFamilyName($0[0]) as String, $0)
+            }
+        self.catalogCache = catalogCache
+    }
+
+    /// Begins the shared inventory when the first block reaches a frame.
+    package func prepareCatalog() { _ = catalogCache.catalog() }
+
+    /// The process inventory plus the exact class faces this renderer publishes.
+    package func familyNames(in catalog: RichTextFontCatalog) -> [String] {
+        let names = namedClassStyles.map(\.family).filter(RichTextFontCatalog.isRepresentable)
+        return Array(Set(catalog.families).union(names)).sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
     }
 
     /// Resolves a source family in the same snapshot its font query enumerates.
@@ -103,7 +169,11 @@ package struct RichTextFaces {
         size: CGFloat
     ) -> CTFont {
         if !familyName.isEmpty {
-            if let named = catalog.font(family: familyName, isBold: isBold, isItalic: isItalic, size: size) {
+            if let styles = namedClassStyles.first(where: { $0.family == familyName })?.styles {
+                let source = styles[(isBold ? 1 : 0) | (isItalic ? 2 : 0)]
+                return CTFontCreateCopyWithAttributes(source, size, nil, nil)
+            }
+            if let named = catalog?.font(family: familyName, isBold: isBold, isItalic: isItalic, size: size) {
                 return named
             }
         }

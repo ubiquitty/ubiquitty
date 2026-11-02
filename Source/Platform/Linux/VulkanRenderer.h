@@ -202,7 +202,8 @@ public:
 
     /// Whether the device can hand frames to the compositor as dma-bufs.
     ///
-    /// - Returns: True when the external-memory extensions were enabled.
+    /// - Returns: True when external-memory export is available and has not
+    ///   been refused.
     [[nodiscard]] bool canExportFrames() const { return m_canExportFrames; }
 
     /// Asks the next ``renderGrid`` to leave its frame in an exportable
@@ -214,6 +215,22 @@ public:
     /// Switches dma-buf export off for the rest of the run, after the
     /// toolkit refused an import; frames read back from then on.
     void disableFrameExport() { m_canExportFrames = false; }
+
+    /// Selects the importability probe for newly allocated export buffers.
+    ///
+    /// The default probe requires a CPU-readable mapping: GTK may select a
+    /// software importer after accepting a dma-buf's format. Called before the
+    /// first export; the callback borrows the descriptor and must not retain it.
+    /// A refusal disables export and the current frame reads back instead.
+    ///
+    /// - Parameters:
+    ///   - canImport: The consumer's probe, or null for the default probe.
+    ///   - context: Borrowed until the renderer is shut down.
+    void setFrameImportProbe(bool (*canImport)(void*, int, std::size_t), void* context)
+    {
+        m_canImportFrame = canImport;
+        m_frameImportContext = context;
+    }
 
     /// The frame the last ``renderGrid`` exported, once.
     ///
@@ -567,6 +584,8 @@ private:
     uint32_t m_exportHeight = 0;
     bool m_canExportFrames = false;
     bool m_isExportRequested = false;
+    bool (*m_canImportFrame)(void*, int, std::size_t) = nullptr;
+    void* m_frameImportContext = nullptr;
     // Whether a full ring has been reported, so the log says it once.
     bool m_hasReportedFullExportRing = false;
     std::optional<ExportedFrame> m_exportedFrame;

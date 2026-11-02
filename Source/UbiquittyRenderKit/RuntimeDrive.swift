@@ -3872,6 +3872,11 @@ public final class RuntimeDrive {
         _ = session.publishTypographyFrom(builder)
     }
 
+    /// Publishes the frontend's ready inventory fact and asks Core whether a frame changed.
+    package func fontCatalogBecameReady(_ generation: UInt64, _ rendererRevision: UInt64) -> Bool {
+        session.fontCatalogBecameReady(generation, rendererRevision)
+    }
+
     /// Applies the config's `[security]` switches to the model, under the
     /// model lock; see ``Ubiquitty/Runtime/TerminalSession/applyTerminalPreferences``.
     ///

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import AppKit
+import Metal
 import UbiquittyCore
 import UbiquittyKit
+import UbiquittyRenderKit
 
 // RichTextScenarios.swift — an OSC 7404 rich text block in a real window
 // (Docs/rich-text.md): a real shell prints the block, the window's renderer
@@ -189,6 +191,97 @@ private func drag(_ surface: TerminalSurface, in window: NSWindow, from start: C
 enum RichTextScenarios {
     /// Registers every scenario in this file.
     static func register() {
+        UBUITestRegister("swift_shell_first_named_rich_text_frame_has_no_catalog_wait") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                guard let shell = TerminalWindowController.spawn(),
+                    let window = shell.window,
+                    let content = window.contentView,
+                    let surface = terminalSurface(under: content),
+                    let device = MTLCreateSystemDefaultDevice()
+                else {
+                    t.expect(false, desc: "a Swift-shell surface and Metal device are ready")
+                    return
+                }
+                defer { window.close() }
+                t.pump(0.2)
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .bgra8Unorm,
+                    width: 640,
+                    height: 480,
+                    mipmapped: false
+                )
+                descriptor.usage = [.renderTarget, .shaderRead]
+                descriptor.storageMode = .shared
+                guard let texture = device.makeTexture(descriptor: descriptor) else {
+                    t.expect(false, desc: "the first-frame probe has a render target")
+                    return
+                }
+                t.expect(surface.renderImmediatelyForTesting(into: texture, contentScale: 1), desc: "the initial grid frame encodes")
+                let input = Data("\u{1b}[H\u{1b}]7404;w=24:h=2;{\\rtf1{\\fonttbl{\\f0 Helvetica Neue;}}\\f0 named text}\u{1b}\\".utf8)
+                let began = ProcessInfo.processInfo.systemUptime
+                surface.feed(input)
+                let fed = ProcessInfo.processInfo.systemUptime
+                let encoded = surface.renderImmediatelyForTesting(into: texture, contentScale: 1)
+                let finished = ProcessInfo.processInfo.systemUptime
+                print(
+                    "rich-text-first-frame-ms feed=\((fed - began) * 1000) render=\((finished - fed) * 1000) total=\((finished - began) * 1000)"
+                )
+                t.expect((surface.drive.withTerminal { !$0.richTextBlocks.isEmpty() }) == true, desc: "the named block is placed")
+                t.expect(encoded, desc: "the first named block frame encodes")
+                t.expect(
+                    surface.frameRenderers.values.contains { $0.richTextStore.rasterCount > 0 },
+                    desc: "the named block has a raster"
+                )
+            }
+        }
+        UBUITestRegister("swift_shell_rich_text_catalog_ready_redraws_once") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                RichTextFontCatalogCache.shared.invalidate()
+                guard let shell = TerminalWindowController.spawn(),
+                    let window = shell.window,
+                    let content = window.contentView,
+                    let surface = terminalSurface(under: content),
+                    let device = MTLCreateSystemDefaultDevice()
+                else {
+                    t.expect(false, desc: "a Swift-shell surface and Metal device are ready")
+                    return
+                }
+                defer { window.close() }
+                t.pump(0.2)
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .bgra8Unorm,
+                    width: 640,
+                    height: 480,
+                    mipmapped: false
+                )
+                descriptor.usage = [.renderTarget, .shaderRead]
+                descriptor.storageMode = .shared
+                guard let texture = device.makeTexture(descriptor: descriptor) else {
+                    t.expect(false, desc: "the redraw probe has a render target")
+                    return
+                }
+                t.expect(surface.renderImmediatelyForTesting(into: texture, contentScale: 1), desc: "the initial grid frame encodes")
+                surface.feed(Data("\u{1b}[H\u{1b}]7404;w=24:h=2;{\\rtf1{\\fonttbl{\\f0 Helvetica Neue;}}\\f0 named text}\u{1b}\\".utf8))
+                t.expect(surface.renderImmediatelyForTesting(into: texture, contentScale: 1), desc: "the fallback block frame encodes")
+                let firstRasters = surface.frameRenderers.values.reduce(0) { $0 + $1.richTextStore.rasterCount }
+                let firstEpoch = surface.drive.withTerminal { $0.typography.epoch } ?? 0
+                t.expect(firstRasters == 1, desc: "the fallback block has one raster (\(firstRasters))")
+                let redrawn = t.wait(
+                    until: {
+                        let epoch = surface.drive.withTerminal { $0.typography.epoch } ?? 0
+                        let rasters = surface.frameRenderers.values.reduce(0) { $0 + $1.richTextStore.rasterCount }
+                        return epoch == firstEpoch + 1 && rasters > firstRasters
+                    },
+                    timeout: 5
+                )
+                t.expect(redrawn, desc: "catalog readiness replaces the fallback raster once")
+                t.pump(0.3)
+                let finalEpoch = surface.drive.withTerminal { $0.typography.epoch } ?? 0
+                t.expect(finalEpoch == firstEpoch + 1, desc: "catalog readiness does not invalidate layout again (\(finalEpoch))")
+            }
+        }
         UBUITestRegister("swift_shell_rich_text_paragraph_takes_its_indents_and_spacing") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {

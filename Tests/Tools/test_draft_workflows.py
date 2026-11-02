@@ -290,7 +290,7 @@ class DraftWorkflowTests(unittest.TestCase):
     def test_non_pr_triggers_and_existing_concurrency_semantics_are_preserved(self):
         ci = self.workflows["ci.yml"]
         self.assertEqual(set(ci.events), {"pull_request", "push", "schedule", "workflow_dispatch"})
-        self.assertIn('cron: "13,43 * * * *"', ci.events["schedule"])
+        self.assertIn('cron: "13 5 * * *"', ci.events["schedule"])
         self.assertNotEqual(ci.group(context(event="schedule")), ci.group(context(event="push")))
         self.assertEqual(ci.group(context(event="workflow_dispatch")), ci.group(context(event="push")))
         self.assertTrue(ci.cancels(context(event="push")))

@@ -5043,6 +5043,34 @@ public:
         Rendering::invalidateRetainedFrame(terminal, m_retainedBaseline);
     }
 
+    /// Replaces fallback rich-text pixels once the frontend's font inventory is ready.
+    /// The generation is a frontend fact; Core owns the layout and frame damage.
+    [[nodiscard]] bool fontCatalogBecameReady(std::uint64_t generation, std::uint64_t rendererRevision)
+    {
+        std::optional<RichText::TypographyFacts> facts;
+        bool hasBlocks = false;
+        {
+            const std::scoped_lock hold(*m_activeLock);
+            if (!generation || generation <= m_fontCatalogGeneration || !rendererRevision)
+                return false;
+            m_fontCatalogGeneration = generation;
+            if (!m_typography)
+                return false;
+            facts = *m_typography;
+            facts->rendererRevision = rendererRevision;
+            if (const auto* terminal = modelTerm())
+                hasBlocks = !terminal->richTextBlocks.isEmpty();
+        }
+        if (!publishTypography(*facts))
+            return false;
+        if (!hasBlocks)
+            return false;
+        const std::scoped_lock hold(*m_activeLock);
+        if (auto* terminal = modelTerm())
+            Rendering::invalidateRetainedFrame(*terminal, m_retainedBaseline);
+        return true;
+    }
+
     /// Retunes the sync-publish throttle to the live presentation rate: a
     /// boundary inside the throttle window publishes no capture, so the window
     /// must be shorter than the link's frame.
@@ -9458,6 +9486,7 @@ private:
     CallbackTextMeasureClient m_textMeasurer;
     RichText::Shaper m_richTextShaper;
     RichText::FontCatalogProvider m_fontCatalogProvider;
+    std::uint64_t m_fontCatalogGeneration = 0;
 
     /// Tells a remote pane's host the faces this frontend's measurer sets
     /// proportional runs in, so the host answers the pane's programs in the

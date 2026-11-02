@@ -205,7 +205,10 @@ python3 Scripts/test-ci-batteries.py --workflow .github/workflows/ci.yml'''),
             # thread, the drain signal's hop back to main, and the sync-frame
             # boundary — the pipeline legs a direct-feed test never crosses.
             Stage("macos-smokes", "macOS headless smokes", "python3 Scripts/check-macos-smokes.py"),
-            Stage("ui-scenarios", "macOS UI scenarios", "python3 Scripts/check-ui-scenarios.py"),
+            # A hosted runner is a virtual Mac whose window server, display
+            # timing and GPU differ from the machines the scenarios assert
+            # about; the maintainers' Macs run them for every batch.
+            Stage("ui-scenarios", "macOS UI scenarios", "python3 Scripts/check-ui-scenarios.py", "ui"),
             Stage("pgo", "Portable PGO profile",
                   "python3 ./Scripts/check-profile-orphans.py --profile Support/pgo/portable-core.profdata\n"
                   "UBIQUITTY_PGO=REQUIRE python3 ./Scripts/check-pgo-applies.py --profile Support/pgo/portable-core.profdata"),
@@ -232,6 +235,8 @@ def condition_reason(stage, environment, which=shutil.which):
             environment.get("UBQ_CI_CODE", "true") != "true"
             or environment.get("UBQ_CI_CMAKE", "true") != "true"):
         return "change does not reach the build configuration"
+    if stage.condition == "ui" and environment.get("UBQ_CI_UI_SCENARIOS", "true") != "true":
+        return "UI scenarios run by hand on a hosted runner; the maintainers' Macs run them per batch"
     if stage.condition == "xvfb" and not which("xvfb-run", path=environment.get("PATH")):
         return "UNGATED: xvfb-run is unavailable; the display capability was not exercised"
     return ""

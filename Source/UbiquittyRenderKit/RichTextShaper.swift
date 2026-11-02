@@ -251,19 +251,26 @@ package final class RichTextShaper: @unchecked Sendable {
         _ query: Ubiquitty.RichText.FontCatalogQuery,
         into result: inout Ubiquitty.RichText.FontCatalogPage
     ) -> Bool {
-        let catalog = faces.catalog
+        guard let catalog = faces.catalog else {
+            result.status = .Stale
+            result.scope = .System
+            result.offset = query.offset
+            result.rendererRevision = query.rendererRevision
+            return true
+        }
+        let families = faces.familyNames(in: catalog)
         result.scope = .System
         result.offset = query.offset
         result.rendererRevision = query.rendererRevision
-        guard Int(query.offset) <= catalog.families.count else {
+        guard Int(query.offset) <= families.count else {
             result.status = .Invalid
             return true
         }
         result.status = .Ready
-        result.total = UInt32(catalog.families.count)
+        result.total = UInt32(families.count)
         let start = Int(query.offset)
-        let end = min(start + Int(query.count), catalog.families.count)
-        for family in catalog.families[start..<end] where !result.appendFamily(std.string(family)) {
+        let end = min(start + Int(query.count), families.count)
+        for family in families[start..<end] where !result.appendFamily(std.string(family)) {
             break
         }
         return true

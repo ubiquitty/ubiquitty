@@ -110,6 +110,7 @@ package final class RichTextStore {
     /// - Returns: The layer, or nil when the frame shows no block.
     package func layer(for capture: Ubiquitty.Rendering.FrameCapture) -> RichTextLayer? {
         let quads = capture.richTextQuads()
+        if !quads.isEmpty { faces.prepareCatalog() }
         for key in entries.keys {
             entries[key]?.isSeenThisFrame = false
         }

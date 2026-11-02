@@ -125,6 +125,7 @@
 //   --smoke-atlas-capacity  that the glyph atlas is cut for the screen it serves
 //   --smoke-coverage-sheet  that a partial sheet upload leaves the sheet holding the mirror
 //   --smoke-readback-memory that the frame is read back from cached memory
+//   --smoke-dmabuf-import-failure that a refused import reads back this and later frames
 //   --smoke-oversized-grid  that a page past the device's largest frame is declined,
 //                         not failed, and the next grid that fits draws on the GPU
 //   --smoke-clear         Ctrl+Shift+K clear-buffer: assert the screen wipes
@@ -9903,6 +9904,78 @@ int smokeOversizedGrid()
     return ok ? 0 : 1;
 }
 
+int smokeDmabufImportFailure()
+{
+    bool didPass = true;
+    const auto check = [&](bool didHold, std::string_view reason) {
+        if (!didHold) {
+            Ubiquitty::PAL::logLine(stderr, "smoke-dmabuf-import-failure: FAIL: {}", reason);
+            didPass = false;
+        }
+    };
+    setupFonts();
+    activePane()->session->start(4, 16);
+    Ubiquitty::Terminal* term = activePane()->session->terminal();
+    if (!term) {
+        g_printerr("smoke-dmabuf-import-failure: FAIL: no terminal\n");
+        return 1;
+    }
+    Ubiquitty::Rendering::UnifontRasterizer rasterizer(1);
+    app().rasterContext.setGlyphRasterizer(rasterizer);
+    app().rasterContext.resetSoftwareRenderer();
+    for (const int refusalIndex : { 1, 2, 3 }) {
+        Ubiquitty::processBytes(term, "\x1b[?25l\x1b[2J\x1b[H\x1b[31mImport fallback");
+        Ubiquitty::Linux::VulkanRenderer renderer;
+        renderer.setGlyphRasterizer(rasterizer);
+        if (!renderer.init() || !renderer.canExportFrames()) {
+            renderer.shutdown();
+            g_print("smoke-dmabuf-import-failure: SKIP (no Vulkan dma-buf exporter)\n");
+            return smokeSkippedExitCode;
+        }
+        struct ImportProbe {
+            int refusalIndex;
+            int calls = 0;
+            bool hasValidBuffer = true;
+        } probe { .refusalIndex = refusalIndex };
+        renderer.setFrameImportProbe([](void* context, int fileDescriptor, std::size_t length) {
+            auto& probe = *static_cast<ImportProbe*>(context);
+            probe.hasValidBuffer &= fileDescriptor >= 0 && length > 0;
+            return ++probe.calls < probe.refusalIndex;
+        },
+            &probe);
+        std::vector<std::uint8_t> reference;
+        int referenceWidth = 0;
+        int referenceHeight = 0;
+        check(renderer.renderGrid(app().rasterContext, term, reference, referenceWidth, referenceHeight), "baseline readback failed");
+        check(!reference.empty(), "baseline has no pixels");
+        renderer.requestFrameExport();
+        std::vector<std::uint8_t> frame;
+        int width = 0;
+        int height = 0;
+        check(renderer.renderGrid(app().rasterContext, term, frame, width, height), "the refused frame did not draw");
+        check(probe.calls == refusalIndex && probe.hasValidBuffer, "the requested import refusal was not exercised");
+        check(!renderer.canExportFrames(), "export was not disabled after refusal");
+        check(width == referenceWidth && height == referenceHeight && frame == reference, "the refused frame lost its pixels instead of reading back");
+        const auto checkNoExport = [&] {
+            if (const auto exported = renderer.takeExportedFrame()) {
+                check(false, "an export escaped after import refusal");
+                ::close(exported->fileDescriptor);
+                renderer.releaseExportedFrame(exported->releaseToken);
+            }
+        };
+        checkNoExport();
+        Ubiquitty::processBytes(term, "\r\x1b[32mStill drawing!");
+        renderer.requestFrameExport();
+        check(renderer.renderGrid(app().rasterContext, term, frame, width, height), "the following frame did not draw");
+        check(frame.size() == reference.size() && frame != reference, "the following frame did not show changed content");
+        check(probe.calls == refusalIndex, "a later frame retried the refused import");
+        checkNoExport();
+        renderer.shutdown();
+    }
+    Ubiquitty::PAL::logLine(stdout, "smoke-dmabuf-import-failure: {} (refusal at each ring slot, same-frame readback, subsequent rendering)", didPass ? "PASS" : "FAIL");
+    return didPass ? 0 : 1;
+}
+
 // A mixed grid/proportional frame through the dedicated Vulkan sheet. The
 // instance count proves the per-glyph route was taken; byte equality against
 // the software renderer proves its placement, phase, and coverage agree.
@@ -16024,6 +16097,8 @@ int main(int argc, char** argv)
         return smokeCoverageSheet();
     if (mode == "--smoke-readback-memory")
         return smokeReadbackMemory();
+    if (mode == "--smoke-dmabuf-import-failure")
+        return smokeDmabufImportFailure();
     if (mode == "--smoke-oversized-grid")
         return smokeOversizedGrid();
     if (mode == "--smoke-clear")

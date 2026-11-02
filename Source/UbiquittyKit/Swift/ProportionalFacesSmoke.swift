@@ -46,13 +46,35 @@ enum ProportionalFacesSmoke {
         guard LigatureSheet.namedProportionalFace(installed.family, pointSize: 13) != nil else {
             return failed("\(installed.family) is not installed, so the smoke would prove nothing")
         }
+        let heldCache = RichTextFontCatalogCache(build: {
+            Thread.sleep(forTimeInterval: 0.5)
+            return RichTextFontCatalog()
+        })
+        let heldFaces = RichTextFaces(grid: grid, proportionalFamilyName: "", catalogCache: heldCache)
+        let lookupStart = ProcessInfo.processInfo.systemUptime
+        let heldFace = heldFaces.font(.Monospace, familyName: installed.family, isBold: false, isItalic: false, size: 13)
+        let lookupSeconds = ProcessInfo.processInfo.systemUptime - lookupStart
+        if lookupSeconds > 0.25
+            || postScriptName(heldFace) != postScriptName(heldFaces.font(.Monospace, isBold: false, isItalic: false, size: 13))
+        {
+            return failed("a held inventory blocked the caller or did not return its class fallback")
+        }
+        var heldQuery = Ubiquitty.RichText.FontCatalogQuery()
+        heldQuery.rendererRevision = 1
+        var heldPage = Ubiquitty.RichText.FontCatalogPage()
+        let queryStart = ProcessInfo.processInfo.systemUptime
+        let didQuery = RichTextShaper(faces: heldFaces).queryFonts(heldQuery, into: &heldPage)
+        if !didQuery || heldPage.status != .Stale || ProcessInfo.processInfo.systemUptime - queryStart > 0.25 {
+            return failed("a held inventory blocked a catalog query or returned an incomplete page")
+        }
+        let smokeCache = RichTextFontCatalogCache()
         var findings: [String] = []
         let styles: [(Ubiquitty.Rendering.FontFace, String)] = [
             (.Regular, "regular"), (.Bold, "bold"), (.Italic, "italic"), (.BoldItalic, "bold italic"),
         ]
         for family in ["", installed.family] {
             let request = LigatureSheet.ProportionalFaceRequest(familyName: family)
-            let richText = RichTextFaces(grid: grid, proportionalFamilyName: family)
+            let richText = RichTextFaces(grid: grid, proportionalFamilyName: family, catalogCache: smokeCache)
             let label = family.isEmpty ? "the UI face" : family
             for (index, style) in styles.enumerated() {
                 let isBold = index & 1 != 0
@@ -76,7 +98,7 @@ enum ProportionalFacesSmoke {
                 findings.append("class-only faces built the system font catalog")
             }
         }
-        let namedFaces = RichTextFaces(grid: grid, proportionalFamilyName: "")
+        let namedFaces = RichTextFaces(grid: grid, proportionalFamilyName: "", catalogCache: smokeCache)
         if namedFaces.hasBuiltCatalog {
             findings.append("unused named faces built the system font catalog")
         }
@@ -84,6 +106,14 @@ enum ProportionalFacesSmoke {
         entry.familyClass = .Monospace
         entry.nameLength = UInt8(installed.family.utf8.count)
         for (index, byte) in installed.family.utf8.enumerated() { entry.name[index] = CChar(bitPattern: byte) }
+        namedFaces.prepareCatalog()
+        let readyDeadline = ProcessInfo.processInfo.systemUptime + 10
+        while !smokeCache.hasBuiltSnapshot && ProcessInfo.processInfo.systemUptime < readyDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        if !smokeCache.hasBuiltSnapshot {
+            findings.append("background font inventory did not publish")
+        }
         for (index, style) in styles.enumerated() {
             let named = namedFaces.font(
                 .Monospace,

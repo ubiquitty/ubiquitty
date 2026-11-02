@@ -132,7 +132,7 @@ class BatteryTests(unittest.TestCase):
             self.assertEqual(sum(stage.key == "setup" for stage in manifest), 1)
             for stage in manifest:
                 with self.subTest(platform=platform, stage=stage.key):
-                    self.assertIn(stage.condition, ("always", "code", "cmake", "xvfb"))
+                    self.assertIn(stage.condition, ("always", "code", "cmake", "xvfb", "ui"))
                     self.assertIn(stage.toolchain, ("native", "gcc", "clang", "wasm"))
                     for script in re.findall(r"(?:\./)?(?:Scripts|Tests)/[A-Za-z0-9_./-]+\.(?:py|sh)", stage.command):
                         self.assertTrue((batteries.ROOT / script).is_file(), script)
@@ -196,6 +196,16 @@ class BatteryTests(unittest.TestCase):
         self.assertFalse(batteries.condition_reason(stage, {"UBQ_CI_CODE": "true", "UBQ_CI_CMAKE": "true"}))
         for code, cmake in (("false", "true"), ("true", "false"), ("false", "false")):
             self.assertTrue(batteries.condition_reason(stage, {"UBQ_CI_CODE": code, "UBQ_CI_CMAKE": cmake}))
+
+    def test_ui_scenarios_run_unless_a_hosted_run_opts_out(self):
+        stage = next(stage for stage in batteries.stages("apple") if stage.key == "ui-scenarios")
+        self.assertFalse(batteries.condition_reason(stage, {}))
+        self.assertFalse(batteries.condition_reason(stage, {"UBQ_CI_UI_SCENARIOS": "true"}))
+        reason = batteries.condition_reason(stage, {"UBQ_CI_UI_SCENARIOS": "false"})
+        self.assertTrue(reason)
+        # A policy exclusion, not a missing capability: the run can still be
+        # the full checkpoint later pushes measure their reach from.
+        self.assertFalse(reason.startswith("UNGATED:"))
 
     def test_xvfb_absence_is_explicitly_ungated(self):
         for stage in batteries.stages("linux"):

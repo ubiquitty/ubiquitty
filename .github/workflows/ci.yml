@@ -11,8 +11,14 @@ concurrency:
 
 on:
   workflow_dispatch:
+    inputs:
+      ui_scenarios:
+        description: "Also run the macOS UI scenarios on the hosted runner"
+        type: boolean
+        default: false
+  # Once a day: a sweep stands down when main's tip already has a verdict.
   schedule:
-    - cron: "13,43 * * * *"
+    - cron: "13 5 * * *"
   push:
     branches: [main]
   pull_request:
@@ -216,6 +222,9 @@ jobs:
       UBQ_CI_CODE: ${{ needs.preflight.outputs.code }}
       UBQ_CI_CMAKE: ${{ needs.preflight.outputs.cmake }}
       UBQ_CI_PREFLIGHT_COMPLETE: "1"
+      # The UI scenarios run on the maintainers' Macs for every batch, and
+      # here only when a run by hand asks for them.
+      UBQ_CI_UI_SCENARIOS: ${{ github.event_name == 'workflow_dispatch' && inputs.ui_scenarios && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

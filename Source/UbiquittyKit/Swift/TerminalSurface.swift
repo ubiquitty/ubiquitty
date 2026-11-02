@@ -1966,6 +1966,7 @@ public final class TerminalSurface: PlatformView {
     // scope. The list is still the surface's — nothing outside this module sees it.
     internal var windowObservers: [NSObjectProtocol] = []
     private var registeredFontsObserver: NSObjectProtocol?
+    private var richTextCatalogObserver: NSObjectProtocol?
 
     /// The same, for the edges NSWorkspace posts on its own notification
     /// centre. Held apart because an observer is removed from the centre it
@@ -2540,6 +2541,20 @@ public final class TerminalSurface: PlatformView {
                 self.needsDisplay = true
             }
         }
+        richTextCatalogObserver = NotificationCenter.default.addObserver(
+            forName: RichTextFontCatalogCache.readyNotification,
+            object: RichTextFontCatalogCache.shared,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, RichTextFontCatalogCache.shared.hasBuiltSnapshot else { return }
+                let generation = RichTextFontCatalogCache.shared.generation
+                let revision = self.proportionalMeasure.refreshRichTextRevision()
+                let shouldRedraw = self.drive.fontCatalogBecameReady(generation, revision)
+                guard shouldRedraw else { return }
+                self.needsDisplay = true
+            }
+        }
         // The configured caret, before anything can present. A terminal built
         // without this carries the construction defaults — a blinking block —
         // whatever `[cursor]` asks for, and the blink alone repaints eight
@@ -2695,6 +2710,9 @@ public final class TerminalSurface: PlatformView {
             }
             if let registeredFontsObserver {
                 NotificationCenter.default.removeObserver(registeredFontsObserver)
+            }
+            if let richTextCatalogObserver {
+                NotificationCenter.default.removeObserver(richTextCatalogObserver)
             }
             #if canImport(AppKit)
             // Off the centre they were added to; see `workspaceObservers`.
@@ -5883,6 +5901,16 @@ package final class ProportionalMeasureBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         richTextShaper = shaper
+        richTextRevision &+= 1
+        if richTextRevision == 0 { richTextRevision = 1 }
+        return richTextRevision
+    }
+
+    /// Gives Core a new renderer identity when the shared face inventory lands.
+    package func refreshRichTextRevision() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard richTextShaper != nil else { return 0 }
         richTextRevision &+= 1
         if richTextRevision == 0 { richTextRevision = 1 }
         return richTextRevision
