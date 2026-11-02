@@ -1584,7 +1584,11 @@ enum RemoteWorkspaceScenarios {
             t.pump(0.2)
             t.expect(titlebarWash(of: detached) != nil, desc: "the selected hosted tab has a themed titlebar band")
             detached.moveTabToNewWindow(nil)
-            t.expect((detached.tabGroup?.windows.count ?? 1) == 1, desc: "AppKit has detached the hosted tab before extraction")
+            guard t.wait(until: { (detached.tabGroup?.windows.count ?? 1) == 1 }, timeout: 3) else {
+                t.expect(false, desc: "AppKit has detached the hosted tab before extraction")
+                return
+            }
+            t.pump(0.1)
             t.expect(
                 titlebarWash(of: detached) != nil,
                 desc: "the native tear-off keeps the themed titlebar band before host reconciliation"
