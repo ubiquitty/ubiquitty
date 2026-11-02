@@ -18,6 +18,9 @@ namespace Ubiquitty::Unicode {
 // same on both, so a build with the fast path compiled out agrees with itself
 // and reads as a passing comparison.
 std::uint64_t simdRunCountForTest = 0;
+// Every byte a run decode has consumed, on either path, so a caller can be held
+// to decoding its input once.
+std::uint64_t decodedBytesForTest = 0;
 #endif
 
 // End of the leading non-ASCII span: index of the first byte < 0x80, or
@@ -227,6 +230,7 @@ int utf8DecodeRun(std::span<const char> input, std::span<std::uint32_t> out, int
                 if (nc > 0) {
 #if UBIQUITTY_ENABLE_TEST_HOOKS
                     ++simdRunCountForTest;
+                    decodedBytesForTest += static_cast<std::uint64_t>(mb);
 #endif
                     *bytesConsumed = mb;
                     return static_cast<int>(nc);
@@ -319,6 +323,9 @@ int utf8DecodeRun(std::span<const char> input, std::span<std::uint32_t> out, int
         p += 1 + need;
 #endif
     }
+#if UBIQUITTY_ENABLE_TEST_HOOKS
+    decodedBytesForTest += static_cast<std::uint64_t>(p);
+#endif
     *bytesConsumed = p;
     return n;
 }

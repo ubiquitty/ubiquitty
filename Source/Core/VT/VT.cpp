@@ -5791,7 +5791,37 @@ static inline bool shouldRouteUTF8LeadToClusterRun(Ubiquitty::Terminal& t, const
     return (firstClass & Ubiquitty::Unicode::detail::propGraphemeRelevantMask) != 0;
 }
 
-template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, const char* buffer, int start, int length)
+/// The fewest bytes a batched text run is allowed to decode.
+constexpr int textRunMinimumDecodeBytes = 24;
+
+/// A decode budget that never ends a run's decode before the row does.
+constexpr int textRunUnlimitedDecodeBytes = 1 << 28;
+
+/// The bytes the next batched text run may decode, after a run that placed
+/// `placedBytes` of the `decodedBytes` it decoded.
+///
+/// A run stops placing at the first code point the cluster path owns, and the
+/// next run decodes again from there. A run that left more of its decode
+/// unplaced than it placed, and more than the minimum, leaves the next one
+/// twice what it placed; any other run doubles the budget, up to no limit. Text
+/// without stops therefore decodes whole rows, text dense with them decodes
+/// little beyond each stop, and a lone code point a run cannot place does not
+/// shrink the budget.
+///
+/// - Parameters:
+///   - budget: The budget the run decoded under.
+///   - placedBytes: The bytes it placed.
+///   - decodedBytes: The bytes it decoded.
+/// - Returns: The budget for the next run.
+static inline int nextTextRunDecodeBudget(int budget, int placedBytes, int decodedBytes)
+{
+    const int unplacedBytes = decodedBytes - placedBytes;
+    if (unplacedBytes > std::max(placedBytes, textRunMinimumDecodeBytes))
+        return std::max(textRunMinimumDecodeBytes, 2 * placedBytes);
+    return std::min(textRunUnlimitedDecodeBytes, 2 * budget);
+}
+
+template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, const char* buffer, int start, int length, int& decodeBudget)
 {
     Ubiquitty::Screen::State* s = t.screens.active;
     if (!textFastPathEligible(t, s))
@@ -5840,7 +5870,10 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
     std::array<std::uint32_t, Ubiquitty::maxColumns> codePoints;
     const int codePointCapacity = std::min<int>(static_cast<int>(std::size(codePoints)), writableColumns);
     int nDec = 0;
+    int decodedEnd = start;
     {
+        // The decode ends at the budget; bytes past it wait for the next run.
+        const int decodeLimit = decodeBudget < length - start ? start + decodeBudget : length;
         // A word break is one ASCII byte, and stopping the decode there hands
         // every gap to the per-glyph path and restarts the run on the far side.
         // An ASCII gap between two multibyte stretches belongs in the same run;
@@ -5849,7 +5882,7 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
         // character set to US-ASCII, which is what lets a byte here be its own
         // code point rather than a designation to resolve.
         int offset = start;
-        while (nDec < codePointCapacity && offset < length) {
+        while (nDec < codePointCapacity && offset < decodeLimit) {
             const unsigned char lead = static_cast<unsigned char>(buffer[offset]);
             if (lead >= 0x20 && lead < 0x7F) {
                 // The gap absorbed here is a word BREAK, not ASCII content. An
@@ -5858,14 +5891,14 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
                 // stages — taking it costs eight times the write traffic for
                 // those columns. So only blanks are crossed, and only a few.
                 constexpr int maxAbsorbedGap = 4;
-                const int gapLimit = offset + maxAbsorbedGap < length ? offset + maxAbsorbedGap : length;
+                const int gapLimit = offset + maxAbsorbedGap < decodeLimit ? offset + maxAbsorbedGap : decodeLimit;
                 int gapEnd = offset;
                 while (gapEnd < gapLimit && nDec + (gapEnd - offset) < codePointCapacity) {
                     if (buffer[gapEnd] != ' ')
                         break;
                     ++gapEnd;
                 }
-                if (gapEnd >= length || static_cast<unsigned char>(buffer[gapEnd]) < 0xC2)
+                if (gapEnd >= decodeLimit || static_cast<unsigned char>(buffer[gapEnd]) < 0xC2)
                     break; // nothing multibyte follows: the tail is the ASCII run's
                 for (int gapIndex = offset; gapIndex < gapEnd; ++gapIndex)
                     codePoints[nDec++] = static_cast<unsigned char>(buffer[gapIndex]);
@@ -5876,7 +5909,7 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
                 break;
             int runBytes = 0;
             const int decoded = Ubiquitty::Unicode::utf8DecodeRun(
-                std::span { buffer + offset, static_cast<std::size_t>(length - offset) },
+                std::span { buffer + offset, static_cast<std::size_t>(decodeLimit - offset) },
                 std::span { codePoints.data() + nDec, static_cast<std::size_t>(codePointCapacity - nDec) }, &runBytes);
             if (decoded <= 0)
                 break;
@@ -5888,6 +5921,23 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
             if (nDec >= (writableColumns + 1) / 2 && isWideIdeographFast(codePoints[0]))
                 break;
         }
+        // A pictograph is placed only beside the code point after it, so a
+        // decode the budget ends on one reaches one code point further.
+        if (offset == decodeLimit && offset < length && nDec > 0 && nDec < codePointCapacity
+            && static_cast<unsigned char>(buffer[offset]) >= 0xC2
+            && (Ubiquitty::Unicode::graphemeBreakRawByte(codePoints[nDec - 1])
+                   & (Ubiquitty::Unicode::detail::PropEmojiPresentationField::mask | Ubiquitty::Unicode::detail::PropExtPictField::mask))
+                != 0) {
+            int runBytes = 0;
+            const int decoded = Ubiquitty::Unicode::utf8DecodeRun(
+                std::span { buffer + offset, static_cast<std::size_t>(length - offset) },
+                std::span { codePoints.data() + nDec, std::size_t { 1 } }, &runBytes);
+            if (decoded > 0) {
+                nDec += decoded;
+                offset += runBytes;
+            }
+        }
+        decodedEnd = offset;
     }
     // A live cluster + grapheme-relevant first code point means it could EXTEND
     // the open cluster: hand it to emitCharacter via emitClusterRun. A plain base can't
@@ -5899,8 +5949,10 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
         // alone turns a stream of them back into per-glyph emits. The probe
         // copies the live state because the answer must not advance it.
         Ubiquitty::Unicode::GraphemeState probe = t.parser.clusterState;
-        if (Ubiquitty::Unicode::graphemeExtends(&probe, t.parser.clusterLast, codePoints[0]))
+        if (Ubiquitty::Unicode::graphemeExtends(&probe, t.parser.clusterLast, codePoints[0])) {
+            decodeBudget = nextTextRunDecodeBudget(decodeBudget, 0, decodedEnd - start);
             return 0;
+        }
     }
     int wideCodePointCount = 0;
     const int maxWideCodePoints = std::min(nDec, writableColumns / 2);
@@ -6038,14 +6090,18 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
         currentColumn = glyphEndColumn + 1;
     }
 
-    if (nCells == 0)
+    if (nCells == 0) {
+        decodeBudget = nextTextRunDecodeBudget(decodeBudget, 0, decodedEnd - start);
         return 0;
+    }
 
     if (graphicCaptureBefore<Capture>(buffer, p, length) == GraphicCapture::Retain) {
         const int lastWidth = nCells - (lastLeadColumn - column);
         nCells -= lastWidth;
-        if (nCells == 0)
+        if (nCells == 0) {
+            decodeBudget = nextTextRunDecodeBudget(decodeBudget, 0, decodedEnd - start);
             return 0;
+        }
         p -= lastCodePoint < 0x80 ? 1 : lastCodePoint < 0x800 ? 2
             : lastCodePoint < 0x10000                         ? 3
                                                               : 4;
@@ -6101,6 +6157,7 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
     // A combining mark / VS / ZWJ arriving next attaches to the run's last glyph.
     t.parser.precedingItem.setGraphic(lastCodePoint, lastCodePoint, 0);
     clusterOpen(t, row, lastLeadColumn, lastCodePoint);
+    decodeBudget = nextTextRunDecodeBudget(decodeBudget, p - start, decodedEnd - start);
     return p - start;
 }
 
@@ -6591,6 +6648,7 @@ template<bool StopAtSyncClear, VT::GraphicCapture Capture> static int processByt
         // sync clear (replies only grow through a dispatch), sharing the
         // sites' break-out plumbing. Folds away when !StopAtSyncClear.
         [[maybe_unused]] bool didHitReplyPressure = false;
+        int textRunDecodeBudget = VT::textRunUnlimitedDecodeBytes;
         while (i < length) {
             if (t.printMode == 5) [[unlikely]] {
                 const auto consumed = VT::consumePrinterBytes(t, input.subspan(static_cast<std::size_t>(i)));
@@ -6713,7 +6771,7 @@ template<bool StopAtSyncClear, VT::GraphicCapture Capture> static int processByt
                                 if (VT::shouldPeekClusterLead(buffer, i, length) && VT::shouldRouteUTF8LeadToClusterRun(t, buffer, i, length))
                                     consumed = VT::emitClusterRun<Capture>(t, buffer, i, length); // emoji/combining
                                 if (consumed == 0) {
-                                    consumed = VT::emitTextRun<Capture>(t, buffer, i, length);
+                                    consumed = VT::emitTextRun<Capture>(t, buffer, i, length, textRunDecodeBudget);
                                     if (consumed == 0)
                                         consumed = VT::emitClusterRun<Capture>(t, buffer, i, length); // emoji/combining
                                 }

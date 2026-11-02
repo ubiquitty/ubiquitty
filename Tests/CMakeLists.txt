@@ -557,6 +557,12 @@ set(test_utf8_simd_parity_EXTRA_DEFINES UBIQUITTY_ENABLE_TEST_HOOKS=1)
 set(test_utf8_simd_parity_EXTRA_SOURCES Source/Core/Unicode/UTF8Decoder.cpp
                                         Source/ThirdParty/simdutf/simdutf.cpp)
 set(test_utf8_simd_parity_EXTRA_INCLUDES ${CMAKE_SOURCE_DIR}/Source/ThirdParty/simdutf)
+# Counts the bytes every run decode consumes while the parser places text, so
+# the decoder is compiled here with its hooks rather than taken from Core.
+set(test_text_run_decode_once_EXTRA_DEFINES UBIQUITTY_ENABLE_TEST_HOOKS=1)
+set(test_text_run_decode_once_EXTRA_SOURCES Source/Core/Unicode/UTF8Decoder.cpp
+                                            Source/ThirdParty/simdutf/simdutf.cpp)
+set(test_text_run_decode_once_EXTRA_INCLUDES ${CMAKE_SOURCE_DIR}/Source/ThirdParty/simdutf)
 # Same suppression the agent target gives it: a vendored TU must not fail the
 # build on a compiler bump under -Werror, and -std=c99 keeps the C++ options off
 # a C source.

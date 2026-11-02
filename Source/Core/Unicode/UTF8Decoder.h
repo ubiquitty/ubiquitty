@@ -96,6 +96,12 @@ int utf8DecodeRun(std::span<const char> in, std::span<std::uint32_t> out, int* b
 /// Zero in a build without it, so a parity case can tell "the two paths agree"
 /// from "there is only one path here".
 extern std::uint64_t simdRunCountForTest;
+
+/// How many bytes run decodes have consumed, on either path.
+///
+/// A batched writer that decodes ahead of what it places can be held to
+/// decoding each byte once by comparing this with the bytes it was given.
+extern std::uint64_t decodedBytesForTest;
 #endif
 
 } // namespace Ubiquitty::Unicode
