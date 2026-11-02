@@ -156,8 +156,13 @@ question would apply none of the effects it holds.
 
 ## Input and program output
 
-`Daemon::stampInputOrigin` records the input driver, its origin, and
-`grantKeyFor(client)` on the session's policy. Input is encoded against the
+`Daemon::stampInputOrigin` records the input driver and its origin. For a
+remote human, it records the host-minted attachment identity as the input
+principal. An authenticated resume keeps that identity; another attachment
+is a second input principal, even when both arrive through the same SSH
+bridge or token grant. A local agent retains its grant key as its input
+principal. The session's capability policy separately receives
+`grantKeyFor(client)` for consent decisions. Input is encoded against the
 host's current terminal modes.
 
 Before parsing PTY output, `Daemon::servicePTY` uses the most restrictive

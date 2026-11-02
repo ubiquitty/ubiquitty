@@ -17,6 +17,7 @@
 
 #include "Core/Crypto/SHA256.h"
 #include "Core/Protocol/Local/Clipboard.h"
+#include "Core/Protocol/Sync/IDText.h"
 #include "Core/Protocol/Sync/NativeAttachment.h"
 #include "Core/Terminal.h"
 #include "Core/TerminalOperations.h"
@@ -83,6 +84,13 @@ struct PastePushAccess {
     }
 
     static std::string grantKey(const Daemon& d, std::size_t index) { return d.grantKeyFor(d.m_clients[index]); }
+    static std::string inputPrincipal(const Daemon& d, std::size_t index)
+    {
+        const auto* attachment = d.m_clients[index].syncConnection->attachment();
+        if (!attachment)
+            std::abort();
+        return "attachment:" + Protocol::Sync::formatID128(attachment->attachmentID);
+    }
 
     static std::optional<std::string> firstInputPrincipal(const Daemon& d, std::uint32_t sessionID)
     {
@@ -1233,6 +1241,7 @@ int main()
         const auto secondPrincipal = A::grantKey(daemon, 1);
         check(!firstPrincipal.empty() && !secondPrincipal.empty() && firstPrincipal != secondPrincipal,
             "the admitted paste clients hold different verified principals");
+        const auto firstInputPrincipal = A::inputPrincipal(daemon, 0);
         check(!A::firstInputPrincipal(daemon, 7) && !A::hasMultipleInputPrincipals(daemon, 7),
             "attachment does not record input provenance");
 
@@ -1241,7 +1250,7 @@ int main()
         check(A::lastAck(daemon, 0, 78, first) && first.status == Control::PastePushStatus::Landed,
             "the first principal's upload lands");
         check(!first.path.empty() && stream->written == first.path, "the first paste path reaches the actual PTY");
-        check(A::firstInputPrincipal(daemon, 7) == firstPrincipal && !A::hasMultipleInputPrincipals(daemon, 7),
+        check(A::firstInputPrincipal(daemon, 7) == firstInputPrincipal && !A::hasMultipleInputPrincipals(daemon, 7),
             "the first successful paste records its principal without ambiguity");
 
         A::feedPush(daemon, 0, pngPush(79));
@@ -1250,7 +1259,7 @@ int main()
             "the same principal's repeated upload lands");
         check(!repeated.path.empty() && stream->written == first.path + repeated.path,
             "both same-principal paste paths reach the PTY");
-        check(A::firstInputPrincipal(daemon, 7) == firstPrincipal && !A::hasMultipleInputPrincipals(daemon, 7),
+        check(A::firstInputPrincipal(daemon, 7) == firstInputPrincipal && !A::hasMultipleInputPrincipals(daemon, 7),
             "repeated pastes by the same principal remain unambiguous");
 
         A::feedPush(daemon, 1, pngPush(80));
@@ -1259,7 +1268,7 @@ int main()
             "the other principal's upload lands");
         check(!different.path.empty() && stream->written == first.path + repeated.path + different.path,
             "the different principal's path reaches the same PTY");
-        check(A::firstInputPrincipal(daemon, 7) == firstPrincipal && A::hasMultipleInputPrincipals(daemon, 7),
+        check(A::firstInputPrincipal(daemon, 7) == firstInputPrincipal && A::hasMultipleInputPrincipals(daemon, 7),
             "a successful paste from another principal makes input history ambiguous");
 
         A::feedPush(daemon, 0, pngPush(81));
@@ -1268,7 +1277,7 @@ int main()
             "the first principal can paste again");
         check(!returning.path.empty() && stream->written == first.path + repeated.path + different.path + returning.path,
             "the returning principal's paste also reaches the PTY");
-        check(A::firstInputPrincipal(daemon, 7) == firstPrincipal && A::hasMultipleInputPrincipals(daemon, 7),
+        check(A::firstInputPrincipal(daemon, 7) == firstInputPrincipal && A::hasMultipleInputPrincipals(daemon, 7),
             "later input cannot erase earlier principal ambiguity");
     }
 

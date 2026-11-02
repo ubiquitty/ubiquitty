@@ -32,6 +32,7 @@
 #include "Platform/StreamDouble.h"
 #include "ScopedNothrowAllocationRefusal.h"
 #include "ScreenPlaneAccess.h"
+#include "TrustedLocalPeer.h"
 
 #include "Core/Crypto/SHA256.h"
 #include "Core/Protocol/Control/Consent.h"
@@ -89,7 +90,9 @@ struct ConsentRemoteEffectsAccess {
     // token minting or TLS. No admission/subscription is seeded; the one Greet
     // below must still attach this exact existing session and caller instance.
     static std::size_t addPhone(Daemon& d, std::uint32_t sessionID, PAL::UnixFileDescriptor& peer,
-        Protocol::Sync::ID128 instance, bool servesClipboard = false, std::unique_ptr<Protocol::Sync::ClientConnection>* readerOut = nullptr)
+        Protocol::Sync::ID128 instance, bool servesClipboard = false, // bool-ok: Mirrors Greet's single clipboard-serving fixture choice.
+        std::unique_ptr<Protocol::Sync::ClientConnection>* readerOut = nullptr,
+        std::optional<Protocol::Sync::ResumeRequest> resume = std::nullopt)
     {
         Daemon::Client c {};
         c.clientID = d.m_nextClientID++;
@@ -101,7 +104,7 @@ struct ConsentRemoteEffectsAccess {
         attach(c, peer);
         d.m_clients.push_back(std::move(c));
         const auto index = d.m_clients.size() - 1;
-        greet(d, index, sessionID, instance, Protocol::Sync::ClientKind::Human, servesClipboard, std::nullopt, readerOut);
+        greet(d, index, sessionID, instance, Protocol::Sync::ClientKind::Human, servesClipboard, std::nullopt, readerOut, {}, resume);
         if (readerOut && *readerOut) {
             // The reader reads what its greeting brought, Welcome and PaneBind,
             // and answers with its View, as a client does on that read: the
@@ -150,19 +153,38 @@ struct ConsentRemoteEffectsAccess {
         return index;
     }
     static void depart(Daemon& d, std::size_t index) { d.dropClient(index); }
+    static Protocol::Sync::ResumeRequest resumeRequest(const Daemon& d, std::size_t index)
+    {
+        const auto* attachment = d.m_clients[index].syncConnection->attachment();
+        CHECK(attachment && !attachment->panes.empty());
+        if (!attachment || attachment->panes.empty())
+            std::abort();
+        const auto& pane = *attachment->panes.front();
+        return { .attachmentID = attachment->attachmentID, .resumeSecret = attachment->resumeSecret, .panes = { Protocol::Sync::PaneResume { .paneID = pane.paneID, .effectsAcknowledged = pane.effectsAcknowledged } } };
+    }
+    static Protocol::Sync::ID128 attachmentID(const Daemon& d, std::size_t index)
+    {
+        return d.m_clients[index].syncConnection->attachment()->attachmentID;
+    }
+    static Protocol::Sync::WriteStatus refuseUnprovedInput(Daemon& d, Daemon::Session& session, Protocol::Sync::ID128 attachmentID)
+    {
+        constexpr std::array<std::uint8_t, 1> input { 'x' };
+        return d.writeRemoteInput(session, attachmentID, { 0xbad, 0xbad }, input);
+    }
     // A reader too far behind, which the host drops with a farewell.
     static void dropBehind(Daemon& d, std::size_t index) { d.dropForOutputBacklog(index); }
 
     // A phone whose own policy asks its person about what reaches it, as a
     // client of a host on another machine says in its Greet.
-    static std::size_t addAskingPhone(Daemon& d, std::uint32_t sessionID, PAL::UnixFileDescriptor& peer, Protocol::Sync::ID128 instance)
+    static std::size_t addAskingPhone(Daemon& d, std::uint32_t sessionID, PAL::UnixFileDescriptor& peer,
+        Protocol::Sync::ID128 instance, std::string tokenID = "owner-phone")
     {
         Daemon::Client c {};
         c.clientID = d.m_nextClientID++;
         c.hasToken = true;
         c.hasBootstrapToken = true;
         c.isInteractiveUser = true;
-        c.tokenID = "owner-phone";
+        c.tokenID = std::move(tokenID);
         c.tokenScope = { Protocol::Sync::Scope::Observe, Protocol::Sync::Scope::Drive };
         attach(c, peer);
         d.m_clients.push_back(std::move(c));
@@ -172,6 +194,36 @@ struct ConsentRemoteEffectsAccess {
         greet(d, index, sessionID, instance, Protocol::Sync::ClientKind::Human, false, std::nullopt, nullptr, capabilities);
         CHECK(d.asksAboutHostEffects(d.m_clients[index]));
         return index;
+    }
+
+    static std::size_t addSSHPhone(Daemon& d, std::uint32_t sessionID, PAL::UnixFileDescriptor& peer, Protocol::Sync::ID128 instance)
+    {
+        Daemon::Client c {};
+        c.clientID = d.m_nextClientID++;
+        c.hasOwnerLocalCredentials = true;
+        seedTrustedLocalPeer(c);
+        c.isRelayedFromSSH = true;
+        attach(c, peer);
+        d.m_clients.push_back(std::move(c));
+        const auto index = d.m_clients.size() - 1;
+        Protocol::Sync::ClientCapabilities capabilities;
+        capabilities.add(Protocol::Sync::ClientCapability::AsksAboutHostEffects);
+        greet(d, index, sessionID, instance, Protocol::Sync::ClientKind::Human, false, std::nullopt, nullptr, capabilities);
+        CHECK(d.originOf(d.m_clients[index]) == CapabilityOrigin::Local);
+        CHECK(d.capabilityOriginOf(d.m_clients[index]) == CapabilityOrigin::Remote);
+        return index;
+    }
+
+    static std::size_t addTokenlessAgent(Daemon& d, PAL::UnixFileDescriptor& peer)
+    {
+        Daemon::Client c {};
+        c.clientID = d.m_nextClientID++;
+        c.hasOwnerLocalCredentials = true;
+        c.peerProcess = "/usr/bin/true";
+        c.agentLabel = "tool";
+        attach(c, peer);
+        d.m_clients.push_back(std::move(c));
+        return d.m_clients.size() - 1;
     }
 
     // The configuration the next session is created under.
@@ -236,7 +288,8 @@ struct ConsentRemoteEffectsAccess {
 
     static void greet(Daemon& d, std::size_t index, std::uint32_t sessionID, Protocol::Sync::ID128 instance,
         Protocol::Sync::ClientKind kind, bool servesClipboard, std::optional<std::vector<std::uint8_t>> credential = std::nullopt,
-        std::unique_ptr<Protocol::Sync::ClientConnection>* readerOut = nullptr, Protocol::Sync::ClientCapabilities capabilities = {})
+        std::unique_ptr<Protocol::Sync::ClientConnection>* readerOut = nullptr, Protocol::Sync::ClientCapabilities capabilities = {},
+        std::optional<Protocol::Sync::ResumeRequest> resume = std::nullopt)
     {
         using namespace Protocol::Sync;
         auto* selected = d.findSession(sessionID);
@@ -251,6 +304,7 @@ struct ConsentRemoteEffectsAccess {
         greeting.requestedRole = kind == ClientKind::Agent ? Role::Agent : Role::Driver;
         greeting.request = { .target = AdmissionTarget::Session, .sessionID = sessionID, .expectedDaemonInstanceID = d.m_daemonInstanceID, .agentLabel = kind == ClientKind::Agent ? "build-bot" : "", .isAttachOnly = true, .servesClipboard = servesClipboard };
         greeting.credential = std::move(credential);
+        greeting.resume = std::move(resume);
         greeting.facts = UbiquittyTest::syncDefaultFacts();
         greeting.capabilities = capabilities;
         std::vector<std::uint8_t> body, wire;
@@ -435,6 +489,8 @@ struct ConsentRemoteEffectsAccess {
         daemon.publishFrame(session, Runtime::FrameClass::Settled);
     }
     static std::string grantKey(const Daemon& d, std::size_t index) { return d.grantKeyFor(d.m_clients[index]); }
+    static std::optional<std::string> firstInputPrincipal(const Daemon::Session& session) { return session.firstInputPrincipal; }
+    static CapabilityOrigin inputOrigin(const Daemon::Session& session) { return session.term->currentCapabilityOrigin; }
 
     static void answer(Daemon& d, std::size_t index, std::uint32_t requestID, Protocol::Sync::ConsentChoice decision)
     {
@@ -1230,6 +1286,91 @@ int main()
         }
     }
 
+    // ---- The host's attachment, rather than a token shared by two client
+    // connections, identifies who drove the program. A resumed attachment
+    // keeps its identity; a second attachment makes later output ambiguous.
+    {
+        using namespace Ubiquitty::Protocol::Sync;
+        Ubiquitty::PAL::UnixFileDescriptor phonePeer;
+        Daemon d;
+        A::setSocketPath(d, std::string(directory) + "/socket");
+        StreamDouble* stream = nullptr;
+        auto& s = A::addSession(d, 1, &stream);
+        const auto phone = A::addPhone(d, 1, phonePeer, { 201, 202 });
+        CHECK(A::refuseUnprovedInput(d, s, A::attachmentID(d, phone)) == WriteStatus::Withdrawn);
+        CHECK_MSG(!A::firstInputPrincipal(s) && !s.hasMultipleInputPrincipals,
+            "input refused by attachment proof changed the session's provenance");
+    }
+    {
+        using namespace Ubiquitty::Protocol::Sync;
+        Ubiquitty::PAL::UnixFileDescriptor firstPeer, resumedPeer;
+        Daemon d;
+        A::setSocketPath(d, std::string(directory) + "/socket");
+        StreamDouble* stream = nullptr;
+        auto& s = A::addSession(d, 1, &stream);
+        const ID128 instance { 211, 212 };
+        const auto first = A::addPhone(d, 1, firstPeer, instance);
+        const auto originalAttachment = A::attachmentID(d, first);
+        const auto request = A::resumeRequest(d, first);
+        A::typed(d, s, first);
+        CHECK(!s.hasMultipleInputPrincipals);
+        A::depart(d, first);
+        const auto resumed = A::addPhone(d, 1, resumedPeer, instance, false, nullptr, request);
+        CHECK(A::attachmentID(d, resumed) == originalAttachment);
+        A::typed(d, s, resumed);
+        CHECK_MSG(!s.hasMultipleInputPrincipals, "a resumed phone became a second input principal");
+    }
+    {
+        using namespace Ubiquitty::Protocol::Sync;
+        Ubiquitty::PAL::UnixFileDescriptor firstPeer, secondPeer;
+        Daemon d;
+        A::setSocketPath(d, std::string(directory) + "/socket");
+        StreamDouble* stream = nullptr;
+        auto& s = A::addSession(d, 1, &stream);
+        const auto first = A::addAskingPhone(d, 1, firstPeer, { 221, 222 });
+        const auto second = A::addAskingPhone(d, 1, secondPeer, { 223, 224 }, "other-phone");
+        CHECK(A::grantKey(d, first) != A::grantKey(d, second));
+        CHECK(A::attachmentID(d, first) != A::attachmentID(d, second));
+        A::typed(d, s, first);
+        A::typed(d, s, second);
+        CHECK_MSG(s.hasMultipleInputPrincipals, "two token-authenticated people were treated as one driver");
+        stream->pushInbound("\033]52;c;Zmlyc3Q=\a");
+        A::service(d, s);
+        CHECK_MSG(s.screenSource->effects().newestSequence() == 0, "ambiguous output reached a clipboard recipient");
+    }
+    {
+        using namespace Ubiquitty::Protocol::Sync;
+        Ubiquitty::PAL::UnixFileDescriptor firstPeer, secondPeer;
+        Daemon d;
+        A::setSocketPath(d, std::string(directory) + "/socket");
+        A::configure(d, Ubiquitty::CapabilityDecisionTable {}.replacing(CapabilityOrigin::Remote, Ubiquitty::CapabilityTier::HostEscaping, Ubiquitty::CapabilityDecision::Prompt));
+        StreamDouble* stream = nullptr;
+        auto& s = A::addSession(d, 1, &stream);
+        const auto first = A::addSSHPhone(d, 1, firstPeer, { 231, 232 });
+        A::typed(d, s, first);
+        stream->pushInbound("\033]52;c;Zmlyc3Q=\a");
+        A::service(d, s);
+        A::publish(d, s);
+        A::deliver(d, s);
+        CHECK_MSG(s.screenSource->effects().newestSequence() != 0, "the SSH stream client's clipboard write did not reach its recipient");
+        const auto second = A::addSSHPhone(d, 1, secondPeer, { 233, 234 });
+        CHECK(A::grantKey(d, first) == A::grantKey(d, second));
+        A::typed(d, s, second);
+        CHECK_MSG(s.hasMultipleInputPrincipals, "two SSH stream clients were attributed to one bridge process");
+    }
+    {
+        Ubiquitty::PAL::UnixFileDescriptor agentPeer;
+        Daemon d;
+        A::setSocketPath(d, std::string(directory) + "/socket");
+        StreamDouble* stream = nullptr;
+        auto& s = A::addSession(d, 1, &stream);
+        const auto agent = A::addTokenlessAgent(d, agentPeer);
+        A::typed(d, s, agent);
+        CHECK(A::firstInputPrincipal(s) == A::grantKey(d, agent));
+        CHECK(A::inputOrigin(s) == CapabilityOrigin::Agent);
+        CHECK(!s.hasMultipleInputPrincipals);
+    }
+
     // ---- A banner this host admits by its own configuration is recorded for
     // other devices, whoever receives it live.
     {
@@ -1302,7 +1443,6 @@ int main()
         A::depart(d, second);
         CHECK_MSG(A::pendingQuestions(d) == 0, "a question no remaining recipient could show waited for its deadline");
         const std::size_t later = A::addPhone(d, 1, laterPeer, { 197, 198 });
-        A::typed(d, s, later);
         stream->pushInbound("\033]9;tests passed\a");
         A::service(d, s);
         CHECK_MSG(A::take(d, later, laterPeer).consentRequests.size() == 1, "the capability was never asked about again after its recipients departed");

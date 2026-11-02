@@ -38,6 +38,7 @@
 #include "Core/Protocol/Control/JSONSchema.h"
 #include "Core/Protocol/Control/MethodRegistry.h"
 #include "Core/Protocol/Sync/Connection.h"
+#include "Core/Protocol/Sync/IDText.h"
 #include "Core/Protocol/Sync/Roles.h"
 #include "Core/Screen/ClearBuffer.h"
 #include "Core/Screen/Scrollback.h"
@@ -230,7 +231,10 @@ void checkClearInputProvenance()
         CHECK(first.client.sendRaw(input).has_value());
         Screen::deliver(daemon, first.index, first.client);
         CHECK(writer->written == "x");
-        CHECK(session.firstInputPrincipal == "token:clear-first-principal");
+        const auto* attachment = Screen::connection(daemon, first.index)->attachment();
+        CHECK(attachment);
+        if (attachment)
+            CHECK(session.firstInputPrincipal == "attachment:" + Sync::formatID128(attachment->attachmentID));
         CHECK(!session.hasMultipleInputPrincipals);
         const auto firstPrincipal = session.firstInputPrincipal;
         writer->written.clear();

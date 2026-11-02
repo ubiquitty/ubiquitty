@@ -29,6 +29,7 @@
 #include "Core/Protocol/Sync/Control.h"
 #include "Core/Protocol/Sync/HandoverBody.h"
 #include "Core/Protocol/Sync/HostManagement.h"
+#include "Core/Protocol/Sync/IDText.h"
 #include "Core/Protocol/Sync/Notify.h"
 #include "Core/Protocol/Sync/StructureConsent.h"
 #include "Core/Protocol/Sync/WireFormat.h"
@@ -4734,23 +4735,34 @@ bool Daemon::wireRemoteInput(Session& session)
 void Daemon::stampInputOrigin(Session& session, const Client& client)
 {
     setSessionInputDriver(session, client.clientID);
-    std::string identity = grantKeyFor(client);
+    std::string grantIdentity = grantKeyFor(client);
+    std::string inputPrincipal = grantIdentity;
+    const Ubiquitty::CapabilityOrigin origin = capabilityOriginOf(client);
+    const auto* attachment = client.syncConnection ? client.syncConnection->attachment() : nullptr;
+    if (origin == Ubiquitty::CapabilityOrigin::Remote && attachment
+        && attachment->authority.verifiedKind == Protocol::Sync::ClientKind::Human
+        && attachment->servingConnection == client.clientID) {
+        // The attachment is minted by this host and continued only by its
+        // authenticated resume. A transport's grant label may change while
+        // the same person keeps that attachment.
+        inputPrincipal = "attachment:" + Protocol::Sync::formatID128(attachment->attachmentID);
+    }
     const bool wasAmbiguous = session.hasMultipleInputPrincipals;
     if (!session.firstInputPrincipal)
-        session.firstInputPrincipal = identity;
-    if (identity.empty() || *session.firstInputPrincipal != identity)
+        session.firstInputPrincipal = inputPrincipal;
+    if (inputPrincipal.empty() || *session.firstInputPrincipal != inputPrincipal)
         session.hasMultipleInputPrincipals = true;
     if (!wasAmbiguous && session.hasMultipleInputPrincipals)
         Ubiquitty::PAL::logLine(stderr, "daemon: session {} cannot attribute output to one input principal; capability grants are withheld", session.id);
     if (!session.term)
         return;
-    session.term->currentCapabilityOrigin = capabilityOriginOf(client);
-    session.capabilityPolicy.setCurrentIdentity(std::move(identity));
+    session.term->currentCapabilityOrigin = origin;
+    session.capabilityPolicy.setCurrentIdentity(std::move(grantIdentity));
     // Ratchet the sticky origin floor: this injecting principal may spawn
     // background work whose output arrives after it detaches; the floor keeps
     // that output gated at (at least) this origin so a later detach can't
     // downgrade the gate below it.
-    session.driverOriginFloor = std::max(session.driverOriginFloor, capabilityOriginOf(client));
+    session.driverOriginFloor = std::max(session.driverOriginFloor, origin);
 }
 
 bool Daemon::mayWriteRemoteInput(Protocol::Sync::ID128 authority, Protocol::Sync::ID128 clientInstance) const
@@ -4782,6 +4794,8 @@ Protocol::Sync::WriteStatus Daemon::writeRemoteInput(Session& session, Protocol:
     if (const HostedWorkspace* workspace = workspaceHolding(session.id);
         workspace && workspace->layout.surfaceHolding(workspace->paneFor(session.id)) == Ubiquitty::Session::Layout::invalidSurface)
         return Protocol::Sync::WriteStatus::Closed;
+    if (authority != Protocol::Sync::ID128 {} && !mayWriteRemoteInput(authority, clientInstance))
+        return Protocol::Sync::WriteStatus::Withdrawn;
     const auto driver = std::ranges::find_if(m_clients, [&](const Client& client) {
         const auto* attachment = client.syncConnection ? client.syncConnection->attachment() : nullptr;
         return attachment && attachment->attachmentID == authority && attachment->servingConnection == client.clientID
@@ -4792,8 +4806,6 @@ Protocol::Sync::WriteStatus Daemon::writeRemoteInput(Session& session, Protocol:
     // Input typed after a resize reaches a program that has been told of it.
     applyPendingGeometry(session, driver != m_clients.end() ? std::optional { geometryKey(*driver) } : std::nullopt);
     const std::span<const char> encoded { reinterpret_cast<const char*>(bytes.data()), bytes.size() };
-    if (authority != Protocol::Sync::ID128 {} && !mayWriteRemoteInput(authority, clientInstance))
-        return Protocol::Sync::WriteStatus::Withdrawn;
     const std::uint64_t streamOwner = authority.low * 2 + (lane == RemoteInputLane::Paste ? 1 : 0);
     const auto result = authority == Protocol::Sync::ID128 {} ? std::optional { session.stream->writeAll(encoded) } : session.stream->writeAllOwned(streamOwner, encoded);
     if (!result)
