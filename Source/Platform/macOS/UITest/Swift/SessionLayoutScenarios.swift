@@ -154,6 +154,10 @@ enum SessionLayoutScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated { checkUpdateChoiceReturnsTheShell(t, acceptedRisk: true) }
         }
+        UBUITestRegister("swift_update_adopts_a_plain_tmux_tab", isInDefaultSuite: false) { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { checkUpdateAdoptsPlainTmux(t) }
+        }
         UBUITestRegister("an_older_local_host_hands_a_saved_workspace_to_the_bundled_host") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { checkOlderLocalHostHandsItsWorkspaceOver(t) }
@@ -1448,6 +1452,97 @@ enum SessionLayoutScenarios {
             t.wait(until: { TerminalWindows.keptBySession().count == afterMixed.count + 1 }, timeout: 10),
             desc: "only choosing Open New Terminal launches a fresh shell"
         )
+    }
+
+    /// A foreground tmux client keeps its local PTY through update capture.
+    @MainActor
+    private static func checkUpdateAdoptsPlainTmux(_ t: UBUITestContext) {
+        t.closeAllWindows()
+        guard let tmux = TerminalWindowController.tmuxExecutable else {
+            t.refuse("The tmux update check needs tmux on this Mac.")
+            return
+        }
+        guard let bundled = t.placeBundledHost() else { return }
+        defer { bundled.remove() }
+        let files = FileManager.default
+        let root = "/tmp/ubq-update-tmux-" + String(UUID().uuidString.prefix(8))
+        let home = root + "/.ubiquitty"
+        do {
+            try files.createDirectory(atPath: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        } catch {
+            t.expect(false, desc: "the private update home is made (\(error))")
+            return
+        }
+        let previousHome = ProcessInfo.processInfo.environment["UBIQUITTY_HOME"]
+        let previousTmuxDirectory = ProcessInfo.processInfo.environment["TMUX_TMPDIR"]
+        setenv("UBIQUITTY_HOME", home, 1)
+        setenv("TMUX_TMPDIR", root, 1)
+        defer {
+            t.closeAllWindows()
+            if let previousHome { setenv("UBIQUITTY_HOME", previousHome, 1) } else { unsetenv("UBIQUITTY_HOME") }
+            if let previousTmuxDirectory { setenv("TMUX_TMPDIR", previousTmuxDirectory, 1) } else { unsetenv("TMUX_TMPDIR") }
+            try? files.removeItem(atPath: root)
+        }
+        let daemon = Process()
+        daemon.executableURL = URL(fileURLWithPath: bundled.path)
+        daemon.arguments = ["--daemon", "--columns", "80", "--rows", "24"]
+        daemon.environment = ProcessInfo.processInfo.environment
+        do { try daemon.run() } catch {
+            t.expect(false, desc: "the private update host starts (\(error))")
+            return
+        }
+        defer {
+            t.closeAllWindows()
+            if daemon.isRunning { daemon.terminate() }
+            daemon.waitUntilExit()
+        }
+        let socket = String(Ubiquitty.Session.localDaemonSocketPath(std.string(bundled.path)))
+        guard t.wait(until: { files.fileExists(atPath: socket) }, timeout: 20) else {
+            t.expect(false, desc: "the private update host is ready")
+            return
+        }
+        let tmuxSocket = "ubq-update-" + String(UUID().uuidString.prefix(8))
+        defer { t.killTmuxServer(onSocket: tmuxSocket) }
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: tmux)
+        server.arguments = ["-L", tmuxSocket, "-f", "/dev/null", "new-session", "-d", "-s", "update", "/bin/sh"]
+        server.environment = ProcessInfo.processInfo.environment
+        do {
+            try server.run()
+            server.waitUntilExit()
+        } catch {
+            t.expect(false, desc: "the private tmux server starts (\(error))")
+            return
+        }
+        guard server.terminationStatus == 0,
+            let shell = TerminalWindowController.spawn(arguments: ["/bin/sh"], localePolicy: .auto, sessionLifetime: .endsWithChild),
+            let pane = shell.focusedSurfaceForTesting
+        else {
+            t.expect(false, desc: "the local shell and private tmux server are ready")
+            return
+        }
+        pane.send("\(tmux) -L \(tmuxSocket) a -t update\n")
+        guard t.wait(until: { shell.tmuxPaneContext() == .rawAttach }, timeout: 10) else {
+            t.expect(false, desc: "the local tab is attached to plain tmux")
+            return
+        }
+        t.expect(shell.tabCaptureFacts.isShareableLocalSession, desc: "the foreground tmux tab is shareable at update capture")
+        let capture = TerminalWindows.prepareUpdateCapture()
+        t.expect(capture.localPanes.count == 1, desc: "the update finds the local tmux pane")
+        t.expect(capture.adoptedLocalPaneCount == 1, desc: "the update adopts the foreground tmux pane")
+        var didSettle: Bool?
+        Task { @MainActor in didSettle = await TerminalWindows.settledUpdateAdoptions(capture) != nil }
+        t.expect(
+            t.wait(until: { didSettle != nil }, timeout: 12) && didSettle == true,
+            desc: "the adopted tmux pane attaches to the private host"
+        )
+        var didReclaim = false
+        Task { @MainActor in
+            await TerminalWindows.reclaimUpdateAdoptions(capture)
+            didReclaim = true
+        }
+        t.expect(t.wait(until: { didReclaim }, timeout: 12), desc: "the tmux pane returns to its local PTY")
+        t.expect(!pane.drive.isSharedIntoLocalDaemon, desc: "the same pane is local after rollback")
     }
 
     /// A failed pre-install transfer returns the app's original local shell

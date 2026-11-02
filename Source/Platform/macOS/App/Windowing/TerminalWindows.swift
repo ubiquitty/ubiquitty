@@ -1041,6 +1041,9 @@ final class TerminalWindows: NSObject {
             daemon: daemon,
             localBeforeUpdate: Set(localPanes.map { ObjectIdentifier($0) })
         )
+        for controller in controllers {
+            controller.reattachCommittedLocalAdoptions()
+        }
         return PreparedUpdateCapture(
             groups: groups,
             localPanes: localPanes,

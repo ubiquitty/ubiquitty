@@ -633,6 +633,36 @@ TEST(aQuitHandsTheShellToTheDaemonAndAttachesNoClient)
     discardPostedWork();
 }
 
+/// A plain tmux client remains a local PTY owner while its foreground program
+/// uses the terminal, so the quit handoff must offer that master to the host.
+TEST(aPlainTmuxClientCanBeHandedToTheLocalHost)
+{
+    if (std::system("command -v tmux >/dev/null 2>&1") != 0)
+        return;
+    discardPostedWork();
+    const std::string socketName = "ubq-share-" + std::to_string(::getpid());
+    const std::string command = "tmux -L " + socketName + " -f /dev/null new-session -s handoff";
+    TerminalSession* session = TerminalSession::make();
+    REQUIRE(session != nullptr);
+    session->start(24, 80);
+    REQUIRE(session->launchShellCommand(command));
+    REQUIRE(session->startIngest());
+    CHECK_MSG(waitFor([&] { return session->takeDrainedBytes() > 0; }, 5000), "the plain tmux client drew its first screen");
+    CHECK_MSG(session->isShareableLocalSession(), "a plain tmux client lost its local PTY owner");
+
+    handoffRecord() = {};
+    handoffRecord().answer = 73;
+    CHECK_EQ(session->handOverToLocalDaemon("/tmp/ubq-share-test.sock", handoffAddress()), 73u);
+    CHECK_EQ(handoffRecord().callCount, 1);
+    CHECK_MSG(session->isSharedIntoLocalDaemon(), "the tmux PTY was not adopted");
+
+    session->close();
+    releaseTerminalSession(session);
+    const std::string stop = "tmux -L " + socketName + " kill-server >/dev/null 2>&1";
+    (void)std::system(stop.c_str());
+    discardPostedWork();
+}
+
 TEST(aRefusedHandoffLeavesTheSessionLocalAndReading)
 {
     discardPostedWork();
