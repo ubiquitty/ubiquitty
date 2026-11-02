@@ -217,6 +217,33 @@ TEST(testNoneAndPrintable)
     CHECK(Ubiquitty::Keys::keyFamily(VirtualKey::None) == KeyFamily::None);
 }
 
+TEST(aSoftwareCommandChordMatchesTheMacClientOnTheHost)
+{
+    Ubiquitty::Runtime::KeyPress macPress;
+    macPress.virtualKey = Ubiquitty::Keys::printableKeyForHID(6); // C on the physical keyboard.
+    macPress.modifiers = keymapModifierSuper;
+    macPress.unshiftedCodePoint = 'c';
+    macPress.shiftedCodePoint = 'c';
+    macPress.text[0] = 'c';
+    macPress.textLength = 1;
+    macPress.wasModified = true;
+
+    auto accessoryPress = macPress;
+    accessoryPress.virtualKey = VirtualKey::None; // A software cap has no physical position.
+    for (const auto flags : { Kitty::KeyFlagSet {}, Kitty::KeyFlagSet { Kitty::KeyFlag::Disambiguate } }) {
+        Ubiquitty::Runtime::ModeSnapshot modes;
+        modes.kittyKeyboardFlags[0] = flags.toRaw();
+        char macOutput[32] {};
+        char accessoryOutput[32] {};
+        const int macLength = Ubiquitty::Runtime::encodeKey(modes, macPress, macOutput, nullptr).length;
+        const int accessoryLength = Ubiquitty::Runtime::encodeKey(modes, accessoryPress, accessoryOutput, nullptr).length;
+        CHECK(macLength == accessoryLength);
+        CHECK(std::string_view(macOutput, static_cast<std::size_t>(macLength))
+            == std::string_view(accessoryOutput, static_cast<std::size_t>(accessoryLength)));
+        CHECK(macLength == (flags.isEmpty() ? 0 : 7));
+    }
+}
+
 TEST(testClassifierAgreesWithTables)
 {
     // The enum is a contiguous range [None, RightSuper]; iterate it.

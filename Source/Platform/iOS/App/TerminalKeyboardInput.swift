@@ -391,6 +391,7 @@ final class TerminalKeyInputView: UIView, UITextInput {
 
     /// The bar's modifier items, refreshed as the modifiers change.
     private var modifierItems: [TerminalKeyboardModifiers.Modifier: UIBarButtonItem] = [:]
+    private var isCommandModifierShown: Bool?
     /// The continuous observation of the modifiers, held for as long as the
     /// bar shows them; replacing or dropping it ends the observation.
     private var modifierObservation: AnyObject?
@@ -429,7 +430,11 @@ final class TerminalKeyInputView: UIView, UITextInput {
         let arrows = TerminalAccessoryKey.arrows.map(barItem)
         let arrowPad = UIBarButtonItem(title: nil, image: UIImage(systemName: "dpad"), primaryAction: nil, menu: nil)
         arrowPad.accessibilityLabel = "Arrow Keys"
-        let modifiers = TerminalKeyboardModifiers.Modifier.allCases.compactMap { modifierItems[$0] }
+        let shouldShowCommand = session?.shouldShowCommandAccessory == true
+        isCommandModifierShown = shouldShowCommand
+        let modifiers = TerminalKeyboardModifiers.Modifier.allCases
+            .filter { $0 != .command || shouldShowCommand }
+            .compactMap { modifierItems[$0] }
         inputAssistantItem.leadingBarButtonGroups = [
             UIBarButtonItemGroup(barButtonItems: [barItem(.escape), barItem(.tab)], representativeItem: nil),
             UIBarButtonItemGroup(barButtonItems: modifiers, representativeItem: nil),
@@ -515,6 +520,18 @@ final class TerminalKeyInputView: UIView, UITextInput {
     private func showModifierState() {
         guard let session else { return }
         updateSymbolItems()
+        let shouldShowCommand = session.shouldShowCommandAccessory
+        if isCommandModifierShown != shouldShowCommand {
+            isCommandModifierShown = shouldShowCommand
+            var groups = inputAssistantItem.leadingBarButtonGroups
+            if groups.count > 1 {
+                let modifiers = TerminalKeyboardModifiers.Modifier.allCases
+                    .filter { $0 != .command || shouldShowCommand }
+                    .compactMap { modifierItems[$0] }
+                groups[1] = UIBarButtonItemGroup(barButtonItems: modifiers, representativeItem: nil)
+                inputAssistantItem.leadingBarButtonGroups = groups
+            }
+        }
         let modifiers = session.keyboardModifiers
         for (modifier, item) in modifierItems {
             let state = modifiers.state(of: modifier)

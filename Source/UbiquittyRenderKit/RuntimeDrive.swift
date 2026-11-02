@@ -250,6 +250,9 @@ public final class RuntimeDrive {
     /// ask ``isRemoteAttached`` first.
     public var remoteState: Ubiquitty.Session.State { session.remoteState() }
 
+    /// Whether Core's current host platform offers Command on its native keyboard.
+    public var shouldShowCommandAccessory: Bool { session.shouldShowCommandAccessory() }
+
     /// Core's status for a silent or stalled attachment; empty when healthy.
     public var paneLinkIndicatorText: String { String(session.paneLinkIndicatorText()) }
 

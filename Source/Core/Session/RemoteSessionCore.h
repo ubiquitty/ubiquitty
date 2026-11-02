@@ -57,6 +57,13 @@ namespace Ubiquitty::Session {
 class HostListing;
 struct TreeWorkspace;
 
+/// A host advertises `uname -sm` in Welcome. Only Darwin hosts have a
+/// Command modifier on their native keyboard.
+[[nodiscard]] inline bool isMacOSHostPlatform(std::string_view platform)
+{
+    return platform.starts_with("Darwin ") && platform.size() > sizeof("Darwin ") - 1;
+}
+
 struct RemoteSessionDatagramIngressAccess;
 class WorkspaceConnection;
 struct WorkspaceConnectionStorage;
@@ -1147,6 +1154,9 @@ public:
     /// The instance this client greets the host as: the one set, or one
     /// drawn at random when the core was made.
     [[nodiscard]] Protocol::Sync::ID128 clientInstance() const { return m_core->clientInstance(); }
+
+    /// Whether the host's Welcome names a macOS keyboard.
+    [[nodiscard]] bool hasMacOSHost() const { return isMacOSHostPlatform(m_core->hostPlatform()); }
 
     /// Whether the current authenticated host assigns this pane's geometry to
     /// another attachment. Unknown or disconnected ownership answers false.

@@ -74,6 +74,7 @@ struct TerminalKeyboardAccessory: View {
             key(.tab, isPinned: true)
             modifier(.control)
             modifier(.alternate)
+            if session.shouldShowCommandAccessory { modifier(.command) }
             ScrollView(.horizontal) {
                 HStack(spacing: 0) {
                     switch page {

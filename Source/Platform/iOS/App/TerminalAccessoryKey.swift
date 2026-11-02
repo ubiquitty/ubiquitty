@@ -10,13 +10,14 @@ import UbiquittyCore
 /// that key and releases with the finger, without latching.
 struct TerminalKeyboardModifiers {
     enum Modifier: CaseIterable, Hashable {
-        case control, alternate, shift
+        case control, alternate, command, shift
 
         /// The word printed on the key cap, lowercase as on Apple's keyboards.
         var capTitle: String {
             switch self {
             case .control: "ctrl"
             case .alternate: "alt"
+            case .command: "cmd"
             case .shift: "shift"
             }
         }
@@ -26,6 +27,7 @@ struct TerminalKeyboardModifiers {
             switch self {
             case .control: "Control"
             case .alternate: "Alt"
+            case .command: "Command"
             case .shift: "Shift"
             }
         }
@@ -34,7 +36,7 @@ struct TerminalKeyboardModifiers {
         var symbol: String? {
             switch self {
             case .shift: "shift"
-            case .control, .alternate: nil
+            case .control, .alternate, .command: nil
             }
         }
 
@@ -43,6 +45,7 @@ struct TerminalKeyboardModifiers {
             switch self {
             case .control: "terminal-modifier-Ctrl"
             case .alternate: "terminal-modifier-Alt"
+            case .command: "terminal-modifier-Cmd"
             case .shift: "terminal-modifier-Shift"
             }
         }
@@ -51,6 +54,7 @@ struct TerminalKeyboardModifiers {
             switch self {
             case .control: UInt32(Ubiquitty.Keys.Keymap.keymapModifierCtrl)
             case .alternate: UInt32(Ubiquitty.Keys.Keymap.keymapModifierAlternate)
+            case .command: UInt32(Ubiquitty.Keys.Keymap.keymapModifierSuper)
             case .shift: UInt32(Ubiquitty.Keys.Keymap.keymapModifierShift)
             }
         }
@@ -100,6 +104,12 @@ struct TerminalKeyboardModifiers {
         case .once: states[modifier] = .locked
         case .locked: states[modifier] = .off
         }
+    }
+
+    mutating func clear(_ modifier: Modifier) {
+        states[modifier] = .off
+        held.remove(modifier)
+        usedWhileHeld.remove(modifier)
     }
 
     var bits: UInt32 {

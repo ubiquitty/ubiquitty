@@ -206,7 +206,10 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
     /// A short line for the status area: what the link is doing, or why it stopped.
     private(set) var statusDetail = "Connecting…"
     private(set) var isConnected = false {
-        didSet { followTheHostWhileWanted() }
+        didSet {
+            followTheHostWhileWanted()
+            if !shouldShowCommandAccessory { keyboardModifiers.clear(.command) }
+        }
     }
     private(set) var hasExited = false
     /// Whether the session ended with a reason worth keeping on screen.
@@ -931,6 +934,16 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
 
     /// The surface of the focused pane, which typing and the find bar reach.
     var focusedSurface: TerminalSurface? { surface }
+
+    /// Core's host-platform answer for the focused pane's software keyboard.
+    var shouldShowCommandAccessory: Bool {
+        #if UBIQUITTY_IOS_UI_TESTS
+        if let platform = SmokeLaunch.commandAccessoryHostPlatform {
+            return platform.withCString { Ubiquitty.Session.isMacOSHostPlatform(std.string_view($0)) }
+        }
+        #endif
+        return isConnected && focusedSurface?.drive.shouldShowCommandAccessory == true
+    }
 
     /// The surface that holds the workspace's connection, which every request
     /// about the workspace's structure goes through.

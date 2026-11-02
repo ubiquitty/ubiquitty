@@ -3335,6 +3335,13 @@ public:
         return m_remote && m_remote->core ? m_remote->core->state() : Ubiquitty::Session::State::Idle;
     }
 
+    /// Whether this pane's host offers the Command key on its native keyboard.
+    /// A local pane or a remote pane without a host Welcome offers none.
+    [[nodiscard]] bool shouldShowCommandAccessory() const
+    {
+        return m_remote && m_remote->core && m_remote->core->hasMacOSHost();
+    }
+
     /// Reports whether the active remote transport uses QUIC.
     ///
     /// - Returns: Whether the remote Core selected QUIC.

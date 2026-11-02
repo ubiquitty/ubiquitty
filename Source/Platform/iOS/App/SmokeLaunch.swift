@@ -20,6 +20,14 @@ private typealias SyncWire = Ubiquitty.`Protocol`.Sync
 /// a display cycle needs a running application, which is what these smokes
 /// exist to stand in a real one.
 enum SmokeLaunch {
+    #if UBIQUITTY_IOS_UI_TESTS
+    /// Supplies only the host's Welcome platform for the keyboard accessory UI case.
+    static var commandAccessoryHostPlatform: String? {
+        if CommandLine.arguments.contains("--seed-command-host-darwin") { return "Darwin arm64" }
+        if CommandLine.arguments.contains("--seed-command-host-linux") { return "Linux aarch64" }
+        return nil
+    }
+    #endif
     /// Runs whichever smoke the launch arguments name, and exits with its
     /// verdict. Returns when none is named.
     @MainActor

@@ -759,13 +759,13 @@ private:
 };
 
 // ---- inbound frame builders (host → client) ----
-std::vector<std::uint8_t> helloAckFrame(uint32_t sessionID)
+std::vector<std::uint8_t> helloAckFrame(uint32_t sessionID, std::string_view platform = "fixture")
 {
     Protocol::Sync::Welcome welcome;
     welcome.wireVersion = Protocol::Sync::wireVersion;
     welcome.hostInstanceID = { 17, 0 };
     welcome.attachmentID = { 1, 17 };
-    welcome.selection = { .target = Protocol::Sync::AdmissionTarget::Session, .sessionID = sessionID, .daemonInstanceID = 17, .socketName = "fixture.sock", .hostPlatform = "fixture" };
+    welcome.selection = { .target = Protocol::Sync::AdmissionTarget::Session, .sessionID = sessionID, .daemonInstanceID = 17, .socketName = "fixture.sock", .hostPlatform = std::string(platform) };
     std::vector<std::uint8_t> body, out;
     Protocol::Sync::encode(body, welcome);
     CHECK(Protocol::Sync::appendFrame(out, Protocol::Sync::FrameKind::Welcome, 0, body));
@@ -929,6 +929,25 @@ struct WelcomedSession {
 };
 
 // ---- tests ----
+TEST(aCommandAccessoryFollowsTheWelcomedHostPlatform)
+{
+    check(isMacOSHostPlatform("Darwin arm64"), "a Darwin host offers the Command accessory");
+    check(!isMacOSHostPlatform("Linux aarch64"), "a Linux host offers no Command accessory");
+    check(!isMacOSHostPlatform("Darwin "), "an incomplete platform offers no Command accessory");
+
+    auto term = makeTerm();
+    FakeDispatcher dispatcher;
+    FakeFactory factory;
+    RecordingObserver observer;
+    RemoteSessionCore core(term.get(), &dispatcher, &factory, &observer);
+    check(!core.hasMacOSHost(), "no host has answered before Welcome");
+    core.start(0, 80, 24);
+    pumpConnect(factory.last(), dispatcher);
+    pumpData(factory.last(), dispatcher, helloAckFrame(1, "Darwin arm64"));
+    check(core.hasMacOSHost(), "the accepted Welcome offers the Command accessory");
+    term.reset();
+}
+
 TEST(test_connect_hello_ack)
 {
     auto term = makeTerm();

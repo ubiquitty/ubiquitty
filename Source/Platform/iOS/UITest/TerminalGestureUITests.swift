@@ -1245,6 +1245,27 @@ final class TerminalGestureUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
     }
 
+    /// The host's Welcome platform decides whether the software keyboard
+    /// offers Command; the same row is reached through a real saved host.
+    func testCommandAccessoryFollowsTheHostPlatform() {
+        _ = openTerminal(arguments: ["--seed-command-host-darwin"])
+        app.buttons["terminal-keyboard"].tap()
+        let command = app.buttons["terminal-modifier-Cmd"]
+        XCTAssertTrue(command.waitForExistence(timeout: 5), "a Darwin host offers Command")
+        XCTAssertEqual(command.label, "Command")
+        command.tap()
+        XCTAssertEqual(command.value as? String, "Next key")
+        command.tap()
+        XCTAssertEqual(command.value as? String, "Locked")
+        command.tap()
+        XCTAssertEqual(command.value as? String, "Off")
+        app.terminate()
+
+        _ = openTerminal(arguments: ["--seed-command-host-linux"])
+        app.buttons["terminal-keyboard"].tap()
+        XCTAssertFalse(app.buttons["terminal-modifier-Cmd"].exists, "a Linux host has no Command accessory")
+    }
+
     /// A pinch is two real fingers, and it neither opens settings nor switches
     /// connections.
     ///
@@ -4042,8 +4063,10 @@ final class TerminalGestureUITests: XCTestCase {
         return XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)], timeout: timeout) == .completed
     }
 
-    private func openTerminal() -> XCUIElement {
-        app.launch()
+    private func openTerminal(arguments: [String] = []) -> XCUIElement {
+        let application = app
+        application.launchArguments = arguments
+        application.launch()
         XCTAssertEqual(app.state, .runningForeground, "the app did not come up")
 
         if !hostRow.waitForExistence(timeout: 5) {

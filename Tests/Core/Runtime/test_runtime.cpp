@@ -1846,6 +1846,7 @@ TEST(sessionPublishesRemoteConnectionStateAndTheReasonAFailureCarries)
     // A session that never attached is Idle and carries no failure, so a
     // frontend reading these before any connection does not draw a state.
     CHECK(session->remoteState() == Ubiquitty::Session::State::Idle);
+    CHECK(!session->shouldShowCommandAccessory());
     CHECK(session->lastRemoteFailure().empty());
     CHECK(session->remoteSessionID() == 0);
     constexpr std::uint32_t stateBit = 1u << static_cast<unsigned>(EventKind::RemoteStateChanged);
