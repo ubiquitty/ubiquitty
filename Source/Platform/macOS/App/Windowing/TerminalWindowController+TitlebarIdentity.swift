@@ -511,6 +511,7 @@ extension TerminalWindowController {
         let hasRecord = surface.drive.readSnapshot().programStatusKind != 0
         let isMarkedElsewhere = (window.tabbedWindows?.count ?? 1) > 1 || projectedSurfaces.count > 1
         let isShown = !woven.programStatus.isEmpty
+        reveal.programStatusInsertionByteOffset = woven.programStatusInsertionByteOffset
         reveal.programStatusSymbol = isShown && hasRecord && !isMarkedElsewhere ? windowTitleStatusSymbol() : nil
         reveal.programStatusSpokenText = isShown && hasRecord ? surface.drive.statusHelpText() : ""
         reveal.programStatusTitle = !isShown ? "" : hasRecord ? surface.drive.programActivityText() : woven.programStatus

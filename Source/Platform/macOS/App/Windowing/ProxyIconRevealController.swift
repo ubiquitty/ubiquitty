@@ -115,6 +115,7 @@ public final class ProxyIconRevealController: NSObject {
         let title: String
         let statusTitle: String
         let programStatus: String
+        let programStatusInsertionByteOffset: Int?
         let programStatusSymbol: TitleStatusSymbol?
         let processIconKey: String
         let dimColor: NSColor
@@ -211,7 +212,7 @@ public final class ProxyIconRevealController: NSObject {
     public var requestSlotResolution: (() -> Void)?
 
     /// The label a program gave its status colour (OSC 21337), shown as the
-    /// title row's last component; empty for none.
+    /// title row's component after the app title; empty for none.
     ///
     /// Its own component rather than more text in the dimensions run: it has
     /// its own span, so in the component scope it lifts and answers the pointer
@@ -225,6 +226,9 @@ public final class ProxyIconRevealController: NSObject {
             layoutDocumentActions()
         }
     }
+
+    /// Core's UTF-8 boundary in the row title; nil for a manually supplied title.
+    public var programStatusInsertionByteOffset: Int?
 
     /// The symbol a program's status record shows before what the program
     /// says it is doing, after the title's arrow; nil for no record, where
@@ -384,10 +388,10 @@ public final class ProxyIconRevealController: NSObject {
     }
 
     /// The row's text, separately from the title supplied to system menus.
-    var rowTitleText: String?
+    package var rowTitleText: String?
 
     /// What a program's status follows: the process chain's own arrow.
-    static var statusArrow: String {
+    package static var statusArrow: String {
         String(Ubiquitty.Title.chainArrowText())
     }
 
@@ -1826,7 +1830,7 @@ public final class ProxyIconRevealController: NSObject {
             iconLocation.map { (wovenTitle as NSString).replacingCharacters(in: NSRange(location: $0, length: 0), with: "\u{FFFC}") }
             ?? wovenTitle
         let titleLength = (title as NSString).length
-        guard titleLength > 0 || hasConnectionIndicator else {
+        guard titleLength > 0 || hasConnectionIndicator || !programStatusTitle.isEmpty || programStatusSymbol != nil else {
             return
         }
         let wasApplying = isApplyingTitleLayout
@@ -1855,18 +1859,23 @@ public final class ProxyIconRevealController: NSObject {
         let programStatus = programStatusTitle
         let statusSymbol = programStatusSymbol
         let hasProgramStatus = !programStatus.isEmpty || statusSymbol != nil
-        var composedText = title
-        if !statusTitle.isEmpty {
-            composedText += (composedText.isEmpty ? "" : Self.windowTitleSeparator) + statusTitle
+        let insertionLength: Int
+        if let byteOffset = programStatusInsertionByteOffset, byteOffset >= 0, byteOffset <= wovenTitle.utf8.count {
+            let utf8Index = wovenTitle.utf8.index(wovenTitle.utf8.startIndex, offsetBy: byteOffset)
+            let stringIndex = String.Index(utf8Index, within: wovenTitle) ?? wovenTitle.endIndex
+            let prefixLength = (String(wovenTitle[..<stringIndex]) as NSString).length
+            insertionLength = prefixLength + ((iconLocation ?? .max) < prefixLength ? 1 : 0)
+        } else {
+            insertionLength = titleLength
         }
-        let statusEnd = (composedText as NSString).length
-        // A program's status follows the process chain's arrow: its symbol,
-        // an attachment standing in the object-replacement character, then
-        // what it says it is doing.
-        let arrowLength = statusEnd > 0 && hasProgramStatus ? (Self.statusArrow as NSString).length : 0
+        let titleHead = (title as NSString).substring(to: insertionLength)
+        let titleTail = (title as NSString).substring(from: insertionLength)
+        var composedText = titleHead
+        let arrowLength = !titleHead.isEmpty && hasProgramStatus ? (Self.statusArrow as NSString).length : 0
         var symbolLocation: Int?
+        let programStatusStart = (composedText as NSString).length
         if hasProgramStatus {
-            if statusEnd > 0 {
+            if !titleHead.isEmpty {
                 composedText += Self.statusArrow
             }
             if statusSymbol != nil {
@@ -1874,6 +1883,21 @@ public final class ProxyIconRevealController: NSObject {
                 composedText += "\u{FFFC}" + (programStatus.isEmpty ? "" : " ")
             }
             composedText += programStatus
+        }
+        let programStatusEnd = (composedText as NSString).length
+        if hasProgramStatus && titleHead.isEmpty && !titleTail.isEmpty {
+            composedText += Self.windowTitleSeparator
+        }
+        let titleTailStart =
+            programStatusEnd
+            + (hasProgramStatus && titleHead.isEmpty && !titleTail.isEmpty ? (Self.windowTitleSeparator as NSString).length : 0)
+        composedText += titleTail
+        let titleEnd = (composedText as NSString).length
+        let adjustedIconLocation = iconLocation.map {
+            $0 < insertionLength ? $0 : $0 + titleTailStart - insertionLength
+        }
+        if !statusTitle.isEmpty {
+            composedText += (composedText.isEmpty ? "" : Self.windowTitleSeparator) + statusTitle
         }
         let composed = composedText as NSString
         let composedLength = composed.length
@@ -1894,11 +1918,8 @@ public final class ProxyIconRevealController: NSObject {
         // run's own colour — dim at rest, lifted with it — never the bright
         // title. Assigned before the skip below, and nowhere else, so no stale
         // value can survive an early return.
-        if hasProgramStatus {
-            documentActions.foregroundColor = lifted(.programStatus)
-        } else {
-            documentActions.foregroundColor = statusTitle.isEmpty ? brightColor : lifted(.status)
-        }
+        documentActions.foregroundColor =
+            !statusTitle.isEmpty ? lifted(.status) : (hasProgramStatus ? lifted(.programStatus) : brightColor)
 
         // Restyling rebuilds and re-measures the whole string, and every caller
         // runs it whether or not anything moved. Skipping an identical re-apply
@@ -1908,6 +1929,7 @@ public final class ProxyIconRevealController: NSObject {
             title: title,
             statusTitle: statusTitle,
             programStatus: programStatus,
+            programStatusInsertionByteOffset: programStatusInsertionByteOffset,
             programStatusSymbol: statusSymbol,
             processIconKey: processIconKey,
             dimColor: dimColor,
@@ -1983,15 +2005,15 @@ public final class ProxyIconRevealController: NSObject {
         let separatorLength = (Self.windowTitleSeparator as NSString).length
         var statusRange: NSRange?
         if !statusTitle.isEmpty {
-            let range = NSRange(location: titleLength, length: statusEnd - titleLength)
+            let range = NSRange(location: titleEnd, length: composedLength - titleEnd)
             styledTitle.addAttribute(.foregroundColor, value: lifted(.status), range: range)
             // The separator keeps the title's face; the status wears its own.
             styledTitle.addAttribute(
                 .font,
                 value: statusFont,
                 range: NSRange(
-                    location: range.location + (titleLength > 0 ? separatorLength : 0),
-                    length: range.length - (titleLength > 0 ? separatorLength : 0)
+                    location: range.location + (titleEnd > 0 ? separatorLength : 0),
+                    length: range.length - (titleEnd > 0 ? separatorLength : 0)
                 )
             )
             statusRange = range
@@ -1999,7 +2021,7 @@ public final class ProxyIconRevealController: NSObject {
 
         var programStatusRange: NSRange?
         if hasProgramStatus {
-            let range = NSRange(location: statusEnd, length: composedLength - statusEnd)
+            let range = NSRange(location: programStatusStart, length: programStatusEnd - programStatusStart)
             styledTitle.addAttribute(.foregroundColor, value: lifted(.programStatus), range: range)
             // In the dimensions' face: both are readouts beside the title rather
             // than part of its name, and the arrow keeps the title's face.
@@ -2051,7 +2073,7 @@ public final class ProxyIconRevealController: NSObject {
             styledTitle.addAttribute(.attachment, value: symbol, range: NSRange(location: symbolLocation, length: 1))
         }
         // The program's icon wears the program's name's colour, the character after it.
-        if let iconLocation {
+        if let iconLocation = adjustedIconLocation {
             let ink =
                 iconLocation + 1 < composedLength
                 ? styledTitle.attribute(.foregroundColor, at: iconLocation + 1, effectiveRange: nil) as? NSColor ?? brightColor
@@ -2125,6 +2147,8 @@ public final class ProxyIconRevealController: NSObject {
             markerLength: markerRun.length,
             connectionLength: connectionRun.length,
             titleLength: titleLength,
+            titleHeadLength: insertionLength,
+            titleTailStart: titleTailStart,
             directoryRange: directoryRange,
             statusRange: statusRange,
             programStatusRange: programStatusRange
@@ -2165,6 +2189,7 @@ public final class ProxyIconRevealController: NSObject {
             title: title,
             statusTitle: statusTitle,
             programStatus: programStatus,
+            programStatusInsertionByteOffset: programStatusInsertionByteOffset,
             programStatusSymbol: statusSymbol,
             processIconKey: processIconKey,
             dimColor: dimColor,
@@ -2302,14 +2327,14 @@ public final class ProxyIconRevealController: NSObject {
         return NSAttributedString(attachment: attachment)
     }
 
-    /// Partitions the composed string into named spans: the chip run, the dim
-    /// directory run, the status suffix, a program's status after it, and
-    /// whatever title text remains as process spans on either side of the
-    /// directory.
+    /// Partitions the composed string into named spans: the chip, directory,
+    /// program status, title text on either side of it, and dimensions.
     private static func spans(
         markerLength: Int,
         connectionLength: Int,
         titleLength: Int,
+        titleHeadLength: Int,
+        titleTailStart: Int,
         directoryRange: NSRange?,
         statusRange: NSRange?,
         programStatusRange: NSRange?
@@ -2346,10 +2371,20 @@ public final class ProxyIconRevealController: NSObject {
             spans.append(TitleIdentitySpan(kind: .directory, range: shifted))
             cursor = NSMaxRange(shifted)
         }
-        let titleEnd = prefixLength + titleLength
-        if titleEnd > cursor {
+        let titleHeadEnd = prefixLength + titleHeadLength
+        if titleHeadEnd > cursor {
             spans.append(
-                TitleIdentitySpan(kind: .process, range: NSRange(location: cursor, length: titleEnd - cursor))
+                TitleIdentitySpan(kind: .process, range: NSRange(location: cursor, length: titleHeadEnd - cursor))
+            )
+        }
+        let titleTailSpanStart = programStatusRange.map { NSMaxRange($0) } ?? titleTailStart
+        let titleTailLength = titleLength - titleHeadLength + titleTailStart - titleTailSpanStart
+        if titleTailLength > 0 {
+            spans.append(
+                TitleIdentitySpan(
+                    kind: .process,
+                    range: NSRange(location: prefixLength + titleTailSpanStart, length: titleTailLength)
+                )
             )
         }
         if let statusRange {

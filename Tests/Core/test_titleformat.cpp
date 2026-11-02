@@ -9,7 +9,7 @@
 //
 // buildRichTitle drops the segments whose show-flag is off (and every empty
 // segment), then joins the survivors with one em dash in the fixed order base —
-// directory — app title — shell — chain — profile — tty — dims. This test
+// directory — app title — status — chain — shell — profile — tty — dims. This test
 // pins the gating: each flag independently hides its segment even when a
 // non-empty value was passed, the dimensions flag toggles "cols×rows", the
 // base title is gated by its own text (no flag), and an all-hidden title
@@ -24,6 +24,7 @@
 using Ubiquitty::PAL::Process::TitleSeparator;
 using Ubiquitty::Title::buildRichTitle;
 using Ubiquitty::Title::joinedLeadingPartLength;
+using Ubiquitty::Title::joinedPrefixLengthBefore;
 using Ubiquitty::Title::joinTitle;
 using Ubiquitty::Title::resolveTitle;
 using Ubiquitty::Title::SessionEnd;
@@ -253,10 +254,9 @@ TEST(testTheLeadingRunLengthIsCoresAnswerAndNotASearch)
 }
 
 // A program's status label is a part like the others: its switch gates it,
-// it reads last on the line — after the dimensions, where a label that changes
-// as the program works moves nothing before it — and it goes when the session
+// it follows the app title before process and dimensions, and it goes when the session
 // ends, because it described what a program that is gone was doing.
-TEST(testAProgramStatusIsGatedLastAndGoneWithItsSession)
+TEST(testAProgramStatusFollowsTheAppTitleAndGoesWithItsSession)
 {
     TitleShowFlags shown {};
     shown.showsDirectory = true;
@@ -270,7 +270,21 @@ TEST(testAProgramStatusIsGatedLastAndGoneWithItsSession)
     {
         const auto parts = resolveTitle(shown, segments, 80, 24);
         CHECK_STR_EQ(parts.programStatus, "Waiting");
-        CHECK_STR_EQ(joinTitle(parts, TitleSeparator::Spaced), "src — vim — 80×24 — Waiting");
+        CHECK_STR_EQ(joinTitle(parts, TitleSeparator::Spaced), "src — Waiting — vim — 80×24");
+        CHECK(joinedPrefixLengthBefore(parts, Ubiquitty::Title::TitlePart::ProgramStatus, TitleSeparator::Spaced) == std::string("src").size());
+        CHECK(joinedPrefixLengthBefore(parts, Ubiquitty::Title::TitlePart::ProgramStatus, TitleSeparator::Bare) == std::string("src").size());
+    }
+
+    // A multibyte app title is before status, and the offset counts bytes in
+    // the exact spelling the row joins rather than visible characters.
+    {
+        TitleShowFlags withAppTitle = shown;
+        withAppTitle.showsAppTitle = true;
+        TitleSegments named = segments;
+        named.osc = "Étude";
+        const auto parts = resolveTitle(withAppTitle, named, 80, 24);
+        CHECK_STR_EQ(joinTitle(parts, TitleSeparator::Bare), "src—Étude—Waiting—vim—80×24");
+        CHECK(joinedPrefixLengthBefore(parts, Ubiquitty::Title::TitlePart::ProgramStatus, TitleSeparator::Bare) == std::string("src—Étude").size());
     }
 
     // Off hides it even though a program set one.

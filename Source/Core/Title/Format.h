@@ -5,8 +5,8 @@
 //
 // Source/Core/Title/Format.h — the config-gated rich-title weave.
 //
-// A window/tab/pane title is "<directory> — <app title> — <process chain> —
-// <cols×rows>", where each of the four segments is independently gated by a
+// A window/tab/pane title is "<directory> — <app title> — <program status> —
+// <process chain> — <cols×rows>", where each segment is independently gated by a
 // [title] show-flag (titleWindow* / titleTab*). Frontends supply the resolved
 // flags and segment contents; Core owns their order and inclusion rules.
 //
@@ -195,16 +195,15 @@ inline constexpr std::size_t titlePartCount = 9;
 ///
 /// A ruling rather than a preference: the shell FOLLOWS the process chain
 /// ("-zsh — zsh", ruled on title-shell-command-shows-login-wrapper). A
-/// program's status comes last, after the dimensions: it changes most often,
-/// and at the end of the line a changing label moves nothing before it. It lives
+/// program's status follows the app title and precedes the process chain. It lives
 /// here once so no arm re-derives it and the arms cannot drift apart. A
 /// frontend arranging its own — a second line, a larger face for one part —
 /// walks its own order instead and loses nothing.
 [[nodiscard]] inline std::array<TitlePart, titlePartCount> canonicalTitleOrder()
 {
-    return { TitlePart::BaseTitle, TitlePart::Directory, TitlePart::AppTitle, TitlePart::Chain,
-        TitlePart::ShellCommand, TitlePart::ProfileName, TitlePart::TTYName, TitlePart::Dimensions,
-        TitlePart::ProgramStatus };
+    return { TitlePart::BaseTitle, TitlePart::Directory, TitlePart::AppTitle, TitlePart::ProgramStatus,
+        TitlePart::Chain, TitlePart::ShellCommand, TitlePart::ProfileName, TitlePart::TTYName,
+        TitlePart::Dimensions };
 }
 
 /// One part's text, for a caller walking an order rather than naming fields.
@@ -293,6 +292,25 @@ inline constexpr std::size_t titlePartCount = 9;
         out.append(text);
     }
     return out;
+}
+
+/// The byte boundary before one part in Core's joined order, with empty parts
+/// omitted. A title row uses this to draw its program status between the text
+/// before and after that part without searching the finished string.
+[[nodiscard]] inline std::size_t joinedPrefixLengthBefore(const ResolvedTitle& parts, TitlePart boundary, PAL::Process::TitleSeparator separator)
+{
+    std::size_t length = 0;
+    for (const TitlePart part : canonicalTitleOrder()) {
+        if (part == boundary)
+            break;
+        const std::string_view text = titleText(parts, part);
+        if (text.empty())
+            continue;
+        if (length > 0)
+            length += titleSeparatorSpelling(separator).size();
+        length += text.size();
+    }
+    return length;
 }
 
 /// How many bytes of a joined title belong to its LEADING part, separator

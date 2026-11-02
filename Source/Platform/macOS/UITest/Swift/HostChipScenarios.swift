@@ -70,6 +70,75 @@ enum HostChipScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated { verifyIconsOnCapBand(t) }
         }
+        UBUITestRegister("title_row_places_program_status_before_the_process_and_dimensions") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { verifyProgramStatusOrder(t) }
+        }
+    }
+
+    @MainActor
+    private static func verifyProgramStatusOrder(_ t: UBUITestContext) {
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1000, height: 400),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.title = "Running the build — make ◂ zsh"
+        window.orderFront(nil)
+        defer { window.close() }
+        let proxy = ProxyIconRevealController(window: window)
+        let chip = RemoteConnectionIndicator(window: window)
+        proxy.connectionIndicator = chip
+        chip.update(place: .ThisMachine, health: .Connected, host: "", carrier: "")
+        proxy.rowTitleText = "Running the build—make ◂ zsh"
+        proxy.programStatusInsertionByteOffset = "Running the build".utf8.count
+        proxy.programStatusTitle = "Linking objects"
+        proxy.applyTitleStyle(
+            directorySegment: "",
+            baseTitleBeforeDirectory: "",
+            trailingRegularSegment: "201×48",
+            dimColor: .secondaryLabelColor,
+            brightColor: .labelColor,
+            detailColor: .secondaryLabelColor
+        )
+        t.pump(0.1)
+        guard let field = chip.superview as? NSTextField else {
+            t.expect(false, desc: "the title row has one attributed field")
+            return
+        }
+        let text = field.attributedStringValue.string
+        t.expect(
+            text.hasSuffix("Running the build\(ProxyIconRevealController.statusArrow)Linking objects—make ◂ zsh—201×48"),
+            desc: "the attributed title places the program status after the app title, then the process and dimensions (\(text))"
+        )
+        t.expect(
+            window.title == "Running the build — make ◂ zsh",
+            desc: "the system title remains Core's spaced title without row components"
+        )
+        proxy.rowTitleText = "make ◂ zsh"
+        proxy.programStatusInsertionByteOffset = 0
+        proxy.applyTitleStyle(
+            directorySegment: "",
+            baseTitleBeforeDirectory: "",
+            trailingRegularSegment: "201×48",
+            dimColor: .secondaryLabelColor,
+            brightColor: .labelColor,
+            detailColor: .secondaryLabelColor
+        )
+        let withoutAppTitle = field.attributedStringValue.string
+        t.expect(
+            withoutAppTitle.hasSuffix("Linking objects—make ◂ zsh—201×48"),
+            desc: "a status with no app title still precedes the process and dimensions (\(withoutAppTitle))"
+        )
+        proxy.programStatusTitle = ""
+        let withoutStatus = field.attributedStringValue.string
+        t.expect(
+            withoutStatus.hasSuffix("make ◂ zsh—201×48") && !withoutStatus.contains("Linking objects"),
+            desc: "hiding program status leaves the process and dimensions in place (\(withoutStatus))"
+        )
+        withExtendedLifetime(proxy) {}
     }
 
     /// The chip wearing a tag, through the actual AppKit title composition.
@@ -1014,8 +1083,8 @@ enum HostChipScenarios {
     /// band: the centre of the symbol's own cap band, its alignment rect,
     /// within half a point of the centre of the status face's.
     ///
-    /// The symbol is the attachment before the status's words, which end the
-    /// title, and the face is the one its character is set in. The attachment
+    /// The symbol is the attachment before the status's words, and the face is
+    /// the one its character is set in. The attachment
     /// draws a tinted copy of the symbol at the symbol's size, so the symbol
     /// set in that face carries the cap band the copy is placed by.
     ///

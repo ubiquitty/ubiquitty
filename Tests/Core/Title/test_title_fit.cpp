@@ -68,6 +68,24 @@ TEST(aLongTitleShortensALittleAtATime)
     CHECK(titleScalarLength(steps.back().title) >= Ubiquitty::Title::shortestTitle);
 }
 
+TEST(aProgramStatusKeepsItsPlaceThroughTheFittingWalk)
+{
+    ResolvedTitle parts;
+    parts.directory = "~";
+    parts.appTitle = "Running the build";
+    parts.programStatus = "Linking";
+    parts.chain = "make ◂ zsh";
+    parts.dimensions = "201×48";
+    const auto steps = fittingSteps(parts, TitleSeparator::Spaced, {});
+    CHECK(!steps.empty());
+    CHECK_STR_EQ(steps.front().title, "~ — Running the build — Linking — make ◂ zsh — 201×48");
+    for (const auto& step : steps) {
+        const std::size_t status = step.title.find("Linking");
+        const std::size_t process = step.title.find("make");
+        CHECK(status != std::string::npos && process != std::string::npos && status < process);
+    }
+}
+
 TEST(theHomeDirectoryAlwaysStays)
 {
     ResolvedTitle parts;

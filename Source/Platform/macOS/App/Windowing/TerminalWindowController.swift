@@ -6195,6 +6195,8 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         /// A program's status label, when the surface draws it apart from its
         /// text; empty where it is woven in or not shown.
         var programStatus: String
+        /// Core's UTF-8 boundary in `title` for the separate status component.
+        var programStatusInsertionByteOffset: Int
         /// What the tab's or pane's marks put before the label — the pin and
         /// the host — which a bake measures the label's own segments past.
         var markPrefix = ""
@@ -6232,6 +6234,7 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
             lead: String(composed.lead),
             dimensions: String(composed.dimensions),
             programStatus: String(composed.programStatus),
+            programStatusInsertionByteOffset: Int(composed.programStatusInsertionByteOffset),
             markPrefix: String(composed.markPrefix),
             fitting: composed.fitting.map { (title: String($0.title), lead: String($0.lead)) }
         )

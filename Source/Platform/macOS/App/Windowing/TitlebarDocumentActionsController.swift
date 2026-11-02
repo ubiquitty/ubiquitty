@@ -112,7 +112,7 @@ public struct TitleIdentitySpan {
         case directory
         case process
         case status
-        /// A program's own status label, after the dimensions.
+        /// A program's own status label, after the app title.
         case programStatus
     }
 

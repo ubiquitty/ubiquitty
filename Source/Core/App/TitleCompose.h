@@ -143,6 +143,8 @@ struct ComposedTitle {
     /// A program's status label, where the surface draws it apart from its
     /// text; empty where it is woven in or not shown.
     std::string programStatus;
+    /// UTF-8 byte boundary in `title` where a title row draws programStatus.
+    std::size_t programStatusInsertionByteOffset = 0;
     /// What a tab's or pane's marks put before the label.
     std::string markPrefix;
     /// Shorter versions of a tab's or pane's label, longest first, for one
@@ -327,6 +329,7 @@ struct ComposedTitle {
         composed.programStatus = parts.programStatus;
         textParts.dimensions.clear();
         textParts.programStatus.clear();
+        composed.programStatusInsertionByteOffset = Title::joinedPrefixLengthBefore(textParts, Title::TitlePart::ProgramStatus, PAL::Process::TitleSeparator::Bare);
     }
     const std::string woven = Title::joinTitle(textParts, doesRowDrawComponents ? PAL::Process::TitleSeparator::Bare : PAL::Process::TitleSeparator::Spaced);
     composed.usesFallbackName = woven.empty();

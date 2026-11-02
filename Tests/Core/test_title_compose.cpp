@@ -82,9 +82,14 @@ TEST(aWindowDrawsItsDimensionsAndStatusBesideItsText)
     CHECK(window.lead == "proj");
     CHECK(window.dimensions == "80×24");
     CHECK(window.programStatus == "Working");
+    CHECK(window.programStatusInsertionByteOffset == std::string("proj—vim").size());
     CHECK_MSG(window.markPrefix.empty(), "a window title wears no marks");
     CHECK(window.systemTitle.find("80×24") == std::string::npos);
     CHECK(window.systemTitle.find("Working") == std::string::npos);
+
+    const ComposedTitle withoutAppTitle = compose(editing(), showing(true, false, true, true, true), TitleSurface::Window);
+    CHECK_STR_EQ(withoutAppTitle.title, "proj—vim");
+    CHECK(withoutAppTitle.programStatusInsertionByteOffset == std::string("proj").size());
 
     // Marks a tab would wear leave a window alone.
     TitleInputs marked = editing();
@@ -167,7 +172,7 @@ TEST(aWindowTitleThatIsOneStringCarriesEveryPart)
     inputs.pane.hostName = "build-box";
     inputs.viewer.isPinned = true;
     const ComposedTitle window = compose(inputs, showing(true, true, false, true, true), TitleSurface::Window);
-    CHECK_MSG(window.title == "proj — vim — 80×24 — Working", window.title.c_str());
+    CHECK_MSG(window.title == "proj — vim — Working — 80×24", window.title.c_str());
     CHECK_MSG(window.systemTitle == window.title, window.systemTitle.c_str());
     CHECK_MSG(window.dimensions.empty() && window.programStatus.empty(), "nothing is handed back to draw beside a title that is one string");
     CHECK_MSG(window.markPrefix.empty(), "a window title wears no marks in either form");
@@ -182,7 +187,7 @@ TEST(aWindowTitleThatIsOneStringCarriesEveryPart)
 TEST(aTabAndAPaneAreOneLineOfTextJoinedWithSpaces)
 {
     const ComposedTitle tab = compose(editing(), showing(true, true, false, true, true), TitleSurface::Tab);
-    CHECK_MSG(tab.title == "proj — vim — 80×24 — Working", tab.title.c_str());
+    CHECK_MSG(tab.title == "proj — vim — Working — 80×24", tab.title.c_str());
     CHECK(tab.lead == "proj");
     CHECK_MSG(tab.dimensions == "80×24" && tab.programStatus.empty(), "a tab weaves its status in and reports its dimensions beside");
     CHECK(tab.markPrefix.empty());
@@ -241,7 +246,7 @@ TEST(aCustomTitleReplacesOnlyThePartItNames)
     TitleInputs named = editing();
     named.pane.tabTitle = "deploy";
     const ComposedTitle tab = compose(named, everything, TitleSurface::Tab);
-    CHECK_MSG(tab.title == "proj — deploy — 80×24 — Working", tab.title.c_str());
+    CHECK_MSG(tab.title == "proj — deploy — Working — 80×24", tab.title.c_str());
     CHECK(tab.lead == "proj");
     CHECK_MSG(compose(named, everything, TitleSurface::Pane).title.find("deploy") == std::string::npos, "a pane does not answer to its tab's name");
     CHECK_MSG(compose(named, everything, TitleSurface::Window).title == "proj—vim—vim", "a tab's name does not reach its window");
@@ -254,21 +259,22 @@ TEST(aCustomTitleReplacesOnlyThePartItNames)
     CHECK_MSG(window.title == "proj—ops", window.title.c_str());
     CHECK_MSG(window.systemTitle == "proj — ops", window.systemTitle.c_str());
     CHECK(window.dimensions == "80×24" && window.programStatus == "Working" && window.lead == "proj");
+    CHECK(window.programStatusInsertionByteOffset == std::string("proj—ops").size());
     // Whatever the app-title switch says.
     const ComposedTitle kept = compose(windowNamed, showing(true, false, false, true, false), TitleSurface::Window);
     CHECK_MSG(kept.title == "proj—ops" && kept.dimensions == "80×24", kept.title.c_str());
 
     // The tab follows its window's name until it is named apart.
-    CHECK_MSG(compose(windowNamed, everything, TitleSurface::Tab).title == "proj — ops — 80×24 — Working", compose(windowNamed, everything, TitleSurface::Tab).title.c_str());
+    CHECK_MSG(compose(windowNamed, everything, TitleSurface::Tab).title == "proj — ops — Working — 80×24", compose(windowNamed, everything, TitleSurface::Tab).title.c_str());
     windowNamed.pane.tabTitle = "deploy";
-    CHECK(compose(windowNamed, everything, TitleSurface::Tab).title == "proj — deploy — 80×24 — Working");
+    CHECK(compose(windowNamed, everything, TitleSurface::Tab).title == "proj — deploy — Working — 80×24");
     CHECK(compose(windowNamed, everything, TitleSurface::Window).title == "proj—ops");
 
     // Empty is automatic: the program names the surfaces again.
     windowNamed.pane.tabTitle.clear();
     windowNamed.pane.windowTitle.clear();
     CHECK(compose(windowNamed, everything, TitleSurface::Window).title == "proj—vim—vim");
-    CHECK(compose(windowNamed, everything, TitleSurface::Tab).title == "proj — vim — vim — 80×24 — Working");
+    CHECK(compose(windowNamed, everything, TitleSurface::Tab).title == "proj — vim — Working — vim — 80×24");
 
     // A program's later title does not move a custom title.
     TitleInputs retitled = editing();
