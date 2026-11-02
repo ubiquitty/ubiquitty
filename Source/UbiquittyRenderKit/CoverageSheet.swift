@@ -76,6 +76,8 @@ final class CoverageSheet {
     ///   - slotHeightInPixels: One slot's height.
     ///   - slotCapacity: How many slots to make room for, before clamping.
     ///   - pen: Where a glyph's origin sits inside a slot.
+    ///   - centringWidthInPixels: The width a glyph's advance is centred in,
+    ///     from the pen; zero draws every glyph at the pen.
     ///   - maxTextureDimension: The API's largest 2D texture edge. Passed in
     ///     rather than read here: Metal states it as a constant per GPU family
     ///     and Vulkan reports it as `maxImageDimension2D`, so the number is the
@@ -91,6 +93,13 @@ final class CoverageSheet {
     /// the same character smaller when it is scaled — by exactly the cap.
     let boostCap: CGFloat
 
+    /// The width, from the pen, that a glyph's advance is centred in.
+    ///
+    /// The wide sheet's is its two cells: a face whose advance is narrower than
+    /// two cells, as a CJK face beside a narrower primary is, then stands in the
+    /// middle of them rather than against the left one. Zero draws at the pen.
+    let centringWidthInPixels: CGFloat
+
     init?(
         device: MTLDevice,
         uploader: AtlasUploader,
@@ -100,9 +109,11 @@ final class CoverageSheet {
         slotCapacity: Int,
         pen: CGPoint,
         boostCap: CGFloat = 0,
+        centringWidthInPixels: CGFloat = 0,
         maxTextureDimension: Int
     ) {
         self.boostCap = boostCap
+        self.centringWidthInPixels = centringWidthInPixels
         self.uploader = uploader
         guard columns > 0, slotCapacity > 0, slotWidthInPixels > 0, slotHeightInPixels > 0,
             let rasterizer = GlyphRasterizer(
@@ -209,7 +220,7 @@ final class CoverageSheet {
         rasterizer.enqueue(
             glyph: glyph,
             in: font,
-            at: CGPoint(x: pen.x + subpixel, y: pen.y),
+            at: CGPoint(x: pen.x + centringOffset(of: glyph, in: font) + subpixel, y: pen.y),
             boostCappedTo: boostCap,
             style: style
         ) { [weak self] plane in
@@ -223,6 +234,26 @@ final class CoverageSheet {
                 )
             }
         }
+    }
+
+    /// How far past the pen a glyph is drawn so its advance is centred.
+    ///
+    /// Whole pixels, so the pen keeps the subpixel phase Core keyed the slot at.
+    ///
+    /// - Parameters:
+    ///   - glyph: The glyph, or a cluster's base.
+    ///   - font: The face that carries it.
+    /// - Returns: The offset in pixels; zero when the sheet does not centre.
+    private func centringOffset(of glyph: CGGlyph, in font: CTFont) -> CGFloat {
+        guard centringWidthInPixels > 0 else {
+            return 0
+        }
+        var glyph = glyph
+        let advance = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, nil, 1)
+        guard advance > 0 else {
+            return 0
+        }
+        return ((centringWidthInPixels - advance) / 2).rounded(.towardZero)
     }
 
     /// Clears a slot, for a cluster CoreText could only resolve to LastResort.
@@ -440,7 +471,7 @@ final class CoverageSheet {
     ) {
         rasterizer.rasterise(
             line: line,
-            at: CGPoint(x: pen.x + subpixel, y: pen.y),
+            at: CGPoint(x: pen.x + centringOffset(of: baseGlyph, in: font) + subpixel, y: pen.y),
             boostCappedTo: boostCap,
             sizedBy: baseGlyph,
             in: font,

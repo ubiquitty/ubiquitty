@@ -782,6 +782,11 @@ package final class GlyphAtlas {
         // count, so a shared budget would make the LRU re-rasterise every
         // resident glyph on every pass instead of filling each once. CoverageSheet clamps
         // the nominal grid to the device limit.
+        // Two true cell advances, not two rounded cell boxes: the phased wide
+        // quad stands 1:1 at the cell's pen, so the cells end where the
+        // advances do.
+        let cellAdvance = geometry.referenceAdvanceInPixels > 0 ? geometry.referenceAdvanceInPixels : Float(geometry.glyphWidthInPixels)
+        let wideCentringWidth = 2 * CGFloat(cellAdvance)
         self.wide =
             geometry.wideSlotWidthInPixels > 0 && geometry.wideSlotHeightInPixels > 0
             ? CoverageSheet(
@@ -803,6 +808,7 @@ package final class GlyphAtlas {
                 // config that moves the key off its default — every case that
                 // leaves it alone agrees either way.
                 boostCap: CGFloat(wideGlyphBoostCap),
+                centringWidthInPixels: wideCentringWidth,
                 maxTextureDimension: device.maximumTexture2DDimension
             )
             : nil
