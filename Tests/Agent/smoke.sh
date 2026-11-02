@@ -112,11 +112,12 @@ as_person "$AGENT" --yes send -s "$S" --enter 'echo RUNMARK_$(echo ok)' >/dev/nu
     || fail "read --screen does not show the command's output"
 
 # --- a write the daemon never confirms is a failure, not a success ----------
-# A relay in the control directory stands between send and the daemon. Once
-# the text has gone through it, the daemon is stopped, so the text is sent
-# and the daemon cannot say it wrote it: send must say so and exit 9, not
-# report the text typed and leave.
+# The relay stops the daemon before forwarding marked text. The sender can
+# hand over the input, but no write acknowledgement can return: send must
+# report the unconfirmed write and exit 9.
 echo "agent-smoke: send fails when the daemon never confirms writing the text"
+python3 -B "$ROOT/Tests/Agent/test_unconfirmed_send_relay.py" \
+    || fail "the unconfirmed-write relay checks failed"
 DAEMON_PID="$(cat "$UBIQUITTY_HOME"/host*.pid)"
 # A client holds a daemon to the socket it reached it at: the Welcome names the
 # socket the daemon serves, and a relay at any other name is refused. So the
@@ -125,57 +126,7 @@ DAEMON_PID="$(cat "$UBIQUITTY_HOME"/host*.pid)"
 RELAY="$SOCK"
 DAEMON_SOCK="$SOCK.relayed"
 mv "$SOCK" "$DAEMON_SOCK" || fail "the daemon's socket could not be moved aside for the relay"
-cat >"$WORK/relay.py" <<'EOF_RELAY'
-import os, selectors, signal, socket, sys
-listen_path, daemon_path, daemon_pid, marker, frozen_path, ready_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4].encode(), sys.argv[5], sys.argv[6]
-signal.alarm(60)
-frozen = False
-def resume(*_):
-    if frozen:
-        os.kill(daemon_pid, signal.SIGCONT)
-    sys.exit(0)
-signal.signal(signal.SIGTERM, resume)
-signal.signal(signal.SIGALRM, resume)
-server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-server.bind(listen_path)
-server.listen(8)
-open(ready_path, "w").close()
-selector = selectors.DefaultSelector()
-selector.register(server, selectors.EVENT_READ)
-peers, seen = {}, {}
-while True:
-    for key, _ in selector.select():
-        if key.fileobj is server:
-            client, _ = server.accept()
-            daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            daemon.connect(daemon_path)
-            peers[client], peers[daemon] = daemon, client
-            seen[client] = b""
-            selector.register(client, selectors.EVENT_READ)
-            selector.register(daemon, selectors.EVENT_READ)
-            continue
-        source = key.fileobj
-        if source not in peers:
-            continue  # closed earlier in this batch with its other end
-        data = source.recv(65536)
-        if not data:
-            other = peers.pop(source)
-            peers.pop(other, None)
-            for end in (source, other):
-                selector.unregister(end)
-                end.close()
-            if source in seen and frozen:
-                resume()
-            continue
-        if source in seen and not frozen:
-            seen[source] = (seen[source] + data)[-4096:]
-            if marker in seen[source]:
-                os.kill(daemon_pid, signal.SIGSTOP)
-                frozen = True
-                open(frozen_path, "w").close()
-        peers[source].sendall(data)
-EOF_RELAY
-python3 "$WORK/relay.py" "$RELAY" "$DAEMON_SOCK" "$DAEMON_PID" UNCONFIRMED_MARK "$WORK/frozen" "$WORK/relay.ready" 2>"$WORK/relay.err" &
+python3 "$ROOT/Tests/Agent/unconfirmed_send_relay.py" "$RELAY" "$DAEMON_SOCK" "$DAEMON_PID" UNCONFIRMED_MARK "$WORK/frozen" "$WORK/relay.ready" 2>"$WORK/relay.err" &
 RELAY_PID=$!
 for _ in $(seq 1 600); do [ -e "$WORK/relay.ready" ] && break; sleep 0.05; done
 [ -e "$WORK/relay.ready" ] || fail "the relay did not listen"

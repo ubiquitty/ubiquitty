@@ -7,6 +7,7 @@ import ImageIO
 import Metal
 import QuartzCore
 import UniformTypeIdentifiers
+internal import CxxStdlib
 internal import UbiquittyCore
 internal import UbiquittyRenderKit
 
@@ -295,7 +296,31 @@ final class SurfaceSnapshot {
     }
 
     func writePNG(to path: String) -> Bool {
-        guard let pixels = pixels(), let provider = CGDataProvider(data: pixels as CFData),
+        guard let pixels = pixels() else { return false }
+        if renderer.isBitmapTier {
+            // The bitmap tier stores straight BGRA samples. The portable PNG
+            // encoder writes those samples without a Core Graphics alpha
+            // conversion on the snapshot path.
+            var rgba = [UInt8](pixels)
+            for offset in stride(from: 0, to: rgba.count, by: 4) {
+                rgba.swapAt(offset, offset + 2)
+            }
+            let encoded = rgba.withUnsafeBufferPointer { buffer in
+                Ubiquitty.Rendering.encodePNG(
+                    Ubiquitty.Rendering.PNGPixels(buffer),
+                    Ubiquitty.IntSize(width: Int32(texture.width), height: Int32(texture.height))
+                )
+            }
+            guard !encoded.empty() else { return false }
+            do {
+                try Data((0..<Int(encoded.size())).map { encoded[$0] }).write(to: URL(fileURLWithPath: path))
+            } catch {
+                return false
+            }
+            reportFrameBuild()
+            return true
+        }
+        guard let provider = CGDataProvider(data: pixels as CFData),
             let space = CGColorSpace(name: CGColorSpace.sRGB),
             let image = CGImage(
                 width: texture.width,
@@ -305,8 +330,7 @@ final class SurfaceSnapshot {
                 bytesPerRow: texture.width * 4,
                 space: space,
                 bitmapInfo: CGBitmapInfo(
-                    rawValue: (renderer.isBitmapTier ? CGImageAlphaInfo.first : .premultipliedFirst).rawValue
-                        | CGBitmapInfo.byteOrder32Little.rawValue
+                    rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
                 ),
                 provider: provider,
                 decode: nil,
@@ -322,6 +346,11 @@ final class SurfaceSnapshot {
         else { return false }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { return false }
+        reportFrameBuild()
+        return true
+    }
+
+    private func reportFrameBuild() {
         print("ubiquitty-render-path: builder=core compositor=metal encoder=swift")
         // What Core's builder emitted for this frame, so a check can tell a frame
         // that built the scene from one that wrote a PNG of nothing.
@@ -333,7 +362,6 @@ final class SurfaceSnapshot {
             "surface-frame-build: cells=\(counts.cells) glyphs=\(glyphs) decorations=\(counts.decorations) "
                 + "boxFills=\(counts.boxFills)"
         )
-        return true
     }
 
     private static func compositePasswordBadge(

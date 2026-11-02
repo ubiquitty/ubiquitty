@@ -318,7 +318,26 @@ class PNGTests(unittest.TestCase):
             self.assertEqual(run.read_png_rgb(golden),
                              (2, 1, bytes((10, 20, 30, 40, 50, 60))))
             self.assertTrue(run.compare_png(within, golden)[0])
-            self.assertFalse(run.compare_png(outside, golden)[0])
+            matches, detail, _, _ = run.compare_png(outside, golden)
+            self.assertFalse(matches)
+            self.assertIn(
+                "first differing pixel (0,0) expected RGBA (10, 20, 30, 255), actual RGBA (23, 20, 30, 255)",
+                detail,
+            )
+
+    def test_flattened_opacity_names_the_alpha_loss(self):
+        golden = run.GOLDEN_ROOT / "unifont" / "background_opacity.png"
+        width, height, rgba = run.read_png_rgba(golden)
+        rgb = bytes(channel for offset in range(0, len(rgba), 4)
+                    for channel in rgba[offset:offset + 3])
+        with tempfile.TemporaryDirectory() as directory:
+            actual = Path(directory) / "opaque.png"
+            run.write_rgb_png(actual, width, height, rgb)
+            matches, detail, _, differing = run.compare_png(actual, golden)
+        self.assertFalse(matches)
+        self.assertEqual(differing, 74792)
+        self.assertIn("worst channel delta 102", detail)
+        self.assertIn("first differing pixel (0,0) expected RGBA (16, 16, 20, 153), actual RGBA (16, 16, 20, 255)", detail)
 
     def test_strict_case_catches_a_shift_the_default_budget_allows(self):
         """A small subject moved one pixel is what `strict` exists to catch.

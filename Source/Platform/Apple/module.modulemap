@@ -68,6 +68,7 @@ module UbiquittyCore {
     header "../../Core/Rendering/SizedMaster.h"
     header "../../Core/Rendering/UnifontRasterizer.h"
     header "../../Core/Rendering/SoftwareRenderer.h"
+    header "../../Core/Rendering/PNGEncoder.h"
     header "../../Core/Rendering/ProportionalStripRaster.h"
     header "../../Core/Diagnostics/EscapeDecode.h"
     header "../../Core/Diagnostics/SnapshotArguments.h"

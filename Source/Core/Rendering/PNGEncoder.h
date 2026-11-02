@@ -32,6 +32,9 @@ static_assert(rgbaChannelCount == 4, "PNG colour type 6 is RGBA; the IHDR writer
 static_assert(sizeof(IntSize) == 2 * sizeof(int));
 static_assert(std::is_trivially_copyable_v<IntSize>);
 
+/// The byte range passed from Apple snapshot code through Swift C++ interop.
+using PNGPixels = std::span<const uint8_t>;
+
 /// Encodes an RGBA image as a PNG file.
 ///
 /// - Parameters:
@@ -46,6 +49,6 @@ static_assert(std::is_trivially_copyable_v<IntSize>);
 ///   - size: The image's dimensions in pixels.
 /// - Returns: The PNG file bytes, or empty when the dimensions are not positive
 ///   or `rgba` is not the size they describe.
-std::vector<uint8_t> encodePNG(std::span<const uint8_t> rgba, IntSize size);
+std::vector<uint8_t> encodePNG(PNGPixels rgba, IntSize size);
 
 } // namespace Ubiquitty::Rendering

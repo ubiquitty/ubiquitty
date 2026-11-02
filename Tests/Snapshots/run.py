@@ -1438,6 +1438,7 @@ def compare_png(actual_path, golden_path, strict=False):
     differing = 0
     repainted = 0
     worst = 0
+    first_difference = None
     heatmap = bytearray(actual_width * actual_height * 3)
     for offset in range(0, len(actual), 4):
         differences = [abs(actual[offset + channel] - golden[offset + channel])
@@ -1446,6 +1447,13 @@ def compare_png(actual_path, golden_path, strict=False):
         worst = max(worst, pixel_worst)
         if pixel_worst > CHANNEL_TOLERANCE:
             differing += 1
+            if first_difference is None:
+                pixel = offset // 4
+                first_difference = (
+                    f"; first differing pixel ({pixel % actual_width},{pixel // actual_width}) "
+                    f"expected RGBA {tuple(golden[offset:offset + 4])}, "
+                    f"actual RGBA {tuple(actual[offset:offset + 4])}"
+                )
         if pixel_worst > REPAINT_DELTA:
             repainted += 1
         # The heat map stays RGB; an alpha difference heats every channel so
@@ -1460,7 +1468,7 @@ def compare_png(actual_path, golden_path, strict=False):
     if repainted > repaint_budget:
         return False, (f"{repainted}px repainted (delta > {REPAINT_DELTA}), "
                        f"{differing}px differ ({fraction:.4%}), worst channel "
-                       f"delta {worst}"
+                       f"delta {worst}{first_difference or ''}"
                        + (f"; strict case, budget {repaint_budget}" if strict else "")
                        ), (actual_width, actual_height, heatmap), differing
     if fraction <= MAX_DIFFERING_FRACTION:
@@ -1471,7 +1479,7 @@ def compare_png(actual_path, golden_path, strict=False):
             f"{worst}; within tolerance")
         return True, detail, None, differing
     return False, (f"{differing}px differ ({fraction:.4%}), worst channel "
-                   f"delta {worst}"), (actual_width, actual_height, heatmap), differing
+                   f"delta {worst}{first_difference or ''}"), (actual_width, actual_height, heatmap), differing
 
 
 def write_rgb_png(path, width, height, pixels):
