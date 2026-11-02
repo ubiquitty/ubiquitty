@@ -36,6 +36,27 @@ inline std::string shellSingleQuote(std::string_view s)
     return out;
 }
 
+/// Runs a script under /bin/sh through an SSH server's login shell.
+///
+/// The login shell parses only exec and one quoted argument. Backslashes stay
+/// outside quotes because fish and POSIX shells differ inside single quotes.
+/// - Parameter script: The complete POSIX shell script, before SSH encoding.
+/// - Returns: The remote exec request, preserving every byte of the script.
+[[nodiscard]] inline std::string remoteShellCommand(std::string_view script)
+{
+    std::string command = "exec /bin/sh -c '";
+    for (const char character : script) {
+        if (character == '\'')
+            command += "'\\''";
+        else if (character == '\\')
+            command += "'\\\\'";
+        else
+            command.push_back(character);
+    }
+    command.push_back('\'');
+    return command;
+}
+
 // One char of the conservative SSH-host characterSet: ASCII letters/digits plus the
 // punctuation real `[user@]host` strings (incl. IPv6 literals) use. See the
 // header comment for why ':' '[' ']' '%' are safe to admit mid-string.

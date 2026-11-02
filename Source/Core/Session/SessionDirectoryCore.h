@@ -127,13 +127,15 @@ enum class ListingFailure : std::uint8_t {
     /// listens for that daemon any longer: it stopped. Asking it again gets
     /// the same answer; the host's current daemon is asked without the pin.
     InstanceGone = 8,
+    /// The answer cannot serve the picked daemon's listing: its protocol or identity differs.
+    InstanceUnreadable = 9,
 };
 
 /// Everything a failed errand says about why, as facts.
 struct DirectoryFailureReport {
     /// What kind of failure it was.
     ListingFailure failure { ListingFailure::Unreachable };
-    /// The host's reason, read only for ``ListingFailure::Refused``.
+    /// The host's reason, read for a refusal or an unreadable picked daemon.
     Protocol::Sync::ByeReason deniedReason { Protocol::Sync::ByeReason::Normal };
     /// The `uname -sm` the host reported: by the bootstrap for
     /// ``ListingFailure::NotInstalled``, by the refusal for
@@ -142,8 +144,7 @@ struct DirectoryFailureReport {
     /// Which end of a version refusal is older, read only for
     /// ``ListingFailure::Refused``.
     Protocol::Sync::OlderSide olderSide { Protocol::Sync::OlderSide::Unknown };
-    /// What the refusing host said about its build, read only for
-    /// ``ListingFailure::Refused``.
+    /// What the refusing or unreadable host said about its build.
     Protocol::Sync::PeerBuild hostBuild;
     /// The carrier's or the host's own words, verbatim, for a person to read;
     /// may be empty.
@@ -295,6 +296,16 @@ public:
     ///
     /// - Parameter token: The token, or empty to present none.
     void setAuthToken(std::string token) { m_authToken = std::move(token); }
+
+    /// Pins the identity a listing must answer for, before an errand starts.
+    ///
+    /// The discovered version describes the running process even if its binary was replaced.
+    /// - Parameter instance: The discovered daemon; empty for the host's default.
+    void setExpectedDaemon(HostInstanceInfo instance)
+    {
+        assert(!isBusy());
+        m_expectedDaemon = std::move(instance);
+    }
 
     /// Asks the host for its session list.
     ///
@@ -580,6 +591,7 @@ private:
     std::unique_ptr<Ubiquitty::Transport::Channel> m_channel;
 
     std::string m_authToken;
+    HostInstanceInfo m_expectedDaemon;
     BootstrapResponse m_bootstrapResponse;
     Errand m_errand = Errand::None;
     Finish m_finish = Finish::None;

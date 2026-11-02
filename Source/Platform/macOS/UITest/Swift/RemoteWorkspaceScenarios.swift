@@ -250,6 +250,10 @@ enum RemoteWorkspaceScenarios {
                 run(t)
             }
         }
+        UBUITestRegister("remote_workspace_late_tab_keeps_its_process_title") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { run(t, processAttributionOnly: true) }
+        }
         UBUITestRegister("remote_workspace_progress_follows_hosted_pane_focus") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { run(t, progressOnly: true) }
@@ -1063,7 +1067,9 @@ enum RemoteWorkspaceScenarios {
             return
         }
         let quotedBinary = "'" + hostBinary.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-        let command = "SOCK=\"\"; exec " + quotedBinary + " --attach ${SOCK:+--socket \"$SOCK\"}"
+        let command =
+            "SOCK=\"\"; if [ -n \"$SOCK\" ]; then exec " + quotedBinary
+            + " --attach --socket \"$SOCK\"; else exec " + quotedBinary + " --attach; fi"
         var controllers: [TerminalWindowController] = []
         for socketName in socketNames {
             guard
@@ -1412,6 +1418,149 @@ enum RemoteWorkspaceScenarios {
     }
 
     @MainActor
+    private static func verifyHostedProcessAttribution(
+        _ t: UBUITestContext,
+        controller: TerminalWindowController,
+        under root: String
+    ) {
+        guard #available(macOS 26.0, *), let firstWindow = controller.window,
+            let first = controller.remoteSurface
+        else {
+            t.expect(false, desc: "the hosted process-title scenario requires the native glass tab strip")
+            return
+        }
+        let markers = ["ALPHA", "BRAVO", "CHARLIE"]
+        let programs = ["alpha-task", "bravo-task", "claude"]
+        var members = [controller]
+        var sessions: [UInt32] = []
+        for index in markers.indices {
+            if index != 0 {
+                members[index - 1].newWindowForTab(nil)
+                guard t.wait(until: { firstWindow.tabGroup?.windows.count == index + 1 }, timeout: 20),
+                    let made = firstWindow.tabGroup?.windows.compactMap({ $0.windowController as? TerminalWindowController })
+                        .first(where: { candidate in !members.contains(where: { $0 === candidate }) }),
+                    t.wait(until: { made.remoteSurface?.drive.remoteState == .Connected }, timeout: 20)
+                else {
+                    t.expect(false, desc: "host tab \(index + 1) opens after the preceding tabs are connected")
+                    return
+                }
+                members.append(made)
+            }
+            guard let pane = members[index].remoteSurface else { return }
+            sessions.append(pane.remoteSessionID)
+            let executable = root + "/" + programs[index]
+            do {
+                try FileManager.default.copyItem(atPath: "/bin/sh", toPath: executable)
+            } catch {
+                t.expect(false, desc: "the named foreground fixture is copied (\(error))")
+                return
+            }
+            pane.send("'\(executable)' -c 'printf \"\\033]0;\(markers[index])\\007\(markers[index])\\n\"; read -r line'\n")
+            guard
+                t.wait(
+                    until: {
+                        pane.drive.foregroundProcessName == programs[index]
+                            && pane.gridTextForTesting().contains(markers[index])
+                            && members[index].window?.tab.title.contains(markers[index]) == true
+                    },
+                    timeout: 20
+                )
+            else {
+                t.expect(false, desc: "session \(pane.remoteSessionID) publishes \(programs[index]) and \(markers[index])")
+                return
+            }
+        }
+        func icons(_ title: NSAttributedString?) -> [String] {
+            guard let title else { return [] }
+            var keys: [String] = []
+            title.enumerateAttribute(.attachment, in: NSRange(location: 0, length: title.length)) { value, _, _ in
+                if let icon = value as? ProcessIconAttachment { keys.append(icon.key) }
+            }
+            return keys
+        }
+        func verify(_ phase: String) {
+            guard let group = firstWindow.tabGroup else {
+                t.expect(false, desc: "the three tabs stay grouped \(phase)")
+                return
+            }
+            let pills = TabStripStyling.tabPills(inGroupOf: firstWindow)
+            let selected = TabStripStyling.pillContentsForTesting(inGroupOf: firstWindow)
+            t.expect(
+                pills.count == markers.count,
+                desc: "one native pill belongs to each tab \(phase): \(pills.count) pills, \(group.windows.count) windows"
+            )
+            for index in markers.indices {
+                let member = members[index]
+                let expectedTab = first.drive.remoteWorkspaceTab(of: first.drive.remoteWorkspaceSurface, at: index)
+                let field = TabStripStyling.testTitleField(inGroupOf: firstWindow, at: index)
+                let actual = field?.attributedStringValue
+                let baked = member.window?.tab.attributedTitle
+                t.expect(member.remoteWorkspaceTab == expectedTab, desc: "host tab identity \(index + 1) stays with its window \(phase)")
+                t.expect(group.windows[index] === member.window, desc: "native tab order matches the host \(phase)")
+                t.expect(
+                    selected.indices.contains(index) && selected[index].isSelected == (group.selectedWindow === member.window),
+                    desc: "the native selection belongs to tab \(index + 1) \(phase)"
+                )
+                t.expect(
+                    member.remoteSurface?.remoteSessionID == sessions[index],
+                    desc: "session identity stays with tab \(index + 1) \(phase)"
+                )
+                t.expect(
+                    member.remoteSurface?.drive.foregroundProcessName == programs[index],
+                    desc: "the process belongs to tab \(index + 1) \(phase)"
+                )
+                t.expect(baked?.string.contains(markers[index]) == true, desc: "tab \(index + 1) bakes its own title \(phase)")
+                t.expect(
+                    actual?.string.contains(markers[index]) == true,
+                    desc: "tab \(index + 1) displays its own title \(phase): \(actual?.string ?? "missing field")"
+                )
+                t.expect(icons(actual) == icons(baked), desc: "tab \(index + 1) displays its own process icon \(phase)")
+                if index == 2 { t.expect(icons(baked) == ["claude-code"], desc: "the third process has its catalog icon") }
+            }
+        }
+        t.pump(0.5)
+        verify("after adding the third tab")
+        let tabPills = TabStripStyling.tabPills(inGroupOf: firstWindow)
+        if tabPills.count == 3, tabPills[1].button.superview === tabPills[2].button.superview,
+            let secondField = TabStripStyling.testTitleField(inGroupOf: firstWindow, at: 1),
+            let thirdField = TabStripStyling.testTitleField(inGroupOf: firstWindow, at: 2)
+        {
+            let secondFrame = tabPills[1].button.frame
+            let thirdFrame = tabPills[2].button.frame
+            let secondTitle = NSAttributedString(attributedString: secondField.attributedStringValue)
+            let thirdTitle = NSAttributedString(attributedString: thirdField.attributedStringValue)
+            // Native fields keep their owners while tab geometry is in transit.
+            tabPills[1].button.setFrameOrigin(thirdFrame.origin)
+            tabPills[2].button.setFrameOrigin(secondFrame.origin)
+            TabStripStyling.restyleTitles(in: firstWindow)
+            t.expect(
+                secondField.attributedStringValue.isEqual(to: secondTitle),
+                desc: "moving a field cannot give it another tab's title or icon"
+            )
+            t.expect(
+                thirdField.attributedStringValue.isEqual(to: thirdTitle),
+                desc: "the third field keeps its owner while positions disagree"
+            )
+            tabPills[1].button.frame = secondFrame
+            tabPills[2].button.frame = thirdFrame
+            TabStripStyling.restyleTitles(in: firstWindow)
+        } else {
+            t.expect(false, desc: "two native tab fields can be moved independently for the ownership check")
+        }
+        if let lastWindow = members.last?.window {
+            lastWindow.setContentSize(NSSize(width: 1200, height: 700))
+            t.pump(0.5)
+            verify("after resizing")
+        }
+        for member in members {
+            firstWindow.tabGroup?.selectedWindow = member.window
+            member.window?.makeKeyAndOrderFront(nil)
+            t.pump(0.5)
+            verify("after selecting session \(member.remoteSurface?.remoteSessionID ?? 0)")
+        }
+    }
+
+    @MainActor
     private static func run(
         _ t: UBUITestContext,
         usesQUIC: Bool = false,
@@ -1424,6 +1573,7 @@ enum RemoteWorkspaceScenarios {
         topInsetOnly: Bool = false,
         fullScreenOnly: Bool = false,
         titleBarsOnly: Bool = false,
+        processAttributionOnly: Bool = false,
         linkDelayMilliseconds: ClosedRange<Int>? = nil
     ) {
         guard let hostBinary = ProcessInfo.processInfo.environment["UBIQUITTY_UI_TEST_HOST"],
@@ -1497,6 +1647,7 @@ enum RemoteWorkspaceScenarios {
         // top inset more than a row above the titled one.
         let saved = t.configureAppending(
             "[security]\nclipboard_read = \"allow\"\n[appearance]\nsquare_bottom_corners = false\n"
+                + (processAttributionOnly ? "process_icons = true\ntitlebar_style = \"themed\"\n" : "")
                 + (snapOnly ? "snap_window_resize = true\n" : "")
                 + (topInsetOnly ? "titleless_padding_top = 40\n" : "")
         )
@@ -1588,6 +1739,10 @@ enum RemoteWorkspaceScenarios {
         }
         if titleBarsOnly {
             verifyHostedPaneTitleBars(t, controller: window)
+            return
+        }
+        if processAttributionOnly {
+            verifyHostedProcessAttribution(t, controller: window, under: root)
             return
         }
 

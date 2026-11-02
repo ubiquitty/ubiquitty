@@ -2601,4 +2601,86 @@ TEST(managementCorrelatesRepliesAndRetainsSnapshotAfterTimeout)
     CHECK_EQ(hosts.client.snapshot().management.clients.front().clientID, 42u);
 }
 
+TEST(aPickedDaemonVersionRefusalStaysAListingFailure)
+{
+    for (const bool hasVersion : { false, true }) {
+        Dispatcher dispatcher;
+        Factory factory;
+        Runtime::HostDirectoryClient client(dispatcher, factory);
+        Session::HostInstanceInfo picked { "host-0123456789abcdef.sock", "/tmp/ubiquitty-host", 1 };
+        if (hasVersion)
+            picked.appVersion = "0.2.0 (example)";
+        client.setExpectedDaemon(picked);
+        REQUIRE(client.refresh());
+        sendRefusal(factory, dispatcher, { .reason = Protocol::Sync::ByeReason::VersionMismatch });
+        const auto result = client.snapshot();
+        CHECK(result.phase == Runtime::HostDirectoryClient::ListingPhase::Failed);
+        CHECK(result.failure == Session::ListingFailure::InstanceUnreadable);
+        CHECK(result.error.find("Its sessions keep running") != std::string::npos);
+        CHECK((result.error.find("0.2.0 (example)") != std::string::npos) == hasVersion);
+        CHECK(!Session::isPickedDaemonGone(picked.socketName, "", result.daemonSocketName));
+        CHECK(result.tree == nullptr);
+    }
+}
+
+TEST(aPickedDaemonCannotBeReplacedByAnotherDaemonsAnswer)
+{
+    Dispatcher dispatcher;
+    Factory factory;
+    Runtime::HostDirectoryClient client(dispatcher, factory);
+    client.setExpectedDaemon({ "host-0123456789abcdef.sock", "/tmp/ubiquitty-host", 1 });
+    REQUIRE(client.refresh());
+    WelcomedHost host;
+    sendWelcome(factory, dispatcher, host);
+    CHECK(client.snapshot().phase == Runtime::HostDirectoryClient::ListingPhase::Failed);
+    CHECK(client.snapshot().failure == Session::ListingFailure::InstanceUnreadable);
+    CHECK(client.snapshot().tree == nullptr);
+    CHECK(client.snapshot().daemonSocketName.empty());
+    CHECK(client.snapshot().error.find("A different host answered") != std::string::npos);
+}
+
+TEST(aPickedDaemonsWireVersionTakesPrecedenceOverDiscovery)
+{
+    Dispatcher dispatcher;
+    Factory factory;
+    Runtime::HostDirectoryClient client(dispatcher, factory);
+    client.setExpectedDaemon({ "host-0123456789abcdef.sock", "/tmp/ubiquitty-host", 1, "0.2.0 (discovered)" });
+    REQUIRE(client.refresh());
+    sendRefusal(factory, dispatcher, { .reason = Protocol::Sync::ByeReason::VersionMismatch, .peer = Protocol::Sync::PeerMetadata { .build = { .isKnown = true, .wireVersion = Protocol::Sync::wireVersion, .appVersion = "0.2.1" }, .platform = "Linux x86_64" } });
+    const auto result = client.snapshot();
+    CHECK(result.failure == Session::ListingFailure::InstanceUnreadable);
+    CHECK_STR_EQ(result.hostBuild.appVersion, "0.2.1");
+    CHECK(result.error.find("(0.2.1)") != std::string::npos);
+    CHECK(result.error.find("discovered") == std::string::npos);
+}
+
+TEST(aPickedDaemonsUnreadableRefusalUsesItsDiscoveredVersion)
+{
+    Dispatcher dispatcher;
+    Factory factory;
+    Runtime::HostDirectoryClient client(dispatcher, factory);
+    client.setExpectedDaemon({ "host-0123456789abcdef.sock", "/tmp/ubiquitty-host", 1, "0.2.0 (discovered)" });
+    REQUIRE(client.refresh());
+    sendRefusal(factory, dispatcher, { .reason = Protocol::Sync::ByeReason::VersionMismatch, .peer = Protocol::Sync::PeerMetadata { .build = { .isKnown = true, .wireVersion = 0, .appVersion = "unreadable" }, .platform = "" } });
+    const auto result = client.snapshot();
+    CHECK(result.failure == Session::ListingFailure::InstanceUnreadable);
+    CHECK(result.error.find("0.2.0 (discovered)") != std::string::npos);
+    CHECK(result.error.find("Its sessions keep running") != std::string::npos);
+}
+
+TEST(aPickedDaemonsAuthRefusalAndGoneProbeKeepTheirMeaning)
+{
+    Dispatcher dispatcher;
+    Factory factory;
+    Runtime::HostDirectoryClient client(dispatcher, factory);
+    client.setExpectedDaemon({ "host-0123456789abcdef.sock", "/tmp/ubiquitty-host", 1 });
+    REQUIRE(client.refresh());
+    sendRefusal(factory, dispatcher, { .reason = Protocol::Sync::ByeReason::TokenExpired });
+    CHECK(client.snapshot().failure == Session::ListingFailure::Refused);
+    CHECK(client.snapshot().deniedReason == Protocol::Sync::ByeReason::TokenExpired);
+    REQUIRE(client.refresh());
+    sendBytes(factory, dispatcher, "\nUBIQUITTY-INSTANCE-GONE host-0123456789abcdef.sock\n");
+    CHECK(client.snapshot().failure == Session::ListingFailure::InstanceGone);
+}
+
 UBIQUITTY_TEST_MAIN()

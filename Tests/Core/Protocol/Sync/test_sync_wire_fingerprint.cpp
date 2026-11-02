@@ -4,11 +4,13 @@
 // Pins deterministic byte encodings independently of the round-trip tests.
 // A symmetric encoder/decoder change passes a round trip but moves these
 // digests. Review the layout change before updating the affected corpus pin
-// and Sync::wireFingerprint together, then regenerate the editor wire tables.
+// and Sync::wireFingerprint together with a wire-version increment, then
+// regenerate the editor wire tables.
 //
 // The handshake compares both wireVersion and wireFingerprint. As specified
-// in Docs/sync.md, the unpublished wire keeps version 1; its fingerprint
-// refuses a peer whose body layouts differ. Local host handover has its own
+// in Docs/sync.md, every wire change increments the protocol version; the
+// fingerprint also refuses a build that changed layouts without doing so.
+// Local host handover has its own
 // versioned format and frozen fixtures in test_sync_handover_body.cpp.
 
 #include "Core/CellGrid.h"
@@ -405,8 +407,8 @@ static void checkFingerprint(const Fingerprint& recorded, std::uint32_t liveVers
             recorded.recordedLength, static_cast<unsigned long long>(recorded.recordedDigest));
         std::printf("  now:      length=%zu digest=0x%016llx\n",
             bytes.size(), static_cast<unsigned long long>(digest));
-        std::printf("  Review the layout change, then update this pin and wireFingerprint.\n"
-                    "  Keep the unpublished wire version unchanged (Docs/sync.md).\n");
+        std::printf("  Increment wireVersion, then update this pin and wireFingerprint\n"
+                    "  and regenerate the editor wire tables (Docs/sync.md).\n");
     }
     CHECK(bytes.size() == recorded.recordedLength);
     CHECK(digest == recorded.recordedDigest);
@@ -491,7 +493,7 @@ TEST(testTheCheckpointBodyCannotMoveWhileTheWireVersionStandsStill)
     CHECK(!first.empty());
     checkDeterminism(first, second, fromTwin);
 
-    checkFingerprint({ "wireVersion", 1, 2041, 0xf36b398ae67f02b8ull }, Ubiquitty::Protocol::Sync::wireVersion, first);
+    checkFingerprint({ "wireVersion", 2, 2041, 0xf36b398ae67f02b8ull }, Ubiquitty::Protocol::Sync::wireVersion, first);
 }
 
 /// The frame catalog's encoding has not moved under a standing version.
@@ -517,10 +519,10 @@ TEST(testTheWireFormatCannotMoveWhileItsVersionStandsStill)
 
     const std::uint64_t digest = wireDigest(first);
 
-    // This corpus is encoded with Sync::wireVersion == 1. The full SHA-256
+    // This corpus is encoded with Sync::wireVersion == 2. The full SHA-256
     // below is the fingerprint checked by the handshake.
-    constexpr std::uint16_t fingerprintedVersion = 1;
-    constexpr std::uint64_t fingerprintedDigest = 0xaa7e9a1506a3db79ull;
+    constexpr std::uint16_t fingerprintedVersion = 2;
+    constexpr std::uint64_t fingerprintedDigest = 0xcd3fce1a76c9c8c6ull;
     constexpr std::size_t fingerprintedLength = 15669;
 
     if (Ubiquitty::Protocol::Sync::wireVersion != fingerprintedVersion) {
@@ -540,8 +542,8 @@ TEST(testTheWireFormatCannotMoveWhileItsVersionStandsStill)
             fingerprintedLength, static_cast<unsigned long long>(fingerprintedDigest));
         std::printf("  now:      length=%zu digest=0x%016llx\n",
             first.size(), static_cast<unsigned long long>(digest));
-        std::printf("  Review the layout change, then update this pin and wireFingerprint.\n"
-                    "  Keep the unpublished wire version unchanged (Docs/sync.md).\n");
+        std::printf("  Increment wireVersion, then update this pin and wireFingerprint\n"
+                    "  and regenerate the editor wire tables (Docs/sync.md).\n");
     }
     CHECK(first.size() == fingerprintedLength);
     CHECK(digest == fingerprintedDigest);
@@ -579,7 +581,7 @@ TEST(testTheImagePlacementsBodyCannotMoveWhileItsVersionStandsStill)
     Sync::encode(fromTwin, twin);
     checkDeterminism(first, second, fromTwin);
 
-    checkFingerprint({ "wireVersion", 1, 103, 0x2493352285e2eeabull }, Ubiquitty::Protocol::Sync::wireVersion, first);
+    checkFingerprint({ "wireVersion", 2, 103, 0x2493352285e2eeabull }, Ubiquitty::Protocol::Sync::wireVersion, first);
 }
 
 // A small image whose bytes vary, filled into the Terminal's own slot.
@@ -684,7 +686,7 @@ TEST(testTheImageBodyCannotMoveWhileItsVersionStandsStill)
     CHECK(!first.empty()); // the fixture really produced a body
     checkDeterminism(first, second, fromTwin);
 
-    checkFingerprint({ "wireVersion", 1, 364, 0x9bf427e46d5eb09dull }, Ubiquitty::Protocol::Sync::wireVersion, first);
+    checkFingerprint({ "wireVersion", 2, 364, 0x9bf427e46d5eb09dull }, Ubiquitty::Protocol::Sync::wireVersion, first);
 }
 
 // Retained source, pane-scoped renderer identity and native measurement travel
@@ -837,6 +839,14 @@ TEST(testTheHandshakeFingerprintIsTheDigestOfEveryBodyLayout)
         std::printf("\n");
     }
     CHECK(digest == Sync::wireFingerprint);
+}
+
+TEST(aChangedPublishedFingerprintRequiresANewerWireVersion)
+{
+    namespace Sync = Ubiquitty::Protocol::Sync;
+    CHECK(Sync::wireVersion >= Sync::lastPublishedWireVersion);
+    if (Sync::wireFingerprint != Sync::lastPublishedWireFingerprint)
+        CHECK(Sync::wireVersion > Sync::lastPublishedWireVersion);
 }
 
 UBIQUITTY_TEST_MAIN()

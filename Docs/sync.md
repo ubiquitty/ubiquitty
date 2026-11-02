@@ -1157,18 +1157,22 @@ shown pane takes its checkpoint, and a hidden one costs nothing.
     being back is not a verdict. The connection does not declare the silence
     a loss; its owner times it. `RemoteSessionCore` gives it 3 s, holds what
     is typed meanwhile, and replaces a carrier that stays silent. A
-    connection whose `Welcome` has not come cannot be asked and is replaced
-    unasked.
+    connection whose `Welcome` has not come cannot be asked. Lifecycle
+    recovery may replace that attempt once; repeated notifications cannot
+    keep cancelling its replacement before it can answer.
   - A remote session keeps one `ClientAttachment` for its
     life, so every reconnect is a resume. Inside a stream the login
     authenticated the `Greet` carries the secret. A QUIC redial presents the
     proof at the address, port and pin its factory kept from the bootstrap,
     and runs no bootstrap; it has 2 s (provisional) to reach its handshake,
     because a host that refuses a proof drops the connection without a word
-    and a dead path says as little. A proof dial that closes or runs out of
-    time goes through the bootstrap at once, with no backoff, and the
+    and a dead path says as little. A proof dial that closes, runs out of
+    time, or is interrupted by a wake or path change goes through the
+    bootstrap at once, with no backoff, and the
     carrier the login's token admitted attaches fresh. A proof is dialled
-    only by a session whose last handshake rode QUIC. A carrier the
+    only by a session whose last handshake rode QUIC. Bootstrap fallback
+    remains latched until a Welcome, and lifecycle notifications cannot
+    interrupt that bootstrap or reset the backoff of its retries. A carrier the
     attachment declared dead is replaced at once: the backoff spaces
     attempts at a host that refused one.
   - A frontend's own terminal is lent to the attachment
@@ -1251,6 +1255,11 @@ shown pane takes its checkpoint, and a hidden one costs nothing.
   - It is rewritten after every `Welcome`, before any input is sent on the new
     connection.
   - It is purged with the history cache on `HistoryReset`.
+  - The stored record names the wire version that encoded its pictures. A
+    different wire version is refused, so an app moving from wire 1 to wire 2
+    discards that cached resume state and attaches for a fresh checkpoint.
+    The host keeps the running sessions; this does not migrate saved pictures
+    or unsent drafts between protocol versions.
   - On a cold start the client draws the stored checkpoint first, verified by
     its digest and labelled as reconnecting, and then resumes.
   - A crash between `Welcome` and the rewrite leaves a consumed secret. That
@@ -1437,11 +1446,14 @@ shown pane takes its checkpoint, and a hidden one costs nothing.
   over instead, and the resume continues (§6.13).
 - **Backoff.** 1 s three times, then doubling to 30 s
   (`reconnectDelayForAttempt`, `Source/Core/Session/RemoteSessionCore.cpp`).
-  An OS path change resets the backoff to an immediate attempt
+  An OS path change may accelerate one attempt
   (`RemoteSessionCore::networkPathChanged`), and an app foreground replaces a
   carrier that may have expired while the process was suspended
   (`RemoteSessionCore::resumeAfterSuspension`), after the liveness probe above.
-  Every reconnect is a resume.
+  Neither event resets the count of failures: only a Welcome or an explicit
+  user retry does. After one lifecycle retry or a proof's bootstrap fallback,
+  subsequent path and wake reports leave the attempt and its retry schedule
+  intact until a Welcome. Every reconnect is a resume.
 
 ### 6.10 Multi-client geometry: the size follows the hands
 
@@ -1901,6 +1913,12 @@ Frontend code (macOS Swift, iOS, Linux, UbiquittyKit `onFrame`) has no
   a successor with sessions is left serving. The app reconnects only after
   the takeover succeeds (`HostInstallMode` in
   [HostInstall.h](../Source/Core/Session/HostInstall.h)).
+  Remote bootstrap, control, probe and upload scripts are encoded by
+  `Transport::remoteShellCommand` as `exec /bin/sh -c` with one quoted script.
+  OpenSSH and native SSH exec channels send that command after substituting
+  the daemon pin and executable. The login shell interprets no script body;
+  zsh word splitting and unmatched globs cannot change its arguments or stop
+  installation. Quotes and backslashes in the script survive the wrapper.
 - **This machine's host.** The macOS app installs the host it bundles. At
   launch, before it restores a window, and when a person chooses Update Host
   for This Mac, it makes the control directory's `ubiquitty-host` (the path
@@ -1938,15 +1956,22 @@ Frontend code (macOS Swift, iOS, Linux, UbiquittyKit `onFrame`) has no
   ([LocalHostInstall.h](../Source/Platform/POSIX/LocalHostInstall.h))
 - **Format rule.** The handover body is the checkpoint encoding with a version
   prefix. It is a same-host format, passed over the local socket beside the
-  fds, and it never appears on the wire. The writer emits body version 35,
-  and a successor reads that version alone. The header, every pane record and
-  every section in it carries the version, and one that names another is
-  refused before anything past the version is read, so a mixed-version record
-  cannot pass as this one. Nothing is translated from another grammar: a
-  holder whose body a successor refuses keeps every session, as the install
-  policy above says. The frozen pane record in the handover fuzzer's corpus
-  pins the grammar, and a grammar change takes the next version and a record
-  minted for it.
+  fds, and it never appears on the wire. A successor must read the format of
+  the last published release as well as its own (N-1 handover compatibility).
+  `Source/Core/Protocol/Sync/HandoverBody.h` names the writer's
+  `handoverBodyVersion`, the release's `lastPublishedHandoverBodyVersion` and
+  the reader's `oldestHandoverBodyVersion`, which is pinned to that release.
+  A grammar change increments the writer version and retains a versioned
+  reader for the published format. The frozen released pane record and its
+  minting procedure are documented in `Tests/Corpus/sync/handover-release.md`;
+  the current encoder has its own fixture. Publishing a release updates the
+  release constant and fixture together, after validating handover from the
+  preceding release.
+  The header and every handover section carry a version. Versions below the
+  supported floor or above the writer are refused before their fields are
+  interpreted; sections must match their enclosing record's version. A
+  supported version selects its own grammar, never a mixture of two. A holder
+  whose body the successor refuses keeps every session, as above.
   - **Screen.** The checkpoint carries the rendition stack, ten-entry title
     stacks, checksum extensions and saved palettes, the keyboard type, termcap
     profile and NumLock policy, readline paste quoting, literal newline, mouse
@@ -2248,8 +2273,8 @@ On the wire the reasons are `Normal` 0, `VersionMismatch` 1,
 `HandingOver` 10, `TokenMissing` 11, `TokenInvalid` 12, `TokenExpired` 13,
 `TokenRevoked` 14, `OutsideScope` 15, `DuplicateHandshake` 16, `NoConsent` 17,
 `RemoteHostRefused` 18, `SessionGone` 19, `HostFull` 20, `OutputBacklog`
-21 and `Silent` 22. Every reason is part of wire version 1: until the wire is published, a
-new reason joins version 1 instead of starting a new version.
+21 and `Silent` 22. The set of reasons is part of `wireVersion`; adding or
+changing a reason advances the wire version with its fingerprint.
 
 For resume (§6.9): `Greet` may end with
 `hasResume:u8 [ResumeRequest]`, where `ResumeRequest := attachmentID:u128
@@ -2839,26 +2864,35 @@ version, e.g. `0.2.0.3`; `Sync/AppVersion.h`). The constant lives in
 `Source/Core/Protocol/Sync/Envelope.h`; what a build says about itself to a
 peer lives in `Source/Core/Protocol/Sync/WireVersion.h`.
 
-The two versions alone cannot keep builds apart: the wire stays version 1
-until publication while body layouts change under it. So `Greet` and `Welcome`
-also carry `engineFingerprint`, this build's `wireFingerprint` (Envelope.h):
-the SHA-256 of a fixed corpus of every body the wire defines, which
-`Tests/Core/Protocol/Sync/test_sync_wire_fingerprint.cpp` encodes and fails on
-until the constant is re-minted. Its `Greet` names every capability bit a
-client may name. Two builds whose layouts or capability bits differ carry
-different fingerprints.
+The wire version is the protocol identity and ordering. Every change to the
+wire grammar, typed operations, records, capabilities or Unicode width table
+increments `wireVersion`. `appVersion` is a display fact only; it never
+changes admission or chooses which peer speaks the older protocol.
 
-Which end is older is read from the wire versions when they differ, and
-otherwise from the app versions, which order builds counted from one commit
-line. A host whose Welcome states no fingerprint was built before
-fingerprints were compared, so the client takes it for the older end.
+`Greet` and `Welcome` also carry `engineFingerprint`, this build's
+`wireFingerprint` (Envelope.h): the SHA-256 of a fixed corpus of every body the
+wire defines. `Tests/Core/Protocol/Sync/test_sync_wire_fingerprint.cpp` pins
+that corpus to the wire version and fails until a grammar change advances the
+version, re-mints the fingerprint and regenerates the editor wire tables.
+Its `Greet` names every capability bit a client may name. The fingerprint also
+refuses a development build that changed its grammar without advancing its
+version. Equal versions with different fingerprints are different builds,
+not an older and a newer protocol.
 
-- **One version.** The wire has one version, 1. Two peers connect only when
-  they speak the same version; a peer at any other is refused. There is no
-  range, no history of versions and no version-gated branch: a change to the
-  wire edits that version's grammar, and both ends move together.
-  `Scripts/check-wire-version-pins.py` fails when a minimum peer version or a
-  version history returns to the headers.
+`lastPublishedWireVersion` and `lastPublishedWireFingerprint` in Envelope.h
+freeze the identity shipped in v0.3.2. The fingerprint suite refuses a changed
+identity without a version increment. At publication, update both release
+pins from the release tree; they are evidence, not an additional admitted
+protocol. The current and released wire identities are independent of the
+handover reader floor in §6.13.
+
+- **One active version.** Two peers connect only when they speak the same
+  version and fingerprint; a peer at any other is refused. There is no
+  negotiated range or old-peer decoder: each wire change takes the next
+  version, and both ends move together. `Scripts/check-wire-version-pins.py`
+  fails when a minimum peer version or a negotiation history returns to the
+  headers. Emacs and Neovim get the version and fingerprint from
+  `Scripts/gen-wire-tables.py`; Python transport probes read the same header.
 - **The build is read first.** A reader takes the prefix `wireVersion
   appVersion engineFingerprint`, which every build lays out alike, before the
   rest of a handshake body, because a peer of another build lays the rest out
@@ -2896,17 +2930,18 @@ fingerprints were compared, so the client takes it for the older end.
   (`versionRefusalSentence` and `versionRefusalTitle` in
   `Source/Core/Session/DeployPolicy.h`). Frontends show it:
 
-  - "devbox’s Ubiquitty Host doesn’t say which version it runs. This Mac needs
-    protocol 1. Update the host on devbox."
+  App versions appear in the sentence as display facts. Different wire
+  versions identify the end to update. Equal wire versions with different
+  fingerprints say "Runs a Different Build" and ask for matching builds,
+  without ordering the app versions. An unreadable legacy host can be offered
+  an update, but no app-version comparison grants compatibility.
 
-  When both ends state their builds, the sentence names each as
-  `<app version>, protocol <n>`, says which end is older, and names the end to
-  update.
-
-  The update the refusal offers installs this app's own host, so it is offered
-  only when the host is the older end, or states no build at all. When this
-  Mac is older the sheet says so and points at updating the app; it never
-  installs this build's host over a newer one.
+  The update action installs this app's own host. It is offered when the host
+  speaks the older protocol, states no build, or states the same protocol with
+  a different fingerprint. In the last case the person explicitly chooses to
+  install a matching build; the dialog claims no older side. When this app
+  speaks the older protocol, it directs the person to update the app and never
+  offers to replace a known newer host.
 
 
 ### 7.4 Screen plane (pane channels)

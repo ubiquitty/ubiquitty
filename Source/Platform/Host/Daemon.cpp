@@ -11801,6 +11801,7 @@ Codec::JSON::Value Daemon::serveListing(std::size_t index, ListingChange change)
             value.set("socket", Codec::JSON::Value::string(instance.socketName));
             value.set("executable", Codec::JSON::Value::string(instance.executable));
             value.set("startedUnixSeconds", Codec::JSON::Value::number(static_cast<double>(instance.startedUnixSeconds)));
+            value.set("appVersion", Codec::JSON::Value::string(instance.appVersion));
             instances.push(std::move(value));
         }
         result.set("instances", std::move(instances));

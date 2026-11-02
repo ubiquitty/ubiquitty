@@ -41,30 +41,30 @@ TEST(theOlderSideIsTheOneWithTheLowerVersion)
     CHECK(Sync::olderSideOfVersions(0, 1) == Sync::OlderSide::Unknown);
     // A refusal not about the version, or from a host that stated nothing,
     // names no side.
-    const Sync::PeerBuild newer { .isKnown = true, .wireVersion = 2, .appVersion = "0.3.0" };
+    const Sync::PeerBuild newer { .isKnown = true, .wireVersion = Sync::wireVersion + 1, .appVersion = "0.3.0" };
     CHECK(Sync::olderSideOfRefusal(Sync::ByeReason::VersionMismatch, newer) == Sync::OlderSide::Client);
-    CHECK(Sync::olderSideOfRefusal(Sync::ByeReason::VersionMismatch, newer, Sync::PeerBuild { .isKnown = true, .wireVersion = 3, .appVersion = {} }) == Sync::OlderSide::Host);
+    CHECK(Sync::olderSideOfRefusal(Sync::ByeReason::VersionMismatch, newer, Sync::PeerBuild { .isKnown = true, .wireVersion = Sync::wireVersion + 2, .appVersion = {} }) == Sync::OlderSide::Host);
     CHECK(Sync::olderSideOfRefusal(Sync::ByeReason::OutsideScope, newer) == Sync::OlderSide::Unknown);
     CHECK(Sync::olderSideOfRefusal(Sync::ByeReason::VersionMismatch, Sync::PeerBuild {}) == Sync::OlderSide::Unknown);
 }
 
-// Builds of one wire version differ in their body layouts, so a refusal
-// between them orders the two by app version, and names no side when the
-// versions do not order.
-TEST(buildsOfOneWireVersionAreOrderedByTheirAppVersions)
+// A fingerprint refusal at one wire version names no older side. An app
+// version describes a build but never orders its protocol.
+TEST(buildsOfOneWireVersionNameNoOlderSide)
 {
     const Sync::PeerBuild newer { .isKnown = true, .wireVersion = 1, .appVersion = "0.2.0.7" };
     const Sync::PeerBuild older { .isKnown = true, .wireVersion = 1, .appVersion = "0.2.0.3" };
-    CHECK(Sync::olderSideOfBuilds(newer, older) == Sync::OlderSide::Host);
-    CHECK(Sync::olderSideOfBuilds(older, newer) == Sync::OlderSide::Client);
+    CHECK(Sync::olderSideOfBuilds(newer, older) == Sync::OlderSide::Unknown);
+    CHECK(Sync::olderSideOfBuilds(older, newer) == Sync::OlderSide::Unknown);
     CHECK(Sync::olderSideOfBuilds(newer, newer) == Sync::OlderSide::Unknown);
     const Sync::PeerBuild unversioned { .isKnown = true, .wireVersion = 1, .appVersion = std::string(Sync::unversionedAppVersion) };
     CHECK(Sync::olderSideOfBuilds(newer, unversioned) == Sync::OlderSide::Unknown);
     CHECK(Sync::olderSideOfBuilds(newer, Sync::PeerBuild {}) == Sync::OlderSide::Unknown);
+    CHECK(Sync::olderSideOfBuilds(Sync::PeerBuild {}, newer) == Sync::OlderSide::Unknown);
     // Another wire version orders by the version, whatever the app versions.
     const Sync::PeerBuild nextWire { .isKnown = true, .wireVersion = 2, .appVersion = "0.1.0" };
     CHECK(Sync::olderSideOfBuilds(newer, nextWire) == Sync::OlderSide::Client);
-    CHECK(Sync::olderSideOfRefusal(Sync::ByeReason::VersionMismatch, older, newer) == Sync::OlderSide::Host);
+    CHECK(Sync::olderSideOfRefusal(Sync::ByeReason::VersionMismatch, older, newer) == Sync::OlderSide::Unknown);
 }
 
 // The prefix a handshake opens with names the build's fingerprint after its

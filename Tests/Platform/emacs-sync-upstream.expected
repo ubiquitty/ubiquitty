@@ -1,4 +1,4 @@
-Greet version=1 viewport=80x24 focused=1 historyCacheLines=0 capabilities=72 resume=0 welcomed=1
+Greet version=2 viewport=80x24 focused=1 historyCacheLines=0 capabilities=72 resume=0 welcomed=1
 Facts viewport=80x24 pixels=0 refresh=0 link=0 power=0 focused=1 palette=1 ansi15=eaeaededf2f2 cursor=e0e0e4e4ecec ansi1=dddd71717a7a foreground=c8c8ccccd4d4 background=151517171c1c baselineSame=1
 View pane=1 state=0
 Viewport pane=1 viewport=80x24 cellPixels=0x0 textAreaPixels=0x0 drawablePixels=0x0

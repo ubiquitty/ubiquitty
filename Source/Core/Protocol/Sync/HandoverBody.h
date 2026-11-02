@@ -18,9 +18,14 @@ namespace Ubiquitty::Protocol::Sync {
 
 /// The state-format version a host writes; the format rule is in Docs/sync.md §6.13.
 inline constexpr std::uint16_t handoverBodyVersion = 35;
-/// The oldest state-format version a host reads. A host reads only the format
-/// it writes: a body of any earlier version is refused, never translated.
-inline constexpr std::uint16_t oldestHandoverBodyVersion = handoverBodyVersion;
+/// The state format written by the last published release, v0.3.2.
+/// Release updates keep its frozen fixture alongside the writer's fixture.
+inline constexpr std::uint16_t lastPublishedHandoverBodyVersion = 35;
+/// The oldest state format a successor must read to carry running sessions
+/// from the last published release across an update.
+inline constexpr std::uint16_t oldestHandoverBodyVersion = lastPublishedHandoverBodyVersion;
+static_assert(oldestHandoverBodyVersion <= lastPublishedHandoverBodyVersion);
+static_assert(lastPublishedHandoverBodyVersion <= handoverBodyVersion);
 inline constexpr std::size_t maxInheritedInstances = 8;
 
 /// Classifies a state stream refused before it can become a serving host.

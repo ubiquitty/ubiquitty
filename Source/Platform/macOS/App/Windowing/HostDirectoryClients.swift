@@ -52,10 +52,13 @@ final class HostDirectoryEndpoint {
 
     /// Dials nothing yet: the client opens a channel per errand.
     ///
-    /// - Parameter shellCommand: The transport command.
-    init(shellCommand: String) {
+    /// - Parameters:
+    ///   - shellCommand: The transport command.
+    ///   - instance: The discovered daemon selected by the command, if any.
+    init(shellCommand: String, instance: HostDaemonInstance? = nil) {
         self.shellCommand = shellCommand
         client = Ubiquitty.Runtime.HostDirectoryClient(std.string(shellCommand), Ubiquitty.Apple.mainQueueLoop())
+        if let instance { client.setExpectedDaemon(instance.coreValue) }
         client.setChangeCallback(
             Ubiquitty.Apple.ownedCallback { [weak self] in
                 // Core delivers changes through the owning main-loop dispatcher.
@@ -414,14 +417,16 @@ final class HostDirectoryClients {
     /// Held weakly here and strongly by the windows using it, so the client
     /// goes when the last window asking about the host does.
     ///
-    /// - Parameter shellCommand: The transport command.
+    /// - Parameters:
+    ///   - shellCommand: The transport command.
+    ///   - instance: The discovered daemon selected by the command, if any.
     /// - Returns: The shared endpoint.
-    func endpoint(for shellCommand: String) -> HostDirectoryEndpoint {
+    func endpoint(for shellCommand: String, instance: HostDaemonInstance? = nil) -> HostDirectoryEndpoint {
         if let existing = endpoints[shellCommand]?.endpoint {
             return existing
         }
         endpoints = endpoints.filter { $0.value.endpoint != nil }
-        let created = HostDirectoryEndpoint(shellCommand: shellCommand)
+        let created = HostDirectoryEndpoint(shellCommand: shellCommand, instance: instance)
         endpoints[shellCommand] = WeakEndpoint(created)
         return created
     }

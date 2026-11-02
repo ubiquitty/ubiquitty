@@ -99,7 +99,7 @@ void execRemoteWrapperIfRequested(int terminalArgumentCount, char** argv)
         // A remote pty for the login shell the install command ends in.
         tokens.emplace_back("-t");
         tokens.emplace_back(host);
-        tokens.emplace_back(Network::buildRemoteTerminfoInstallCommand(Terminfo::sourceText()));
+        tokens.emplace_back(Transport::remoteShellCommand(Network::buildRemoteTerminfoInstallCommand(Terminfo::sourceText())));
     } else {
         // mosh connects plainly; it has no terminfo leg.
         tokens.emplace_back(host);

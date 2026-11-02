@@ -22,6 +22,10 @@ import UbiquittyRenderKit
 enum ApplicationMain {
     @MainActor
     static func main() {
+        #if UBIQUITTY_UI_TESTS
+        UITestRunner.prepareControlDirectory()
+        #endif
+
         // UBIQUITTY_METAL_HUD=1 turns on the driver's per-frame overlay. Only the
         // driver's own variable engages it on a managed MTKView layer, and only
         // when it is set before any Metal device or layer exists.

@@ -23,6 +23,12 @@ and in an SSH shell a Tailscale check's approval link appears in the terminal. T
 negotiates the same way with its own SSH client; see
 [the iOS interface](../ios-interface.md#signing-in).
 
+Host bootstrap, control and installation commands explicitly run under
+`/bin/sh`, whatever the SSH account's login shell. The same Core wrapper is
+used by OpenSSH and the iOS exec channel, so zsh or fish settings cannot
+change the host's arguments. An interactive SSH shell still uses the account's
+chosen shell.
+
 The session survives a dropped connection while the host and shell remain
 running. Reconnect resumes from retained state or receives a fresh checkpoint.
 This does not preserve a running process across a server reboot. The SSH carrier

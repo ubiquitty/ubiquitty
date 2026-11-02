@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "Platform/Host/SignaturePolicy.h"
+
 // Bringing this machine's host up to the build an app bundles, by handover.
 //
 // A running host hands its sessions only to a successor whose executable is
@@ -149,6 +151,10 @@ struct LocalHostUpgradeOutcome {
     /// the bundled host's, which refuse it as their successor.
     std::size_t refusingHostCount = 0;
 };
+
+/// Runs the install and takeover for a verified host from an update archive.
+/// Its version is the archive's checked CFBundleShortVersionString, not the old app's.
+[[nodiscard]] LocalHostUpgradeOutcome upgradeLocalHostForUpdate(const std::string& hostPath, LocalHostBuild build, const std::string& version);
 
 /// Installs the bundled host, then has it take over every host of an older
 /// build running on this machine.

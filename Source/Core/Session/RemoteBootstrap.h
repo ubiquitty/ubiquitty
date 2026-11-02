@@ -120,8 +120,8 @@ inline std::string pinnedDaemonProbeFragment(std::string_view binary)
 // specific daemon socket. substituteReattachSocket() rewrites this exact text.
 inline constexpr char reattachSocketToken[] = "SOCK=\"\";";
 
-// The script run on the remote (one ssh argument). Double quotes only so the
-// caller can wrap it in single quotes.
+// The POSIX script, before Transport::remoteShellCommand makes it an SSH exec
+// request. Daemon and executable substitutions precede that encoding.
 //
 // The script finishes a deferred update, then checks for an existing working
 // binary; if missing, prints the deploy sentinel so the client auto-deploys.
@@ -140,7 +140,7 @@ inline std::string remoteBootstrapCommand()
         + pinnedDaemonProbeFragment("\"$B\"")
         + "fi; printf \"\\n"
         + std::string(syncSentinel)
-        + R"(\n"; exec "$B" --attach ${SOCK:+--socket "$SOCK"})";
+        + R"(\n"; if [ -n "$SOCK" ]; then exec "$B" --attach --socket "$SOCK"; else exec "$B" --attach; fi)";
 }
 
 /// Reaches an existing remote daemon without installing or starting one.
@@ -157,7 +157,7 @@ inline std::string passiveControlRemoteCommand()
            "[ -x \"$B\" ] || exit 1; if [ -n \"$SOCK\" ]; then "
         + pinnedDaemonProbeFragment("\"$B\"") + "fi; printf \"\\n"
         + std::string(syncSentinel)
-        + R"(\n"; exec "$B" --attach ${SOCK:+--socket "$SOCK"})";
+        + R"(\n"; if [ -n "$SOCK" ]; then exec "$B" --attach --socket "$SOCK"; else exec "$B" --attach; fi)";
 }
 
 // A LOCAL-daemon bridge carrying the same SOCK="" reattach token. `quotedBinary`
@@ -168,8 +168,8 @@ inline std::string localBridgeCommand(std::string_view quotedBinary)
 {
     std::string binary(quotedBinary);
     return "SOCK=\"\"; if [ -z \"$SOCK\" ]; then " + binary
-        + " --ensure-daemon --quic-port 0 || exit 1; else " + pinnedDaemonProbeFragment(binary) + "fi; exec "
-        + binary + " --attach ${SOCK:+--socket \"$SOCK\"}";
+        + " --ensure-daemon --quic-port 0 || exit 1; else " + pinnedDaemonProbeFragment(binary) + "fi; if [ -n \"$SOCK\" ]; then exec "
+        + binary + " --attach --socket \"$SOCK\"; else exec " + binary + " --attach; fi";
 }
 
 // Rewrite a bootstrap command to PIN a specific daemon socket for reattach,
@@ -284,7 +284,8 @@ struct RemoteTransportPlan {
 /// - Returns: The shell command, for a shell already on the target host.
 inline std::string quicBootstrapRemoteCommand()
 {
-    return "SOCK=\"\"; \"$HOME/.ubiquitty/ubiquitty-host\" --quic-bootstrap ${SOCK:+--socket \"$SOCK\"}";
+    return "SOCK=\"\"; B=\"$HOME/.ubiquitty/ubiquitty-host\"; if [ -n \"$SOCK\" ]; then exec \"$B\" --quic-bootstrap --socket \"$SOCK\"; "
+           "else exec \"$B\" --quic-bootstrap; fi";
 }
 
 /// The plan for a session on this machine, through the local daemon.
@@ -299,7 +300,7 @@ inline RemoteTransportPlan localTransportPlan(std::string_view quotedBinary)
         // The loopback address rather than the name: a QUIC carrier dials an
         // address, and the daemon it reaches is this machine's.
         .quicHost = "127.0.0.1",
-        .quicBootstrapCommand = "SOCK=\"\"; " + binary + " --quic-bootstrap ${SOCK:+--socket \"$SOCK\"}",
+        .quicBootstrapCommand = "SOCK=\"\"; if [ -n \"$SOCK\" ]; then exec " + binary + " --quic-bootstrap --socket \"$SOCK\"; else exec " + binary + " --quic-bootstrap; fi",
     };
 }
 
@@ -399,7 +400,7 @@ namespace Detail {
     if (quicHost.empty())
         return true;
     return isLoopbackAddress(quicHost)
-        && isOneBinaryCommand(quicBootstrapCommand, "", " --quic-bootstrap ", [](std::string_view binary) { return localTransportPlan(binary).quicBootstrapCommand; });
+        && isOneBinaryCommand(quicBootstrapCommand, "if [ -n \"$SOCK\" ]; then exec ", " --quic-bootstrap ", [](std::string_view binary) { return localTransportPlan(binary).quicBootstrapCommand; });
 }
 
 /// What a QUIC bootstrap run that printed no usable line says about its host.
@@ -483,7 +484,7 @@ inline RemoteTransportPlan remoteTransportPlan(std::string_view sshHost)
         // `exec ssh` so a detach's SIGTERM reaches ssh directly: the channel
         // closes, the remote --attach sees EOF and detaches, and the daemon
         // and its sessions live on.
-        .shellCommand = "exec " + sshCommand + quotedHost + " " + Ubiquitty::Transport::shellSingleQuote(remoteBootstrapCommand()),
+        .shellCommand = "exec " + sshCommand + quotedHost + " " + Transport::shellSingleQuote(Transport::remoteShellCommand(remoteBootstrapCommand())),
         .quicHost = host.substr(host.rfind('@') == std::string::npos ? 0 : host.rfind('@') + 1),
         // The remote binary's own bootstrap: it ensures a QUIC-capable daemon
         // and prints the port, the token and the pin. `-v` has ssh say on
@@ -494,8 +495,8 @@ inline RemoteTransportPlan remoteTransportPlan(std::string_view sshHost)
         .quicBootstrapCommand = std::string(reachProbeToken) + " if [ -n \"$REACH_PROBE\" ]; then exec " + sshCommand
             + "-v -o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/dev/null "
               "-o GlobalKnownHostsFile=/dev/null -o VerifyHostKeyDNS=no "
-            + quotedHost + " true; fi; "
-            + sshCommand + "-v " + quotedHost + " " + Ubiquitty::Transport::shellSingleQuote(quicBootstrapRemoteCommand()),
+            + quotedHost + " " + Transport::shellSingleQuote(Transport::remoteShellCommand("true")) + "; fi; "
+            + sshCommand + "-v " + quotedHost + " " + Transport::shellSingleQuote(Transport::remoteShellCommand(quicBootstrapRemoteCommand())),
     };
 }
 
@@ -560,10 +561,10 @@ inline std::string withoutReattachSocketToken(std::string_view command)
     }
     auto plan = remoteTransportPlan(sshHost);
     const auto replaceCommand = [](std::string& outer, const std::string& original, const std::string& replacement) {
-        const auto quoted = Transport::shellSingleQuote(original);
+        const auto quoted = Transport::shellSingleQuote(Transport::remoteShellCommand(original));
         const auto at = outer.find(quoted);
         if (at != std::string::npos)
-            outer.replace(at, quoted.size(), Transport::shellSingleQuote(replacement));
+            outer.replace(at, quoted.size(), Transport::shellSingleQuote(Transport::remoteShellCommand(replacement)));
     };
     const std::string pinnedAttach = "if [ -n \"$SOCK\" ]; then [ -x " + executable + " ] || exit 1; " + pinnedDaemonProbeFragment(executable)
         + "printf \"\\n" + std::string(syncSentinel) + "\\n\"; exec " + executable + " --attach --socket \"$SOCK\"; fi; ";
@@ -616,9 +617,8 @@ struct DaemonPin {
 /// Decides whether the daemon a person picked to list has gone, so the
 /// picker gives way to the host's current daemon.
 ///
-/// Gone when a bootstrap reported that daemon's socket gone, or when a listing
-/// meant for it answered from another daemon, as one does after Core drops a
-/// pin for a gone daemon and asks the host's current one.
+/// Only a probe of the picked socket establishes that it is gone. A different
+/// listing may be stale or misrouted and says nothing about that socket's lifetime.
 ///
 /// - Parameters:
 ///   - pickedSocketName: The picked daemon's socket, empty for none picked.
@@ -630,7 +630,8 @@ struct DaemonPin {
 {
     if (pickedSocketName.empty())
         return false;
-    return goneSocketName == pickedSocketName || (!answeredSocketName.empty() && answeredSocketName != pickedSocketName);
+    (void)answeredSocketName;
+    return goneSocketName == pickedSocketName;
 }
 
 } // namespace Ubiquitty::Session

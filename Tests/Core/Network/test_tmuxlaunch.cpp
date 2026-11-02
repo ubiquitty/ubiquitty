@@ -65,7 +65,8 @@ TEST(aRemotePlanWrapsTheMappedTmuxInSSH)
     CHECK(plan.failure == TmuxLaunchFailure::None);
     REQUIRE(plan.arguments.size() == 6);
     CHECK_STR_EQ(plan.arguments[4], "user@build.example");
-    CHECK_STR_EQ(plan.arguments[5], "'tmux' '-CC' 'new-session' '-A' '-s' 'main'");
+    CHECK_STR_EQ(plan.arguments[5], Ubiquitty::Transport::remoteShellCommand("'tmux' '-CC' 'new-session' '-A' '-s' 'main'"));
+    CHECK(plan.arguments[5].starts_with("exec /bin/sh -c '"));
 
     const auto refused = planRemoteTmuxLaunch("/usr/bin/ssh", "-oProxyCommand=evil", "main");
     CHECK(refused.failure == TmuxLaunchFailure::InvalidHost);

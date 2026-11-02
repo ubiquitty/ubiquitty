@@ -20,6 +20,7 @@
 #include "Core/Protocol/Sync/Connection.h"
 #include "Core/Protocol/Sync/Liveness.h"
 #include "Core/Protocol/Sync/ResumeProof.h"
+#include "Core/Session/ReconnectBackoff.h"
 #include "Core/Session/RemoteSessionCore.h"
 #include "Core/Terminal.h"
 #include "Core/TerminalOperations.h"
@@ -213,6 +214,12 @@ private:
 /// factory can dial it again, as one that kept the address, port and pin can.
 class StubFactory final : public ChannelFactory {
 public:
+    enum class ResumeDelivery : std::uint8_t {
+        Channel,
+        Unavailable,
+        Pending
+    };
+
     /// - Parameter bootstrap: What a bootstrap asked for QUIC builds.
     explicit StubFactory(Bootstrap bootstrap)
         : m_bootstrap(bootstrap)
@@ -223,6 +230,12 @@ public:
     ///
     /// - Parameter bootstrap: The carrier.
     void setBootstrap(Bootstrap bootstrap) { m_bootstrap = bootstrap; }
+
+    /// Chooses how a proof dial's factory completion is delivered.
+    void setResumeDelivery(ResumeDelivery delivery) { m_resumeDelivery = delivery; }
+
+    /// Completes a held proof request without a carrier.
+    void finishPendingResume() { std::exchange(m_pendingResume, {})(nullptr, false); }
 
     /// Builds a carrier through the bootstrap.
     ///
@@ -250,6 +263,14 @@ public:
     {
         ++m_resumes;
         m_key = std::move(key);
+        if (m_resumeDelivery == ResumeDelivery::Unavailable) {
+            done(nullptr, false);
+            return;
+        }
+        if (m_resumeDelivery == ResumeDelivery::Pending) {
+            m_pendingResume = std::move(done);
+            return;
+        }
         build(std::move(done), Bootstrap::QUIC);
     }
 
@@ -286,6 +307,8 @@ private:
     std::size_t m_bootstraps = 0;
     std::size_t m_resumes = 0;
     ResumeKey m_key;
+    ResumeDelivery m_resumeDelivery = ResumeDelivery::Channel;
+    Done m_pendingResume;
     StubChannel* m_last = nullptr;
     FrameLog m_sent;
 };
@@ -690,6 +713,128 @@ TEST(aBlackholedStubPathRedialsWithinTwoSeconds)
     CHECK(remote.factory.last() == kept);
     CHECK_EQ(remote.factory.bootstrapCount(), 2u);
     CHECK(remote.core->state() == State::Connected);
+}
+
+TEST(lifecycleChurnCannotKeepRenewingAnUnansweredResumeDial)
+{
+    for (const bool shouldReportWake : { false, true }) {
+        Remote remote(Bootstrap::QUIC);
+        remote.attach();
+        REQUIRE(remote.core->state() == State::Connected);
+        remote.core->suspend();
+        remote.core->resumeAfterSuspension(120);
+        remote.dispatcher.pump();
+        REQUIRE(remote.factory.resumeCount() == 1);
+
+        for (unsigned move = 0; move < 30; ++move) {
+            remote.dispatcher.advance(100'000);
+            if (shouldReportWake)
+                remote.core->resumeAfterSuspension(120);
+            else
+                remote.core->networkPathChanged();
+            remote.dispatcher.pump();
+        }
+        CHECK_EQ(remote.factory.resumeCount(), 1u);
+        CHECK_EQ(remote.factory.bootstrapCount(), 2u);
+        REQUIRE(remote.factory.last());
+        remote.daemon.acceptBootstrapped(remote.factory, remote.dispatcher.now());
+        remote.handshake();
+        CHECK(remote.core->state() == State::Connected);
+        CHECK(remote.disagreement().empty());
+
+        // A successful Welcome permits a later outage to try its new proof.
+        remote.core->suspend();
+        remote.core->resumeAfterSuspension(120);
+        CHECK_EQ(remote.factory.resumeCount(), 2u);
+    }
+}
+
+TEST(lifecycleChurnPreservesTheBootstrapRetryAndItsGrowingBackoff)
+{
+    Remote remote(Bootstrap::QUIC);
+    remote.attach();
+    remote.core->suspend();
+    remote.core->resumeAfterSuspension(120);
+    remote.dispatcher.pump();
+    REQUIRE(remote.factory.resumeCount() == 1);
+    remote.factory.last()->close("the old route is unavailable");
+    remote.dispatcher.pump();
+    REQUIRE(remote.factory.bootstrapCount() == 2);
+
+    for (unsigned failure = 1; failure <= 8; ++failure) {
+        REQUIRE(remote.factory.last());
+        remote.factory.last()->close("the bootstrap carrier closed");
+        remote.dispatcher.pump();
+        REQUIRE(remote.core->state() == State::Reconnecting);
+        const auto delay = reconnectDelayForAttempt(failure);
+        CHECK_EQ(remote.dispatcher.delaysRequested().back(), delay);
+        const auto attempts = remote.factory.bootstrapCount();
+        const auto untilRetry = static_cast<std::uint64_t>(delay * second);
+        for (std::uint64_t elapsed = 0; elapsed + 100'000 < untilRetry; elapsed += 100'000) {
+            remote.core->networkPathChanged();
+            remote.core->resumeAfterSuspension(120);
+            remote.dispatcher.advance(100'000);
+            CHECK_EQ(remote.factory.bootstrapCount(), attempts);
+        }
+        remote.dispatcher.advance(100'000);
+        CHECK_EQ(remote.factory.bootstrapCount(), attempts + 1);
+        CHECK_EQ(remote.factory.resumeCount(), 1u);
+        CHECK(remote.core->state() == State::Connecting);
+    }
+
+    remote.daemon.acceptBootstrapped(remote.factory, remote.dispatcher.now());
+    remote.handshake();
+    CHECK(remote.core->state() == State::Connected);
+}
+
+TEST(aFreshConnectAfterAnInterruptedResumeDoesNotReuseTheFailedCarrier)
+{
+    Remote remote(Bootstrap::QUIC);
+    remote.attach();
+    remote.core->suspend();
+    remote.core->resumeAfterSuspension(120);
+    remote.dispatcher.pump();
+    REQUIRE(remote.factory.resumeCount() == 1);
+    remote.core->networkPathChanged();
+    remote.dispatcher.pump();
+    CHECK_EQ(remote.factory.bootstrapCount(), 2u);
+    remote.core->stop();
+    remote.core.reset();
+    REQUIRE(!remote.factory.last());
+    const auto bootstraps = remote.factory.bootstrapCount();
+    remote.makeCore();
+    remote.attach();
+    CHECK_EQ(remote.factory.bootstrapCount(), bootstraps + 1);
+    CHECK_EQ(remote.factory.resumeCount(), 1u);
+    remote.settle(3 * second);
+    CHECK(remote.core->state() == State::Connected);
+    CHECK(remote.disagreement().empty());
+}
+
+TEST(aResumeFactoryFailureOrInterruptionFallsBackWithoutAWelcome)
+{
+    for (const auto delivery : { StubFactory::ResumeDelivery::Unavailable, StubFactory::ResumeDelivery::Pending }) {
+        Remote remote(Bootstrap::QUIC);
+        remote.attach();
+        remote.factory.setResumeDelivery(delivery);
+        remote.core->suspend();
+        remote.core->resumeAfterSuspension(120);
+        remote.dispatcher.pump();
+        if (delivery == StubFactory::ResumeDelivery::Pending) {
+            CHECK(!remote.factory.last());
+            remote.core->networkPathChanged();
+            remote.dispatcher.pump();
+            remote.factory.finishPendingResume();
+        }
+        CHECK_EQ(remote.factory.resumeCount(), 1u);
+        CHECK_EQ(remote.factory.bootstrapCount(), 2u);
+        REQUIRE(remote.factory.last());
+        remote.daemon.acceptBootstrapped(remote.factory, remote.dispatcher.now());
+        remote.handshake();
+        remote.settle(3 * second);
+        CHECK(remote.core->state() == State::Connected);
+        CHECK(remote.disagreement().empty());
+    }
 }
 
 // Input goes unanswered through a probe, so the attachment declares the

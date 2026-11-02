@@ -76,7 +76,7 @@ TEST(remotebootstrapCases)
     // The bootstrap runs ssh under -v, whose transcript says where it
     // connected; it resolves nothing itself and names no host on its output.
     CHECK(contains(plan.quicBootstrapCommand, "ssh -o BatchMode=yes -o ConnectTimeout=10 "));
-    CHECK(contains(plan.quicBootstrapCommand, "=3 -v 'user@host.local' 'SOCK="));
+    CHECK(contains(plan.quicBootstrapCommand, "=3 -v 'user@host.local' 'exec /bin/sh -c "));
     CHECK(!contains(plan.quicBootstrapCommand, "ssh -G"));
     CHECK(!contains(plan.quicBootstrapCommand, "quic_host"));
     CHECK(!contains(plan.quicBootstrapCommand, "HostName="));
@@ -91,7 +91,8 @@ TEST(remotebootstrapCases)
     const std::string probe = Ubiquitty::Session::substituteReachProbe(plan.quicBootstrapCommand);
     CHECK(probe.starts_with("REACH_PROBE=\"1\"; "));
     CHECK(contains(probe, "-v -o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/dev/null "
-                          "-o GlobalKnownHostsFile=/dev/null -o VerifyHostKeyDNS=no 'user@host.local' true; fi; "));
+                          "-o GlobalKnownHostsFile=/dev/null -o VerifyHostKeyDNS=no 'user@host.local' "
+            + Ubiquitty::Transport::shellSingleQuote(Ubiquitty::Transport::remoteShellCommand("true")) + "; fi; "));
     CHECK(contains(probe, "then exec ssh -o BatchMode=yes "));
     CHECK(probe.size() == plan.quicBootstrapCommand.size() + 1);
     // A local plan runs no ssh and has nothing to probe.
@@ -183,7 +184,9 @@ TEST(testWorkspaceTransportPinsBothCarriersToTheDiscoveredDaemon)
         for (const auto& command : { bridge, bootstrap }) {
             CHECK(count(command, "SOCK=\"host-0123456789abcdef.sock\";") == 1);
             CHECK(!contains(command, reattachSocketToken));
-            CHECK(contains(command, "${SOCK:+--socket \"$SOCK\"}"));
+            CHECK(contains(command, "if [ -n \"$SOCK\" ]; then exec "));
+            CHECK(contains(command, "--socket \"$SOCK\"; else exec "));
+            CHECK(!contains(command, "${SOCK:+"));
         }
         CHECK(contains(bridge, "--attach"));
         CHECK(contains(bootstrap, "--quic-bootstrap"));
@@ -233,7 +236,7 @@ TEST(passiveControlBootstrapOnlyReachesAnExistingDaemon)
     CHECK(contains(command, "[ -x \"$B\" ] || exit 1"));
     CHECK(contains(command, "B=\"$HOME/.ubiquitty/ubiquitty-host\""));
     CHECK(contains(command, "printf \"\\n" + std::string(Ubiquitty::Session::syncSentinel) + "\\n\""));
-    CHECK(contains(command, "exec \"$B\" --attach ${SOCK:+--socket \"$SOCK\"}"));
+    CHECK(contains(command, "if [ -n \"$SOCK\" ]; then exec \"$B\" --attach --socket \"$SOCK\"; else exec \"$B\" --attach; fi"));
     for (const auto* forbidden : { "--ensure-daemon", "--quic-bootstrap", "mkdir", "chmod", "mv ", "rm ", "--help", "--install", "--daemon", deploySentinel })
         CHECK(!contains(command, forbidden));
     CHECK(!contains(command, "'"));
@@ -478,15 +481,18 @@ struct ShellRun {
     int status = -1;
 };
 
-/// Runs a bootstrap command under `/bin/sh` with an environment of its own.
+/// Runs a bootstrap command under a login shell with an environment of its own.
 ///
 /// - Parameters:
 ///   - command: The command.
 ///   - environment: `NAME=value ` words put in front of it.
+///   - shell: The login shell, with its startup configuration disabled.
 /// - Returns: What it printed and its exit status.
-ShellRun runShell(const std::string& command, const std::string& environment)
+ShellRun runShell(const std::string& command, const std::string& environment, std::string_view shell = "/bin/sh")
 {
-    const std::string line = "env " + environment + " /bin/sh -c " + Ubiquitty::Transport::shellSingleQuote(command);
+    const std::string options = shell == "zsh" ? " -f -c " : shell == "fish" ? " --no-config -c "
+                                                                             : " -c ";
+    const std::string line = "env " + environment + " " + Ubiquitty::Transport::shellSingleQuote(shell) + options + Ubiquitty::Transport::shellSingleQuote(command) + " 2>&1";
     ShellRun run;
     FILE* pipe = ::popen(line.c_str(), "r");
     CHECK(pipe != nullptr);
@@ -500,7 +506,116 @@ ShellRun runShell(const std::string& command, const std::string& environment)
     return run;
 }
 
+/// The installed login shells whose exec syntax the remote must survive.
+std::vector<std::string> loginShells()
+{
+    std::vector<std::string> shells { "/bin/sh" };
+    for (const char* shell : { "zsh", "fish" }) {
+        if (runShell(std::string("command -v ") + shell + " >/dev/null", "").status == 0)
+            shells.emplace_back(shell);
+        else
+            std::printf("remote shell: %s unavailable\n", shell);
+    }
+    return shells;
+}
+
+/// A private installation whose executable records argument boundaries.
+class RecordingHost {
+public:
+    RecordingHost()
+    {
+        std::string pattern = (std::filesystem::temp_directory_path() / "ubq-remote-shell-XXXXXX").string();
+        const char* created = ::mkdtemp(pattern.data());
+        REQUIRE(created);
+        m_root = created;
+        m_home = m_root / "home with ' quotes";
+        std::filesystem::create_directories(m_home / ".ubiquitty");
+        std::filesystem::create_directories(m_root / "bin");
+        std::ofstream(binary()) << "#!/bin/sh\n"
+                                   "case \"$1\" in\n"
+                                   "--help|--ensure-daemon|--probe-daemon) exit 0 ;;\n"
+                                   "esac\n"
+                                   "printf '<%s>\\n' \"$@\"\n";
+        ::chmod(binary().c_str(), 0700);
+        const auto ssh = m_root / "bin" / "ssh";
+        std::ofstream(ssh) << "#!/bin/sh\nfor last; do :; done\n"
+                              "case \"$last\" in \"exec /bin/sh -c \"*) ;; *) echo missing-sh-wrapper; exit 64 ;; esac\n"
+                              "case \"$LOGIN_SHELL\" in\n"
+                              "zsh) exec zsh -f -c \"$last\" ;;\n"
+                              "fish) exec fish --no-config -c \"$last\" ;;\n"
+                              "*) exec /bin/sh -c \"$last\" ;;\n"
+                              "esac\n";
+        ::chmod(ssh.c_str(), 0700);
+    }
+
+    ~RecordingHost()
+    {
+        std::error_code ignored;
+        std::filesystem::remove_all(m_root, ignored);
+    }
+
+    std::filesystem::path binary() const { return m_home / ".ubiquitty" / "ubiquitty-host"; }
+
+    std::string environment(std::string_view shell) const
+    {
+        return "UBIQUITTY_HOME= HOME=" + Ubiquitty::Transport::shellSingleQuote(m_home.string())
+            + " PATH=" + Ubiquitty::Transport::shellSingleQuote((m_root / "bin").string() + ":" + (std::getenv("PATH") ? std::getenv("PATH") : "/usr/bin:/bin"))
+            + " LOGIN_SHELL=" + Ubiquitty::Transport::shellSingleQuote(shell);
+    }
+
+private:
+    std::filesystem::path m_root;
+    std::filesystem::path m_home;
+};
+
 } // namespace
+
+TEST(remoteExecPreservesScriptBytesUnderLoginShells)
+{
+    using namespace Ubiquitty::Transport;
+    const std::string payload = "apostrophe ' dollar $HOME $(false) `false`\nbackslashes \\\\ \\' tail\\\n";
+    const auto command = remoteShellCommand("printf %s " + shellSingleQuote(payload));
+    CHECK(command.starts_with("exec /bin/sh -c '"));
+    for (const auto& shell : loginShells()) {
+        const auto result = runShell(command, "", shell);
+        CHECK_MSG(result.status == 0, shell.c_str());
+        CHECK_STR_EQ(result.output, payload);
+    }
+}
+
+TEST(remoteBootstrapsKeepSocketArgumentsAcrossLoginShells)
+{
+    using namespace Ubiquitty;
+    using namespace Ubiquitty::Session;
+    RecordingHost host;
+    constexpr std::string_view socket = "host-0123456789abcdef.sock";
+    const HostInstanceInfo instance { std::string(socket), host.binary().string(), 7 };
+    for (const auto& shell : loginShells()) {
+        const auto environment = host.environment(shell);
+        for (const bool isPinned : { false, true }) {
+            for (const auto& script : { remoteBootstrapCommand(), passiveControlRemoteCommand(), quicBootstrapRemoteCommand(),
+                     hostInstanceBootstrap(passiveControlRemoteCommand(), instance), hostInstanceBootstrap(quicBootstrapRemoteCommand(), instance) }) {
+                const auto selected = isPinned ? substituteReattachSocket(script, socket) : script;
+                const auto result = runShell(Transport::remoteShellCommand(selected), environment, shell);
+                CHECK_MSG(result.status == 0, result.output.c_str());
+                const auto verb = script.find("--quic-bootstrap") == std::string::npos ? "--attach" : "--quic-bootstrap";
+                const std::string expected = std::string("<") + verb + ">\n" + (isPinned ? "<--socket>\n<" + std::string(socket) + ">\n" : "");
+                CHECK_MSG(result.output.ends_with(expected), result.output.c_str());
+                CHECK(result.output.find("<--socket ") == std::string::npos);
+            }
+            for (const auto& plan : { remoteTransportPlan("fixture"), hostInstanceTransportPlan("fixture", instance, "") }) {
+                for (const auto& command : { plan.shellCommand, plan.quicBootstrapCommand }) {
+                    const auto selected = isPinned ? substituteReattachSocket(command, socket) : clearReattachSocket(command, socket);
+                    const auto result = runShell(selected, environment);
+                    CHECK_MSG(result.status == 0, result.output.c_str());
+                    const auto verb = command.find("--quic-bootstrap") == std::string::npos ? "--attach" : "--quic-bootstrap";
+                    const std::string expected = std::string("<") + verb + ">\n" + (isPinned ? "<--socket>\n<" + std::string(socket) + ">\n" : "");
+                    CHECK_MSG(result.output.ends_with(expected), result.output.c_str());
+                }
+            }
+        }
+    }
+}
 
 // The pinned bootstrap, run for real against a stand-in host binary whose
 // probe answers as the environment says. A daemon that is gone is reported
@@ -610,6 +725,11 @@ TEST(aPickedDaemonsPlanIsTheHostsOwnOnceUnpinned)
     CHECK_STR_EQ(runShell(local.quicBootstrapCommand, live).output, "quic by picked --quic-bootstrap --socket " + instance.socketName + "\n");
     CHECK_STR_EQ(runShell(clearReattachSocket(local.quicBootstrapCommand, instance.socketName), live).output, std::string("quic by bundled --quic-bootstrap\n"));
 
+    const HostInstanceInfo replaced { instance.socketName, bundled.string(), 1 };
+    const auto samePath = hostInstanceTransportPlan("", replaced, Ubiquitty::Transport::shellSingleQuote(bundled.string()));
+    CHECK_STR_EQ(runShell(samePath.shellCommand, live).output, "attached by bundled --attach --socket " + instance.socketName + "\n");
+    CHECK_STR_EQ(runShell(samePath.shellCommand, gone).output, goneLine);
+
     const RemoteTransportPlan remote = hostInstanceTransportPlan("laptop", instance, "");
     REQUIRE(!remote.shellCommand.empty());
     const std::string sync = "\n" + std::string(syncSentinel) + "\n";
@@ -622,15 +742,14 @@ TEST(aPickedDaemonsPlanIsTheHostsOwnOnceUnpinned)
     std::filesystem::remove_all(directory, ignored);
 }
 
-// A picked daemon gives way when its bootstrap said it is gone, or when its
-// listing came back from another daemon; an unanswered listing says neither.
+// Only a probe of the selected socket can retire the selection.
 TEST(aPickedDaemonGivesWayOnlyWhenItIsKnownGone)
 {
     using Ubiquitty::Session::isPickedDaemonGone;
     constexpr std::string_view picked = "host-c756f263bc841e61.sock";
     constexpr std::string_view current = "host-b5b7658e15c5127a.sock";
     CHECK(isPickedDaemonGone(picked, picked, ""));
-    CHECK(isPickedDaemonGone(picked, "", current));
+    CHECK(!isPickedDaemonGone(picked, "", current));
     CHECK(!isPickedDaemonGone(picked, "", picked));
     CHECK(!isPickedDaemonGone(picked, "", ""));
     CHECK(!isPickedDaemonGone(picked, current, picked));

@@ -4592,7 +4592,10 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         }
         let whole = bake(woven.title, woven.lead)
         tabTitleFittingForTesting = (whole, woven.fitting.map(\.title))
-        window.tab.attributedTitle = Self.fitted(whole, steps: woven.fitting, width: inputs.titleWidth, bake: bake)
+        window.tab.attributedTitle = TabStripStyling.title(
+            Self.fitted(whole, steps: woven.fitting, width: inputs.titleWidth, bake: bake),
+            ownedBy: window
+        )
         // The tab's tooltip is the whole tab's, so it answers wherever the
         // pointer rests on it: the full title, which the strip truncates, and
         // under it everything the program's status says. One tooltip, not

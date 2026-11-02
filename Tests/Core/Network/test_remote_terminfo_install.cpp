@@ -77,7 +77,8 @@ TEST(remoteTerminfoInstall)
         const std::vector<std::string> argv = Network::buildSSHArgumentsWithTerminfoInstall("/usr/bin/ssh", "user@host.example", source);
         CHECK(!argv.empty());
         CHECK(argv.front() == "/usr/bin/ssh");
-        CHECK(argv.back() == command); // install command is the remote command
+        CHECK(argv.back() == Transport::remoteShellCommand(command));
+        CHECK(argv.back().starts_with("exec /bin/sh -c '"));
         bool haveForceTty = false, haveHost = false;
         for (const std::string& token : argv) {
             if (token == "-t")
@@ -102,7 +103,7 @@ TEST(remoteTerminfoInstall)
         CHECK(argv[2] == "-o" && argv[3] == "ProxyCommand=nc -X 5 -x proxy.example:1080 %h %p");
         CHECK(argv[4] == "-t");
         CHECK(argv[5] == "user@host.example");
-        CHECK(argv[6] == command);
+        CHECK(argv[6] == Transport::remoteShellCommand(command));
     }
     {
         CHECK(Network::buildSSHArgumentsWithTerminfoInstall("/usr/bin/ssh", "-oProxyCommand=touch /tmp/pwned", source).empty());

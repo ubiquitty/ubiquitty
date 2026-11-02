@@ -209,9 +209,10 @@ static_assert(maxClientFramePayloadLength >= 4u + 1u + 2u + maxClipboardServeIte
     return host < local ? OlderSide::Host : OlderSide::Client;
 }
 
-/// Reads two builds for which is older: by wire version when they speak
-/// different ones, otherwise by app version, since builds of one wire version
-/// still differ in their body layouts.
+/// Reads two builds for which speaks the older wire version.
+///
+/// App versions are display facts. Equal wire versions name no older side,
+/// including when the handshake refuses different fingerprints.
 ///
 /// - Parameters:
 ///   - local: This client's build.
@@ -220,14 +221,9 @@ static_assert(maxClientFramePayloadLength >= 4u + 1u + 2u + maxClipboardServeIte
 ///   nothing readable or neither build orders before the other.
 [[nodiscard]] constexpr OlderSide olderSideOfBuilds(const Sync::PeerBuild& local, const Sync::PeerBuild& host)
 {
-    if (!host.isKnown)
+    if (!local.isKnown || !host.isKnown)
         return OlderSide::Unknown;
-    if (local.wireVersion != host.wireVersion)
-        return olderSideOfVersions(local.wireVersion, host.wireVersion);
-    const std::optional<std::strong_ordering> order = compareAppVersions(local.appVersion, host.appVersion);
-    if (!order || *order == std::strong_ordering::equal)
-        return OlderSide::Unknown;
-    return *order == std::strong_ordering::greater ? OlderSide::Host : OlderSide::Client;
+    return olderSideOfVersions(local.wireVersion, host.wireVersion);
 }
 
 /// Reads a version refusal for which side is older.

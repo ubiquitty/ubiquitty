@@ -23,6 +23,8 @@ import UbiquittyCore
 /// in this tab.
 final class LayoutTab {
     var sessionID: UInt32 = 0
+    /// Exact pane sessions adopted only to carry local PTYs across an update.
+    var reclaimSessionIDsAfterUpdate: [UInt32] = []
     /// The display name, such as "local".
     var hostLabel: String?
     /// The remote shell command that reaches the host.
@@ -81,6 +83,7 @@ enum SessionLayout {
     private static let maxGroups = 256
     private static let maxTabsPerGroup = 256
     private static let maxTags = 32
+    private static let maxReclaimSessionsPerTab = 256
     private static let maxTagNameLength = 128
 
     /// The store's path, under $UBIQUITTY_HOME when it is set and ~/.ubiquitty
@@ -247,6 +250,20 @@ enum SessionLayout {
 
     private static func string(_ value: Any?) -> String? { value as? String }
 
+    private static func reclaimSessionIDs(_ value: Any?) -> [UInt32] {
+        guard let elements = value as? [Any] else { return [] }
+        var sessions: [UInt32] = []
+        for element in elements.prefix(maxReclaimSessionsPerTab) {
+            guard let number = number(element), number.doubleValue.isFinite,
+                number.doubleValue >= 1, number.doubleValue <= Double(UInt32.max),
+                number.doubleValue.rounded(.towardZero) == number.doubleValue
+            else { continue }
+            let session = UInt32(number.uint64Value)
+            if !sessions.contains(session) { sessions.append(session) }
+        }
+        return sessions
+    }
+
     /// A daemon socket basename, or nil.
     ///
     /// Restoring a tab feeds this into the reattach command's SOCK="<name>"
@@ -282,6 +299,9 @@ enum SessionLayout {
         groups.map { group in
             let tabs: [[String: Any]] = group.tabs.map { tab in
                 var dictionary: [String: Any] = ["sessionID": tab.sessionID]
+                if !tab.reclaimSessionIDsAfterUpdate.isEmpty {
+                    dictionary["reclaimSessionIDsAfterUpdate"] = tab.reclaimSessionIDsAfterUpdate
+                }
                 if let hostLabel = tab.hostLabel, !hostLabel.isEmpty { dictionary["hostLabel"] = hostLabel }
                 if let bridgeCommand = tab.bridgeCommand, !bridgeCommand.isEmpty { dictionary["bridge"] = bridgeCommand }
                 if let socketName = tab.socketName, !socketName.isEmpty { dictionary["socket"] = socketName }
@@ -315,6 +335,7 @@ enum SessionLayout {
                 guard let tabDictionary = tabObject as? [String: Any] else { continue }
                 let tab = LayoutTab()
                 tab.sessionID = UInt32(truncatingIfNeeded: number(tabDictionary["sessionID"])?.uint64Value ?? 0)
+                tab.reclaimSessionIDsAfterUpdate = reclaimSessionIDs(tabDictionary["reclaimSessionIDsAfterUpdate"])
                 tab.hostLabel = string(tabDictionary["hostLabel"])
                 tab.bridgeCommand = string(tabDictionary["bridge"])
                 tab.socketName = socketName(tabDictionary["socket"])

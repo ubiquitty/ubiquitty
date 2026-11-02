@@ -689,6 +689,7 @@ struct HostSectionFacts {
         case ListingFailure::NotInstalled:
             return HostSectionState::NotInstalled;
         case ListingFailure::Malformed:
+        case ListingFailure::InstanceUnreadable:
             return HostSectionState::Malformed;
         case ListingFailure::Refused:
             switch (facts.deniedReason) {

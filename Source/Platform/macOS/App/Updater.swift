@@ -3,9 +3,12 @@
 
 import AppKit
 import CxxStdlib
+import Security
 import UbiquittyAppBridge
 import UbiquittyAppleCallbacks
 import UbiquittyCore
+import UbiquittyKit
+import UbiquittyLocalHostInstall
 
 #if canImport(Sparkle)
 import Sparkle
@@ -41,10 +44,9 @@ import Sparkle
 // the bundle declares `SUEnableAutomaticChecks`, which Sparkle reads as the
 // question already answered, and the delegate declines if asked anyway.
 //
-// The delegate also reports when Sparkle is about to relaunch the app into an
-// update it installed, which is how the quit that follows keeps the person's
-// terminals (`Session::isSessionKeptByQuit`). The fact is Sparkle's, reported
-// rather than inferred from the quit.
+// The delegate holds installation while the app adopts local panes and proves
+// that the updated host took their sessions. The later relaunch notice names
+// the quit; it is not the gate that preserves process ownership.
 //
 // No Sparkle type appears in this file's @objc surface, and that is a
 // requirement rather than a preference: the generated interop header is
@@ -53,6 +55,98 @@ import Sparkle
 // file knows about. The delegate is a private object for that reason.
 
 #if canImport(Sparkle)
+/// The standard sheet still owns the person's choice. Preparation runs before
+/// its Install reply, so Dismiss retains Sparkle's install-on-quit path.
+private final class UpdateUserDriver: SPUStandardUserDriver {
+    weak var owner: Updater?
+
+    override func showReadyToInstallAndRelaunch() async -> SPUUserUpdateChoice {
+        let choice = await super.showReadyToInstallAndRelaunch()
+        guard choice == .install else { return choice }
+        return await owner?.prepareUpdateRelaunch() ?? .dismiss
+    }
+}
+
+/// A host extracted from a separately downloaded appcast archive, retained
+/// until takeover finishes. This copy is admitted by its release team
+/// signature and checked version; Sparkle validates its own archive.
+private struct UpdateHostCandidate: Sendable {
+    let path: String
+    let directory: URL
+    let version: String
+
+    static func stage(from url: URL, expectedBuild: String, expectedVersion: String, contentLength: UInt64) async -> Self? {
+        guard url.scheme == "https", contentLength > 0, contentLength <= 256 * 1024 * 1024,
+            url.pathExtension.lowercased() == "zip"
+        else { return nil }
+        guard let (archive, response) = try? await URLSession.shared.download(from: url) else { return nil }
+        defer { try? FileManager.default.removeItem(at: archive) }
+        guard response.expectedContentLength <= 256 * 1024 * 1024,
+            let size = (try? FileManager.default.attributesOfItem(atPath: archive.path)[.size]) as? NSNumber,
+            size.uint64Value <= 256 * 1024 * 1024,
+            let info = readEntry("Ubiquitty.app/Contents/Info.plist", from: archive, maxBytes: 1 * 1024 * 1024),
+            let dictionary = (try? PropertyListSerialization.propertyList(from: info, options: 0, format: nil)) as? [String: Any],
+            dictionary["CFBundleVersion"] as? String == expectedBuild,
+            dictionary["CFBundleShortVersionString"] as? String == expectedVersion,
+            let binary = readEntry("Ubiquitty.app/Contents/Helpers/ubiquitty-host", from: archive, maxBytes: 64 * 1024 * 1024)
+        else { return nil }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ubq-update-\(UUID().uuidString)")
+        let host = directory.appendingPathComponent("ubiquitty-host")
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try binary.write(to: host, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: host.path)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            return nil
+        }
+        guard isTrustedReleaseHost(at: host) else {
+            try? FileManager.default.removeItem(at: directory)
+            return nil
+        }
+        return Self(path: host.path, directory: directory, version: expectedVersion)
+    }
+
+    private static func readEntry(_ name: String, from archive: URL, maxBytes: Int) -> Data? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-p", archive.path, name]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        var bytes = Data()
+        while true {
+            let chunk = output.fileHandleForReading.readData(ofLength: 64 * 1024)
+            if chunk.isEmpty { break }
+            if bytes.count > maxBytes - chunk.count {
+                process.terminate()
+                process.waitUntilExit()
+                return nil
+            }
+            bytes.append(chunk)
+        }
+        process.waitUntilExit()
+        return process.terminationStatus == 0 && !bytes.isEmpty ? bytes : nil
+    }
+
+    private static func isTrustedReleaseHost(at url: URL) -> Bool {
+        var requirement: SecRequirement?
+        let expression = String(Ubiquitty.Host.trustedHostSignatureRequirement())
+        guard SecRequirementCreateWithString(expression as CFString, [], &requirement) == errSecSuccess,
+            let requirement
+        else { return false }
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code else { return false }
+        return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+}
+
 /// Why a scheduled check was declined, for the error Sparkle reports.
 private struct ScheduledCheckDeclined: LocalizedError {
     var errorDescription: String? { "Automatic update checks are turned off." }
@@ -61,6 +155,8 @@ private struct ScheduledCheckDeclined: LocalizedError {
 /// What the updater may do without the person, what its checks report, and
 /// whether it is about to relaunch the app.
 private final class UpdatePolicy: NSObject, SPUUpdaterDelegate {
+    weak var owner: Updater?
+    private(set) var selectedItem: SUAppcastItem?
     /// Whether Sparkle has said it is about to relaunch the app.
     private(set) var isRelaunchPending = false
 
@@ -117,6 +213,29 @@ private final class UpdatePolicy: NSObject, SPUUpdaterDelegate {
     /// - Parameter updater: The updater relaunching.
     func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
         isRelaunchPending = true
+    }
+
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        selectedItem = item
+    }
+
+    func updater(_ updater: SPUUpdater, willExtractUpdate item: SUAppcastItem) {
+        selectedItem = item
+    }
+
+    /// A relaunch without the completed ownership gate cannot close the app.
+    func updaterShouldRelaunchApplication(_ updater: SPUUpdater) -> Bool {
+        owner?.mayTerminateAfterUpdatePreparation == true
+    }
+
+    func clearPendingRelaunch() {
+        isRelaunchPending = false
+    }
+
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        Task { @MainActor [weak owner] in
+            await owner?.cancelPreparedUpdateAfterAbort()
+        }
     }
 
     #if UBIQUITTY_UI_TESTS
@@ -190,14 +309,19 @@ public final class Updater: NSObject {
     }
 
     #if canImport(Sparkle)
-    // SPUStandardUpdaterController bundles SPUUpdater with the standard UI user
-    // driver. It reads SUFeedURL / SUPublicEDKey and the schedule keys from the
-    // bundle's Info.plist and owns both kinds of check.
-    private let controller: SPUStandardUpdaterController
+    // Sparkle reads SUFeedURL / SUPublicEDKey and the schedule keys from the
+    // bundle. The standard user driver keeps its native update interface.
+    private let userDriver: UpdateUserDriver
+    private let sparkleUpdater: SPUUpdater
 
     // Sparkle holds its delegate weakly, so the policy lives as long as the
     // updater that installed it.
     private let policy: UpdatePolicy
+    private var isPreparingUpdateRelaunch = false
+    private var isUpdateTerminationAuthorized = false
+    private var preparedCapture: TerminalWindows.PreparedUpdateCapture?
+    private var previousCurrentLayout: LayoutSession?
+    private var didCommitCaptureForInstallation = false
 
     /// Core's registration; the schedule follows every configuration change
     /// for as long as the updater lives.
@@ -205,13 +329,18 @@ public final class Updater: NSObject {
 
     private override init() {
         let policy = UpdatePolicy()
+        let userDriver = UpdateUserDriver(hostBundle: Bundle.main, delegate: nil)
         self.policy = policy
-        controller = SPUStandardUpdaterController(
-            startingUpdater: false,
-            updaterDelegate: policy,
-            userDriverDelegate: nil
+        self.userDriver = userDriver
+        sparkleUpdater = SPUUpdater(
+            hostBundle: Bundle.main,
+            applicationBundle: Bundle.main,
+            userDriver: userDriver,
+            delegate: policy
         )
         super.init()
+        policy.owner = self
+        userDriver.owner = self
         followPreference()
         subscription = Ubiquitty.Preferences.ConfigurationSubscription.notifying(
             Ubiquitty.Apple.ownedCallback { [weak self] in
@@ -229,22 +358,22 @@ public final class Updater: NSObject {
     /// when the value is the one it already holds.
     private func followPreference() {
         let shouldCheck = Self.shouldCheckAutomatically
-        if controller.updater.automaticallyChecksForUpdates != shouldCheck {
-            controller.updater.automaticallyChecksForUpdates = shouldCheck
+        if sparkleUpdater.automaticallyChecksForUpdates != shouldCheck {
+            sparkleUpdater.automaticallyChecksForUpdates = shouldCheck
         }
     }
 
     /// Whether a check can begin now — no while one is already running.
-    public var canCheckForUpdates: Bool { controller.updater.canCheckForUpdates }
+    public var canCheckForUpdates: Bool { sparkleUpdater.canCheckForUpdates }
 
     /// Whether the updater runs Sparkle's daily schedule, which it does
     /// exactly while the preference asks for it.
-    public var isAutomaticCheckScheduled: Bool { controller.updater.automaticallyChecksForUpdates }
+    public var isAutomaticCheckScheduled: Bool { sparkleUpdater.automaticallyChecksForUpdates }
 
     /// Whether the updater could download or install an update without the
     /// person, or offer to. Always false: the bundle disallows it.
     public var mayInstallWithoutAsking: Bool {
-        controller.updater.automaticallyDownloadsUpdates || controller.updater.allowsAutomaticUpdates
+        sparkleUpdater.automaticallyDownloadsUpdates || sparkleUpdater.allowsAutomaticUpdates
     }
 
     /// Whether Sparkle has said it relaunches the app into an update once this
@@ -257,12 +386,119 @@ public final class Updater: NSObject {
     /// quit after the report is the relaunch's.
     public var isRelaunchingForUpdate: Bool { policy.isRelaunchPending }
 
+    /// The app has already captured its panes and either proved takeover or
+    /// received explicit permission to restart despite a failed preparation.
+    public var mayTerminateAfterUpdatePreparation: Bool { isUpdateTerminationAuthorized }
+
+    /// A quit cannot discard a prepared local owner while Sparkle is held.
+    public var isUpdatePreparationInProgress: Bool { isPreparingUpdateRelaunch }
+
+    /// Publishes the already proved arrangement at Sparkle's actual quit.
+    public func commitPreparedUpdateAtQuit() {
+        guard !didCommitCaptureForInstallation, let preparedCapture else { return }
+        TerminalWindows.commitUpdateCapture(preparedCapture)
+        didCommitCaptureForInstallation = true
+    }
+
+    fileprivate func cancelPreparedUpdateAfterAbort() async {
+        guard isUpdateTerminationAuthorized else { return }
+        isPreparingUpdateRelaunch = true
+        isUpdateTerminationAuthorized = false
+        policy.clearPendingRelaunch()
+        if let preparedCapture { await TerminalWindows.reclaimUpdateAdoptions(preparedCapture) }
+        if didCommitCaptureForInstallation {
+            RemoteSessionLifecycle.shared.resumeAfterCancelledTermination()
+            if let previousCurrentLayout {
+                SessionLayout.saveCurrentLayout(previousCurrentLayout.groups, keptFor: previousCurrentLayout.keptFor)
+            } else {
+                SessionLayout.saveCurrentLayout([])
+            }
+        }
+        preparedCapture = nil
+        didCommitCaptureForInstallation = false
+        previousCurrentLayout = nil
+        isPreparingUpdateRelaunch = false
+    }
+
+    fileprivate func prepareUpdateRelaunch() async -> SPUUserUpdateChoice {
+        guard !isPreparingUpdateRelaunch else { return .dismiss }
+        isPreparingUpdateRelaunch = true
+        previousCurrentLayout = SessionLayout.allSessions().first { $0.identifier == SessionLayout.currentIdentifier }
+        let capture = TerminalWindows.prepareUpdateCapture()
+        preparedCapture = capture
+        var facts = Ubiquitty.Session.UpdateRelaunchFacts()
+        facts.localPaneCount = .init(capture.localPanes.count)
+        facts.adoptedLocalPaneCount = .init(capture.adoptedLocalPaneCount)
+        facts.unresolvedAdoptionCount = .init(Ubiquitty.Runtime.TerminalSession.unresolvedLocalAdoptionCount())
+        let predecessors =
+            facts.localPaneCount == facts.adoptedLocalPaneCount && facts.unresolvedAdoptionCount == 0
+            ? await TerminalWindows.settledUpdateAdoptions(capture) : nil
+        facts.attachedLocalPaneCount = .init(predecessors?.count ?? 0)
+
+        var candidate: UpdateHostCandidate?
+        if facts.localPaneCount == facts.adoptedLocalPaneCount,
+            facts.attachedLocalPaneCount == facts.localPaneCount,
+            facts.unresolvedAdoptionCount == 0,
+            let item = policy.selectedItem,
+            let address = item.fileURL
+        {
+            candidate = await UpdateHostCandidate.stage(
+                from: address,
+                expectedBuild: item.versionString,
+                expectedVersion: item.displayVersionString,
+                contentLength: item.contentLength
+            )
+        }
+        if let candidate {
+            facts.isNewHostVerified = true
+            let takeover = await LocalHostUpgrade.beforeUpdate(using: candidate.path, version: candidate.version)
+            facts.isNewHostInstalled = takeover.isInstalled
+            facts.isNewHostAnswering = takeover.isAnswering
+            facts.olderHostCount = .init(takeover.olderHostCount)
+            facts.pendingSessionCount = .init(takeover.olderHostCount)
+            if let predecessors, facts.isNewHostAnswering {
+                facts.movedLocalPaneCount = .init(
+                    await TerminalWindows.movedUpdateAdoptionCount(capture, from: predecessors)
+                )
+            }
+            try? FileManager.default.removeItem(at: candidate.directory)
+        }
+        if Ubiquitty.Session.updateRelaunchAction(facts, .Unasked) == .InstallNow {
+            isPreparingUpdateRelaunch = false
+            isUpdateTerminationAuthorized = true
+            return .install
+        }
+
+        await TerminalWindows.reclaimUpdateAdoptions(capture)
+        isPreparingUpdateRelaunch = false
+        let alert = NSAlert()
+        alert.icon = NSApp.applicationIconImage
+        alert.messageText = String(Ubiquitty.Session.updateRelaunchRiskTitle())
+        alert.informativeText = String(Ubiquitty.Session.updateRelaunchRiskDetail(facts.localPaneCount))
+        alert.addButton(withTitle: String(Ubiquitty.Session.updateRelaunchProceedTitle()))
+        alert.addButton(withTitle: String(Ubiquitty.Session.updateRelaunchPostponeTitle()))
+        let acceptedRisk = alert.runModal() == .alertFirstButtonReturn
+        facts.unresolvedAdoptionCount = .init(Ubiquitty.Runtime.TerminalSession.unresolvedLocalAdoptionCount())
+        let choice: Ubiquitty.Session.UpdateRiskChoice = acceptedRisk ? .RestartAnyway : .NotNow
+        if Ubiquitty.Session.updateRelaunchAction(facts, choice) == .InstallNow {
+            let reply = TerminalWindows.terminationReply(for: .UpdateRelaunch) { _ in .alertFirstButtonReturn }
+            if reply == .terminateNow {
+                didCommitCaptureForInstallation = true
+                isUpdateTerminationAuthorized = true
+                return .install
+            }
+        }
+        preparedCapture = nil
+        previousCurrentLayout = nil
+        return .dismiss
+    }
+
     /// Target/action for the "Check for Updates…" menu item.
     ///
     /// - Parameter sender: The menu item, passed through to Sparkle.
     @objc
     public func checkForUpdates(_ sender: Any?) {
-        controller.checkForUpdates(sender)
+        sparkleUpdater.checkForUpdates()
     }
 
     /// The started updater, or nil when this build has no Sparkle.
@@ -274,8 +510,13 @@ public final class Updater: NSObject {
     @objc
     public static func startedUpdater() -> Updater? {
         let updater = Updater()
-        updater.controller.startUpdater()
-        return updater
+        do {
+            try updater.sparkleUpdater.start()
+            return updater
+        } catch {
+            Ubiquitty.SwiftBridge.writeDiagnostic(std.string("Updater could not start: \(error.localizedDescription)"))
+            return nil
+        }
     }
 
     #if UBIQUITTY_UI_TESTS
@@ -284,11 +525,11 @@ public final class Updater: NSObject {
 
     /// Runs the check Sparkle's schedule runs, now.
     func runScheduledCheck() {
-        controller.updater.checkForUpdatesInBackground()
+        sparkleUpdater.checkForUpdatesInBackground()
     }
 
     /// Whether Sparkle has a check, or its own scheduling, under way.
-    var isSessionInProgress: Bool { controller.updater.sessionInProgress }
+    var isSessionInProgress: Bool { sparkleUpdater.sessionInProgress }
 
     /// How many update cycles have finished since launch.
     var finishedCycleCount: Int { policy.finishedCycleCount }
@@ -306,7 +547,17 @@ public final class Updater: NSObject {
     /// Delivers Sparkle's relaunch notice through the delegate Sparkle calls,
     /// as Install and Relaunch does, without installing anything.
     func deliverRelaunchNoticeForTesting() {
-        policy.updaterWillRelaunchApplication(controller.updater)
+        policy.updaterWillRelaunchApplication(sparkleUpdater)
+    }
+
+    /// Exercises the same preparation the Install button awaits, without a
+    /// release feed or an installer that would replace the test application.
+    func prepareUpdateRelaunchForTesting() async -> Bool {
+        await prepareUpdateRelaunch() == .install
+    }
+
+    func cancelPreparedUpdateForTesting() async {
+        await cancelPreparedUpdateAfterAbort()
     }
     #endif
     #else
@@ -328,6 +579,12 @@ public final class Updater: NSObject {
     /// Whether an update relaunches the app once this process ends. Never,
     /// without Sparkle.
     public var isRelaunchingForUpdate: Bool { false }
+
+    public var mayTerminateAfterUpdatePreparation: Bool { false }
+
+    public var isUpdatePreparationInProgress: Bool { false }
+
+    public func commitPreparedUpdateAtQuit() {}
 
     /// Target/action for the "Check for Updates…" menu item; inert here, and
     /// the caller surfaces no such item in this build.
@@ -351,6 +608,8 @@ public final class Updater: NSObject {
     var scheduleCount: Int { 0 }
     var lastScheduledDelay: TimeInterval? { nil }
     func deliverRelaunchNoticeForTesting() {}
+    func prepareUpdateRelaunchForTesting() async -> Bool { false }
+    func cancelPreparedUpdateForTesting() async {}
     #endif
     #endif
 

@@ -11,10 +11,10 @@ which `Scripts/check-wire-tables.py` holds current, so neither types a version,
 a kind or a capability bit of its own. This gate holds what that generation
 cannot cover.
 
-There is one version and no history of versions: a change to the wire edits
-that version's grammar, and a peer at any other version is refused. The gate
-fails when the version headers name a minimum peer version or a version
-history again.
+There is one active version: every wire change increments it, and a peer at
+any other version is refused. A frozen published identity detects an omitted
+increment; it does not admit an older peer. The gate fails when the version
+headers name a minimum peer version or a negotiation history.
 
 A body version is only a version if somebody reads it back, so every
 `*BodyVersion` constant `Sync/HandoverBody.h` declares has to be both stamped onto a
@@ -276,6 +276,12 @@ def bodyVersionFailures(headerText, sourceText):
     """
     lines = []
     for name in sorted(n for n in headerVersions(headerText) if n.endswith("BodyVersion")):
+        if name == "lastPublishedHandoverBodyVersion":
+            # A release pin is not a separately encoded layout. It owns the
+            # reader floor, which must remain an alias to the published value.
+            if not re.search(r"\boldestHandoverBodyVersion\s*=\s*lastPublishedHandoverBodyVersion\s*;", headerText):
+                lines.append("  oldestHandoverBodyVersion must retain the last published handover format")
+            continue
         # An `oldest…BodyVersion` is the floor a reader still decodes, not a
         # layout any frame is written in: it is held to the comparison alone.
         isFloor = name.startswith("oldest")
@@ -411,6 +417,9 @@ def selfTest():
         ("a floor compared", "constexpr uint16_t oldestFooBodyVersion = 1;",
          "bool d() { if (v < oldestFooBodyVersion) return false; }", False),
         ("a floor never compared", "constexpr uint16_t oldestFooBodyVersion = 1;", "", True),
+        ("a published handover floor", "constexpr uint16_t lastPublishedHandoverBodyVersion = 35;\n"
+         "constexpr uint16_t oldestHandoverBodyVersion = lastPublishedHandoverBodyVersion;", "", False),
+        ("a discarded published handover floor", "constexpr uint16_t lastPublishedHandoverBodyVersion = 35;", "", True),
         # A version constant that is not a body version is not this rule's subject.
         ("not a body version", "constexpr uint32_t snapshotVersion = 19;", "", False),
     ]

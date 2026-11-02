@@ -208,6 +208,7 @@ struct HostListingFailure: Equatable {
         case endedBeforeAnswer
         /// The daemon the listing was pinned to is no longer running.
         case instanceGone
+        case instanceUnreadable
         case notInstalled
         case refused
         case malformed
@@ -568,7 +569,7 @@ final class HostDirectoryModel {
         if let endpoint, endpoint.shellCommand == transport.shellCommand {
             return endpoint
         }
-        let shared = HostDirectoryClients.shared.endpoint(for: transport.shellCommand)
+        let shared = HostDirectoryClients.shared.endpoint(for: transport.shellCommand, instance: server?.daemonInstance)
         shared.subscribe(self) { [weak self] in self?.hostDirectoryDidChange() }
         endpoint = shared
         outline.setFallbackName(server?.displayName ?? "")
@@ -661,6 +662,8 @@ final class HostDirectoryModel {
             kind = .endedBeforeAnswer
         case .InstanceGone:
             kind = .instanceGone
+        case .InstanceUnreadable:
+            kind = .instanceUnreadable
         case .NotInstalled:
             kind = .notInstalled
         case .Refused:
@@ -1329,6 +1332,7 @@ final class HostDirectoryModel {
             case .authenticationAttemptsExhausted: facts.failure = .AuthenticationAttemptsExhausted
             case .endedBeforeAnswer: facts.failure = .EndedBeforeAnswer
             case .instanceGone: facts.failure = .InstanceGone
+            case .instanceUnreadable: facts.failure = .InstanceUnreadable
             case .malformed: facts.failure = .Malformed
             case .refused: facts.failure = .Refused
             }

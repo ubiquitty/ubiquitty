@@ -100,6 +100,7 @@ std::vector<Remedy> listingRemedies(const ConnectFact& fact)
             return { Remedy::TryAgain };
         case ListingFailure::None:
         case ListingFailure::InstanceGone:
+        case ListingFailure::InstanceUnreadable:
         case ListingFailure::Refused:
         case ListingFailure::Malformed:
             break;
@@ -138,6 +139,7 @@ std::vector<Remedy> listingRemedies(const ConnectFact& fact)
             return { Remedy::ManageHost, Remedy::TryAgain };
         return refusalRemedies(fact);
     case ListingFailure::Malformed:
+    case ListingFailure::InstanceUnreadable:
         return { Remedy::TryAgain };
     }
     return { Remedy::TryAgain };
@@ -299,6 +301,8 @@ std::string connectRemedySentence(const ConnectFact& fact)
             return "The Ubiquitty host you chose on " + here + " is no longer running. Try again to see the sessions " + here + " is running now.";
         case ListingFailure::Malformed:
             return "The Ubiquitty host on " + here + " sent a reply this app doesn’t understand. Try again.";
+        case ListingFailure::InstanceUnreadable:
+            return "This app cannot read the running host. Its sessions keep running. Use a matching build to open them.";
         case ListingFailure::None:
         case ListingFailure::Refused:
             break;
@@ -342,6 +346,8 @@ std::string connectRemedySentence(const ConnectFact& fact)
         return refusalSentence();
     case ListingFailure::Malformed:
         return "The host sent a reply Ubiquitty doesn’t understand. Try again, and if this keeps happening, reinstall Ubiquitty on " + host + ".";
+    case ListingFailure::InstanceUnreadable:
+        return "This app cannot read the running host. Its sessions keep running. Use a matching build to open them.";
     }
     return {};
 }

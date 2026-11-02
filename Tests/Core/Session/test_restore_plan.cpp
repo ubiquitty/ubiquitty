@@ -50,6 +50,65 @@ TEST(testTheClassificationReattachesOnlyWithBothInputs)
     CHECK(S::classifyRestoreTab(false, false) == S::RestoreAction::FreshLocal);
 }
 
+TEST(anUpdateRelaunchRequiresEveryLocalPaneAndTheNewHostToBeSettled)
+{
+    S::UpdateRelaunchFacts facts;
+    facts.localPaneCount = 2;
+    facts.adoptedLocalPaneCount = 2;
+    facts.attachedLocalPaneCount = 2;
+    facts.movedLocalPaneCount = 2;
+    facts.isNewHostVerified = true;
+    facts.isNewHostInstalled = true;
+    facts.isNewHostAnswering = true;
+    CHECK(S::mayInstallUpdateAndRelaunch(facts));
+
+    facts.adoptedLocalPaneCount = 1;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+    facts.adoptedLocalPaneCount = 2;
+    facts.attachedLocalPaneCount = 1;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+    facts.attachedLocalPaneCount = 2;
+    facts.movedLocalPaneCount = 1;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+    facts.movedLocalPaneCount = 2;
+    facts.unresolvedAdoptionCount = 1;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+    facts.unresolvedAdoptionCount = 0;
+    facts.olderHostCount = 1;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+    facts.olderHostCount = 0;
+    facts.pendingSessionCount = 1;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+    facts.pendingSessionCount = 0;
+    facts.isNewHostAnswering = false;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+    facts.isNewHostAnswering = true;
+    facts.isNewHostInstalled = false;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+    facts.isNewHostInstalled = true;
+    facts.isNewHostVerified = false;
+    CHECK(!S::mayInstallUpdateAndRelaunch(facts));
+}
+
+TEST(anUpdateRelaunchWarningNamesTheTerminalsAtRisk)
+{
+    CHECK(S::updateRelaunchRiskDetail(1).find("1 terminal") != std::string::npos);
+    CHECK(S::updateRelaunchRiskDetail(2).find("2 terminals") != std::string::npos);
+    CHECK(S::updateRelaunchRiskDetail(1).find("next time you quit") != std::string::npos);
+}
+
+TEST(aFailedUpdateTransferInstallsOnQuitUnlessThePersonAcceptsTheRisk)
+{
+    S::UpdateRelaunchFacts facts;
+    facts.localPaneCount = 2;
+    facts.adoptedLocalPaneCount = 1;
+    CHECK(S::updateRelaunchAction(facts, S::UpdateRiskChoice::Unasked) == S::UpdateRelaunchAction::AskBeforeRestart);
+    CHECK(S::updateRelaunchAction(facts, S::UpdateRiskChoice::NotNow) == S::UpdateRelaunchAction::InstallOnQuit);
+    CHECK(S::updateRelaunchAction(facts, S::UpdateRiskChoice::RestartAnyway) == S::UpdateRelaunchAction::InstallNow);
+    facts.unresolvedAdoptionCount = 1;
+    CHECK(S::updateRelaunchAction(facts, S::UpdateRiskChoice::RestartAnyway) == S::UpdateRelaunchAction::InstallOnQuit);
+}
+
 TEST(testATabReattachesOnlyWithBothASessionAndAWayToReachIt)
 {
     const S::RestoredTab both = capturedTab();
@@ -193,6 +252,18 @@ S::CaptureConditions savingAWorkspace()
 const S::LocalDaemonTarget localDaemon { .bridgeCommand = "sh -c 'SOCK=\"\"; exec /bin/host --attach'", .socketName = "ubq-1111", .socketPath = "/tmp/ubq-1111" };
 
 } // namespace
+
+TEST(anUpdateReclaimsOnlyTheExactFormerlyLocalSessions)
+{
+    const auto facts = localShell();
+    const auto action = S::planCapturedTab(facts, { .occasion = S::CaptureOccasion::UpdateRelaunch, .isLocalDaemonReady = true });
+    REQUIRE(action == S::TabCaptureAction::ReHomes);
+    auto forUpdate = S::storedTab(facts, action, localDaemon, 42);
+    forUpdate.reclaimSessionIDsAfterUpdate = { 42, 44 };
+    CHECK(S::planRestoredTab(forUpdate, "/bin/host").reclaimSessionIDsAfterUpdate == std::vector<std::uint32_t>({ 42, 44 }));
+    forUpdate.hostLabel = "remote";
+    CHECK(S::planRestoredTab(forUpdate, "/bin/host").reclaimSessionIDsAfterUpdate.empty());
+}
 
 // A tmux pane's view is not a session of its own, whatever else it looks like:
 // storing one would open a second, unrelated shell where the pane was.

@@ -415,11 +415,16 @@ public final class TagEditorScenarios: NSObject {
                     t.expect(false, desc: "a window came up")
                     return
                 }
-                defer { t.closeAllWindows() }
+                let workspace = "uitest-tag-workspace-\(UUID().uuidString)"
+                defer {
+                    t.closeAllWindows()
+                    for entry in delegate.sessionPickerEntries() where entry["name"] == workspace {
+                        if let identifier = entry["id"] { SessionLayout.deleteSession(withIdentifier: identifier) }
+                    }
+                }
                 setManualTags(["shipping", "blue"], on: window)
                 t.pump(0.3)
 
-                let workspace = "uitest-tag-workspace"
                 t.expect(
                     delegate.saveCurrentLayout(withName: workspace),
                     desc: "the arrangement saves as a named workspace"

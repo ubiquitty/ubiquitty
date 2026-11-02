@@ -26,6 +26,27 @@
 
 namespace Ubiquitty::Host {
 
+/// Reads only a bounded regular same-user log; discovery never follows a link or waits on a writer.
+///
+/// The authenticated peer's startup line identifies the running image even after replacement.
+/// - Parameters:
+///   - socketName: The discovered socket's basename.
+///   - process: Its authenticated peer process.
+/// - Returns: The reported version, empty when the log cannot establish it.
+[[nodiscard]] inline std::string discoveredDaemonVersion(std::string_view socketName, std::uint64_t process)
+{
+    std::array<char, 1024> path {};
+    const std::string name(socketName);
+    logfilePathForSocketName(name.c_str(), path);
+    PAL::UnixFileDescriptor file(::open(path.data(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+    struct stat status {};
+    if (!file || ::fstat(file.get(), &status) != 0 || !S_ISREG(status.st_mode) || status.st_uid != ::geteuid() || (status.st_mode & 0077))
+        return {};
+    std::array<char, 16384> bytes {};
+    const auto count = ::pread(file.get(), bytes.data(), bytes.size(), 0);
+    return count > 0 ? Session::daemonVersionFromLog({ bytes.data(), static_cast<std::size_t>(count) }, process) : std::string {};
+}
+
 /// Probes private same-user sockets without sending a request or trusting PID files.
 /// A full listener backlog is skipped; discovery never waits on another reactor.
 [[nodiscard]] inline std::vector<Session::HostInstanceInfo> discoverHostInstances()
@@ -52,12 +73,17 @@ namespace Ubiquitty::Host {
         if (::connect(socket.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 || !PAL::peerIsSameUser(socket))
             return false;
         std::array<char, 4096> executable {};
+        std::uint64_t process = 0;
 #if defined(__APPLE__)
+        pid_t peerProcess = 0;
+        socklen_t processLength = sizeof(peerProcess);
         audit_token_t token {};
         socklen_t length = sizeof(token);
-        if (::getsockopt(socket.get(), SOL_LOCAL, LOCAL_PEERTOKEN, &token, &length) != 0 || length != sizeof(token)
+        if (::getsockopt(socket.get(), SOL_LOCAL, LOCAL_PEERPID, &peerProcess, &processLength) != 0 || processLength != sizeof(peerProcess)
+            || peerProcess <= 0 || ::getsockopt(socket.get(), SOL_LOCAL, LOCAL_PEERTOKEN, &token, &length) != 0 || length != sizeof(token)
             || ::proc_pidpath_audittoken(&token, executable.data(), executable.size()) <= 0)
             return false;
+        process = static_cast<std::uint64_t>(peerProcess);
 #elif defined(__linux__)
         struct ucred credentials {};
         socklen_t length = sizeof(credentials);
@@ -73,15 +99,17 @@ namespace Ubiquitty::Host {
         if (!lifetime || descriptorLength != sizeof(descriptor) || count <= 0 || ::poll(&alive, 1, 0) != 0)
             return false;
         executable[static_cast<std::size_t>(count)] = '\0';
+        process = static_cast<std::uint64_t>(credentials.pid);
 #else
         return false;
 #endif
         Session::HostInstanceInfo instance { std::string(socketPath.substr(socketPath.rfind('/') + 1)), executable.data(),
             static_cast<std::uint64_t>(std::max<time_t>(0, status.st_mtime)) };
+        instance.appVersion = discoveredDaemonVersion(instance.socketName, process);
         // Endpoint metadata shares one bounded Sync result with the directory.
-        std::size_t metadataBytes = 2 * instance.executable.size() + 160;
+        std::size_t metadataBytes = 2 * (instance.executable.size() + instance.appVersion.size()) + 192;
         for (const auto& held : instances)
-            metadataBytes += 2 * held.executable.size() + 160;
+            metadataBytes += 2 * (held.executable.size() + held.appVersion.size()) + 192;
         if (Session::isValidHostInstance(instance) && metadataBytes <= 16384)
             instances.push_back(std::move(instance));
         return instances.size() >= Session::maxDiscoveredHostInstances;

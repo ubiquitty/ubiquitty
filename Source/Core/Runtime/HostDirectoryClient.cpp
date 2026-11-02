@@ -323,8 +323,8 @@ struct HostDirectoryClient::State final : Session::SessionDirectoryObserver {
         }
         snapshot.error = Session::listingFailureNotice(report, Session::NoticePlacement::Standalone);
         snapshot.failureDetail = Session::placedNotice(report.detail, Session::NoticePlacement::Standalone);
-        if (report.failure == Session::ListingFailure::Refused) {
-            snapshot.hostBuild = directory.hostBuild();
+        if (report.failure == Session::ListingFailure::Refused || report.failure == Session::ListingFailure::InstanceUnreadable) {
+            snapshot.hostBuild = report.hostBuild;
         }
         // Only a failed listing says anything about the listing: a refused
         // management request leaves the host's sessions exactly as listed.
@@ -435,6 +435,12 @@ void HostDirectoryClient::stopWatching()
     // What it last reported stays, as of now and followed by nothing.
     if (m_state->snapshot.treeFreshness == TreeFreshness::Live)
         m_state->snapshot.treeFreshness = TreeFreshness::Listed;
+}
+
+void HostDirectoryClient::setExpectedDaemon(Session::HostInstanceInfo instance)
+{
+    m_state->directory.setExpectedDaemon(instance);
+    m_state->watcher.setExpectedDaemon(std::move(instance));
 }
 
 std::shared_ptr<const Session::SessionTree> HostDirectoryClient::tree() const

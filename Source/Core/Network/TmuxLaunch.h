@@ -177,7 +177,7 @@ struct TmuxLaunchPlan {
         }
         remoteCommand += Transport::shellSingleQuote(argument);
     }
-    return { std::string(sshPath), "-t", "-e", "none", std::string(host), std::move(remoteCommand) };
+    return { std::string(sshPath), "-t", "-e", "none", std::string(host), Transport::remoteShellCommand(remoteCommand) };
 }
 
 // Assemble the REMOTE launch argv: ssh wrapping a remote `tmux …`. The fixed

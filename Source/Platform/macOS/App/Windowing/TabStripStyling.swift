@@ -37,6 +37,7 @@ public final class TabStripStyling: NSObject {
         private func restore(in field: NSTextField) {
             guard let window, let strip, TabStripStyling.themedTitleStrips.contains(strip),
                 field.isDescendant(of: strip), let title = window.tab.attributedTitle,
+                TabStripStyling.owner(of: field.attributedStringValue, among: [window]) === window,
                 field.stringValue == title.string, !field.attributedStringValue.isEqual(to: title)
             else { return }
             correctionsForTesting += 1
@@ -115,7 +116,6 @@ public final class TabStripStyling: NSObject {
         guard let host, let strip = tabStrip(in: host), themedTitleStrips.contains(strip) else { return }
         let stripHost = stripWindow(of: strip) ?? host.window ?? window
         write(
-            titles: bakedTitles(of: stripHost),
             into: pillFields(in: strip, tabCount: stripHost.tabGroup?.windows.count ?? 1),
             windows: stripHost.tabGroup?.windows ?? [stripHost],
             strip: strip
@@ -124,6 +124,42 @@ public final class TabStripStyling: NSObject {
 
     /// The width a bake fitted a tab's title to, carried on the title.
     package static let fittedWidthKey = NSAttributedString.Key("UBTabTitleFittedWidth")
+
+    /// A title's window identity survives native copying without retaining its window.
+    private static let ownerKey = NSAttributedString.Key("UBTabTitleOwner")
+    private static let titleOwners = NSMapTable<NSWindow, NSUUID>.weakToStrongObjects()
+
+    /// Associates a baked title with its window independently of tab position.
+    ///
+    /// AppKit may move a tab's field before its geometry and the group's order agree.
+    ///
+    /// - Parameters:
+    ///   - title: The fitted title and its styling.
+    ///   - window: The window whose session supplied the title.
+    /// - Returns: A copy carrying the window's non-owning identity.
+    package static func title(_ title: NSAttributedString, ownedBy window: NSWindow) -> NSAttributedString {
+        let identity: NSUUID
+        if let existing = titleOwners.object(forKey: window) {
+            identity = existing
+        } else {
+            identity = NSUUID()
+            titleOwners.setObject(identity, forKey: window)
+        }
+        let result = NSMutableAttributedString(attributedString: title)
+        result.addAttribute(ownerKey, value: identity, range: NSRange(location: 0, length: result.length))
+        return result
+    }
+
+    /// Resolves a native title's identity only against the windows still in its group.
+    ///
+    /// - Parameters:
+    ///   - title: The attributed text AppKit copied into its field.
+    ///   - windows: The group's current members.
+    /// - Returns: The owning window, or nil for an unknown or departed owner.
+    private static func owner(of title: NSAttributedString, among windows: [NSWindow]) -> NSWindow? {
+        guard title.length > 0, let identity = title.attribute(ownerKey, at: 0, effectiveRange: nil) as? NSUUID else { return nil }
+        return windows.first { titleOwners.object(forKey: $0) == identity }
+    }
 
     /// Told of a tab whose title was fitted to a width its pill no longer
     /// has, with the room the pill has now, so its window can fit it again.
@@ -415,7 +451,6 @@ public final class TabStripStyling: NSObject {
                 themedTitleStrips.contains(strip)
             else { continue }
             write(
-                titles: bakedTitles(of: stripWindow(of: strip) ?? host.window ?? window),
                 into: pillFields(in: strip, tabCount: group.windows.count),
                 windows: group.windows,
                 strip: strip
@@ -423,47 +458,38 @@ public final class TabStripStyling: NSObject {
         }
     }
 
-    /// The attributed titles the group's windows baked, in strip order.
+    /// Restores a field's title from its window identity.
     ///
-    /// - Parameter window: Any window of the group.
-    /// - Returns: One entry per tab; nil where a tab carries no baked title.
-    private static func bakedTitles(of window: NSWindow) -> [NSAttributedString?] {
-        (window.tabGroup?.windows ?? [window]).map(\.tab.attributedTitle)
-    }
-
-    /// Writes each baked title into its pill's title field, where it differs
-    /// from what the field holds.
+    /// A native field without an identity keeps its native presentation.
     ///
     /// - Parameters:
-    ///   - titles: The baked titles, in strip order.
-    ///   - pills: The pills, in strip order.
-    ///   - windows: The group's windows, in strip order.
+    ///   - pills: The strip's title fields.
+    ///   - windows: The windows still in the group.
     ///   - strip: The native strip holding the fields.
     @available(macOS 26.0, *)
-    private static func write(titles: [NSAttributedString?], into pills: [PillField], windows: [NSWindow], strip: NSView) {
-        for (index, entry) in pills.enumerated() {
-            guard index < titles.count, let title = titles[index], let field = entry.field else { continue }
-            if index < windows.count {
-                let guardForField: TitleFieldGuard
-                if let existing = titleFieldGuards.object(forKey: field) {
-                    guardForField = existing
-                } else {
-                    guardForField = TitleFieldGuard(field: field)
-                    titleFieldGuards.setObject(guardForField, forKey: field)
-                }
-                guardForField.window = windows[index]
-                guardForField.strip = strip
+    private static func write(into pills: [PillField], windows: [NSWindow], strip: NSView) {
+        for entry in pills {
+            guard let field = entry.field, let window = owner(of: field.attributedStringValue, among: windows),
+                let title = window.tab.attributedTitle
+            else { continue }
+            let guardForField: TitleFieldGuard
+            if let existing = titleFieldGuards.object(forKey: field) {
+                guardForField = existing
+            } else {
+                guardForField = TitleFieldGuard(field: field)
+                titleFieldGuards.setObject(guardForField, forKey: field)
             }
+            guardForField.window = window
+            guardForField.strip = strip
             if !field.attributedStringValue.isEqual(to: title) {
                 field.attributedStringValue = title
             }
             // A title fitted to a width its pill no longer has, or to none, is
             // fitted again after this write: tabs come and go, a window
             // resizes, and an accessory comes or goes.
-            guard title.length > 0, index < windows.count, let pill = entry.pill,
+            guard title.length > 0, let pill = entry.pill,
                 let found = titleRow(holding: field, under: pill)
             else { continue }
-            let window = windows[index]
             watchWidth(of: found.row, for: window)
             if let room = titleRoom(in: found.row, around: found.title, accessory: window.tab.accessoryView),
                 abs((title.attribute(fittedWidthKey, at: 0, effectiveRange: nil) as? CGFloat ?? 0) - room) > 0.5
@@ -1054,7 +1080,7 @@ public final class TabStripStyling: NSObject {
         guard let strip = tabStrip(in: container), let window = container.window else { return nil }
         let band = bandGlass(in: strip)
         let allPills = pills(in: strip)
-        let titles = bakedTitles(of: window)
+        let windows = window.tabGroup?.windows ?? [window]
         return (
             band?.contentView?.layer?.backgroundColor,
             allPills.map { $0.contentView?.layer?.backgroundColor },
@@ -1065,8 +1091,9 @@ public final class TabStripStyling: NSObject {
             allPills.map { $0.convert($0.bounds, to: strip).midX },
             allPills.enumerated()
                 .map { index, pill -> [CGColor?] in
-                    guard index < titles.count, let title = titles[index],
-                        let field = pill.descendants(ofType: NSTextField.self).first(where: { $0.stringValue == title.string })
+                    guard index < windows.count,
+                        let field = pill.descendants(ofType: NSTextField.self)
+                            .first(where: { owner(of: $0.attributedStringValue, among: windows) === windows[index] })
                     else { return [nil] }
                     let drawn = field.attributedStringValue
                     guard drawn.length > 0 else { return [field.textColor?.cgColor] }

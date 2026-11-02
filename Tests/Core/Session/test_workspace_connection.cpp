@@ -27,6 +27,7 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 using namespace Ubiquitty;
@@ -1199,10 +1200,14 @@ TEST(workspaceConnectionActsOnceOnAReportEveryPaneRelays)
     CHECK_MSG(fixture.factory->wires.size() == 2, "a wake relayed by two panes redialled more than once");
     fixture.first.networkPathChanged();
     fixture.second.networkPathChanged();
-    CHECK_MSG(fixture.factory->wires.size() == 3, "a path change relayed by two panes redialled more than once");
+    CHECK_MSG(fixture.factory->wires.size() == 2, "a path change cancelled the unanswered bootstrap");
     fixture.queue->drain();
     fixture.first.resumeAfterSuspension(-1);
-    CHECK_MSG(fixture.factory->wires.size() == 4, "a wake in a later turn was taken for a repeat");
+    CHECK_MSG(fixture.factory->wires.size() == 2, "a wake in a later turn cancelled the unanswered bootstrap");
+    fixture.handshake();
+    fixture.first.resumeAfterSuspension(-1);
+    fixture.queue->advance();
+    CHECK_MSG(fixture.factory->wires.size() == 3, "a Welcome did not permit the next lifecycle recovery");
 }
 
 TEST(screenAccessRoutesToItsPaneAndWaitsForItsEndpoint)
@@ -2260,6 +2265,80 @@ TEST(workspacePaneFactsReachTitleAndForegroundReadersIncludingLateAttachments)
     fixture.feed(oldTitle);
     REQUIRE(fixture.secondObserver.lastTitle.empty());
     REQUIRE(fixture.connection.connection().state() != Session::State::Connected);
+}
+
+TEST(aLateThirdSessionsProcessFactsStayWithItsTab)
+{
+    Fixture fixture;
+    fixture.second.start(22, 80, 24);
+    auto thirdTerminal = std::make_unique<Terminal>();
+    Observer thirdObserver;
+    Session::RemoteSessionCore third(thirdTerminal.get(), fixture.connection, &thirdObserver);
+    const auto layout = [&](unsigned count, unsigned selected) {
+        Session::TreeWorkspace workspace;
+        workspace.id = 91;
+        workspace.revision = ++fixture.structureRevision;
+        Session::TreeWindow window;
+        window.id = Session::Layout::SurfaceID { 1 };
+        window.isHostActive = true;
+        for (unsigned index = 0; index < count; ++index) {
+            const std::array panes { UbiquittyTest::StructurePane { .pane = index + 1, .sessionID = (index + 1) * 11, .columns = 80, .rows = 24 } };
+            auto row = UbiquittyTest::rowWorkspace(91, {}, panes, 17);
+            auto tab = std::move(row.windows.front().tabs.front());
+            tab.id = Session::Layout::TabID { index + 1 };
+            tab.isHostActive = index == selected;
+            window.tabs.push_back(std::move(tab));
+        }
+        workspace.windows.push_back(std::move(window));
+        fixture.feed(fixture.host->structure(workspace, *fixture.factory->wires.back()));
+    };
+    const auto publish = [&](std::uint32_t sessionID, const char* name) {
+        Sync::PaneFacts facts;
+        facts.programTitle = name;
+        facts.foreground = { .processID = sessionID * 100, .name = name, .generation = 1 };
+        facts.processChain = std::string(name) + " ◂ -zsh";
+        facts.processChainWithArguments = facts.processChain;
+        facts.terminalName = "pts/" + std::to_string(sessionID);
+        fixture.feed(fixture.host->records(sessionID, facts, *fixture.factory->wires.back()));
+    };
+    const auto verify = [&] {
+        for (const auto& [observer, sessionID, name] : {
+                 std::tuple { &fixture.firstObserver, 11u, "first-job" },
+                 std::tuple { &fixture.secondObserver, 22u, "idle-shell" },
+                 std::tuple { &thirdObserver, 33u, "third-job" } }) {
+            CHECK_STR_EQ(observer->lastTitle, name);
+            CHECK_STR_EQ(observer->lastTitleParts.foreground.name, name);
+            CHECK_EQ(observer->lastTitleParts.foreground.processID, sessionID * 100);
+            CHECK_STR_EQ(observer->lastTitleParts.processChain, std::string(name) + " ◂ -zsh");
+            CHECK_STR_EQ(observer->lastTitleParts.terminalName, "pts/" + std::to_string(sessionID));
+        }
+    };
+    layout(2, 1);
+    publish(11, "first-job");
+    publish(22, "idle-shell");
+    layout(3, 2);
+    publish(33, "third-job");
+    third.start(33, 80, 24);
+    REQUIRE(third.acknowledged());
+    verify();
+    (void)fixture.host->resizePane(33, 30, 100);
+    fixture.feed(fixture.host->publish(*fixture.factory->wires.back()));
+    verify();
+    layout(3, 0);
+    publish(33, "third-job");
+    verify();
+    fixture.factory->wires.back()->observer->onClose("reconnect");
+    fixture.queue->drain();
+    fixture.queue->advance();
+    REQUIRE(fixture.factory->wires.size() == 2);
+    fixture.host = std::make_unique<WorkspaceHost>();
+    fixture.feed(fixture.host->publish(*fixture.factory->wires.back()));
+    layout(3, 2);
+    publish(33, "third-job");
+    publish(22, "idle-shell");
+    publish(11, "first-job");
+    REQUIRE(third.acknowledged());
+    verify();
 }
 
 TEST(workspacePaneFactsDoNotContinueAfterTheirObserverStopsThePane)

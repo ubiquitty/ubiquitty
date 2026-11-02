@@ -1378,6 +1378,7 @@ void RemoteSessionCore::abandonResumeDial()
 {
     teardownChannel();
     m_isResumeDialRefused = true;
+    m_hasRetriedAfterLifecycleChange = true;
     if (m_stopped || m_hostExited || m_deployPending)
         return;
     connect();
@@ -1603,27 +1604,11 @@ void RemoteSessionCore::networkPathChanged()
         // asked to answer, as a QUIC one is, and replaced only when it is silent.
         if (m_state == State::Connected && askForProofOfLife("the host did not answer after the network changed"))
             return;
-        // Anything else — an attempt still dialling, bootstrapping or waiting for its HELLO_ACK,
-        // or a connection that cannot be asked — may be bound to an address this device no
-        // longer has. The carrier will not report that for as long as its own timeout runs, so
-        // the drop is declared here.
-        teardownChannel();
-        transition(State::Reconnecting, "The network changed.");
     } else if (m_state != State::Reconnecting) {
         // Idle or Failed: nothing is waiting on a timer that the new path invalidates.
         return;
     }
-
-    // The path that the failures were measured against is gone, so the backoff they earned no
-    // longer describes anything, and neither does a QUIC attempt that failed on it. Retime to now
-    // and let any pending timer expire unused.
-    ++m_reconnectEpoch;
-    m_reconnectScheduled = false;
-    m_reconnectAttempts = 0;
-    m_quicFailed = false;
-    m_quicHandshakeFailure.clear();
-    if (!m_channel)
-        connect();
+    retryAfterLifecycleChange("The network changed.");
 }
 
 void RemoteSessionCore::resumeAfterSuspension(double secondsSuspended)
@@ -1649,7 +1634,22 @@ void RemoteSessionCore::resumeAfterSuspension(double secondsSuspended)
         && (!m_transportIsQUIC || (secondsSuspended >= 0 && secondsSuspended < suspensionKeepsQUICSeconds));
     if (mayHaveSurvived && askForProofOfLife("the host did not answer after the app resumed"))
         return;
-    replaceChannel("resuming after suspension");
+    retryAfterLifecycleChange("Reconnecting after this device woke.");
+}
+
+void RemoteSessionCore::retryAfterLifecycleChange(const std::string& reason)
+{
+    // Interrupting an unacknowledged proof consumes its attempt just as a
+    // close or deadline does. No new path may renew its bootstrap-free wait.
+    if (m_state == State::Connecting && m_isResumeDial && !m_ackSeen) {
+        abandonResumeDial();
+        return;
+    }
+    // One accelerated retry may retire an old socket or an old-path timer.
+    // Further notifications cannot starve the bootstrap or its backoff.
+    if (m_hasRetriedAfterLifecycleChange)
+        return;
+    replaceChannel(reason);
 }
 
 bool RemoteSessionCore::takeLifecycleReport(bool& isReported)
@@ -1728,10 +1728,10 @@ void RemoteSessionCore::noteProofOfLife()
 
 void RemoteSessionCore::replaceChannel(const std::string& reason)
 {
+    m_hasRetriedAfterLifecycleChange = true;
     teardownChannel();
     ++m_reconnectEpoch;
     m_reconnectScheduled = false;
-    m_reconnectAttempts = 0;
     // The device may be on another network now, where a QUIC attempt that
     // failed before the suspension says nothing about the next one.
     m_quicFailed = false;
@@ -2381,6 +2381,7 @@ void RemoteSessionCore::onHelloAck(uint32_t sessionID, const std::string&)
     // The next drop tries the proof again: this handshake holds a secret
     // the host just issued.
     m_isResumeDialRefused = false;
+    m_hasRetriedAfterLifecycleChange = false;
     m_hasDroppedGonePin = false;
     m_isAcknowledgedCarrierQUIC = m_transportIsQUIC;
     m_reconnectAttempts = 0; // the handshake landed; the next drop starts fast again

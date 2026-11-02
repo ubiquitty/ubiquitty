@@ -123,7 +123,7 @@ M.max_user_name_bytes = 128
 -- Maximum user variable value bytes.
 M.max_user_value_bytes = 1024
 -- The Sync wire version these tables were written at.
-M.wire_version = 1
+M.wire_version = 2
 -- Maximum canonical envelope header bytes.
 M.max_envelope_header = 9
 -- Maximum canonical pane handle.
@@ -185,7 +185,7 @@ M.line_double_height_top = 2
 -- Row attribute: DECDHL bottom half.
 M.line_double_height_bottom = 3
 -- The Sync wire fingerprint these tables were written at, sent in every Greet.
-M.wire_fingerprint = "\121\198\063\062\055\076\085\204\086\211\186\122\047\053\025\200\053\172\158\211\250\069\212\084\036\083\123\132\230\132\059\138"
+M.wire_fingerprint = "\106\061\215\022\099\058\244\199\000\046\119\191\057\010\224\217\197\232\233\141\112\054\086\169\203\023\133\106\218\037\128\017"
 
 -- Role.
 M.role = {

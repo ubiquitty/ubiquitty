@@ -4305,12 +4305,8 @@ TEST(aNetworkChangeRedialsInsteadOfWaitingOutTheBackoff)
         "the timer the path change superseded still fired a connect");
 }
 
-/// The retimed session starts its next backoff from the fast head again.
-///
-/// The attempt counter measures a host that is down. A network change means those failures were
-/// measured against a path that is gone, so counting them against the new one asks the wrong
-/// question and answers it with a thirty-second wait.
-TEST(aNetworkChangeClearsTheAttemptCount)
+/// A path change may accelerate one attempt, but cannot erase failed attempts.
+TEST(aNetworkChangePreservesTheAttemptCount)
 {
     auto term = makeTerm();
     FakeDispatcher dispatcher;
@@ -4327,13 +4323,14 @@ TEST(aNetworkChangeClearsTheAttemptCount)
     }
     pumpClose(factory.last(), dispatcher, "drop");
     check(dispatcher.delaysRequested().back() > 1.0, "the backoff had grown past its flat head");
+    const double previousDelay = dispatcher.delaysRequested().back();
 
     core.networkPathChanged();
     dispatcher.pump();
     // The redial fails too; the delay it asks for next is what this asserts.
     pumpClose(factory.last(), dispatcher, "drop");
-    check(dispatcher.delaysRequested().back() == 1.0,
-        "the first wait after a network change is the fast one");
+    check(dispatcher.delaysRequested().back() >= previousDelay,
+        "a network notification must not erase the accumulated failures");
 }
 
 /// A live QUIC session is left alone, because QUIC migrates.
@@ -4770,17 +4767,19 @@ TEST(framesSentBeforeTheAskDoNotProveAKeptConnection)
 /// A suspension past the host's idle window redials at once.
 TEST(aLongSuspensionRedialsWithoutAsking)
 {
-    WelcomedSession session(TransportMode::QUIC);
-    const int createsBefore = session.factory.createCount();
-    const std::size_t probesBefore = session.probes();
+    for (const double secondsSuspended : { 120.0, -1.0 }) {
+        WelcomedSession session(TransportMode::QUIC);
+        const int createsBefore = session.factory.createCount();
+        const std::size_t probesBefore = session.probes();
 
-    session.core->resumeAfterSuspension(120.0);
-    check(session.factory.createCount() == createsBefore + 1, "a connection the host has reaped is replaced at once");
-    check(session.probes() == probesBefore, "nothing was asked of the reaped connection");
+        session.core->resumeAfterSuspension(secondsSuspended);
+        check(session.factory.createCount() == createsBefore + 1, "a long or unmeasured suspension replaces the connection at once");
+        check(session.probes() == probesBefore, "nothing was asked of the reaped connection");
 
-    session.dispatcher.pump();
-    session.core->resumeAfterSuspension(-1.0);
-    check(session.factory.createCount() == createsBefore + 2, "an unmeasured suspension is treated as a long one");
+        session.dispatcher.pump();
+        session.core->resumeAfterSuspension(secondsSuspended);
+        check(session.factory.createCount() == createsBefore + 1, "a repeated wake must let the bootstrap finish");
+    }
 }
 
 /// A live non-migrating session that is silent on the new path is torn down and redialled.

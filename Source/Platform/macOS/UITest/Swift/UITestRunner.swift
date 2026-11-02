@@ -139,6 +139,63 @@ final class UBUITestContext: NSObject, @unchecked Sendable {
 @objc(UBUITestRunner)
 @MainActor
 public final class UITestRunner: NSObject {
+    /// Isolates control state before any mode of the test app can start a session.
+    ///
+    /// Failure exits before app services can fall back to the person's control directory.
+    public static func prepareControlDirectory() {
+        guard isolateControlDirectory() else {
+            FileHandle.standardError.write(Data("UI test run refused: the control directory could not be isolated.\n".utf8))
+            exit(2)
+        }
+    }
+
+    /// Gives every test-build launch its own control directory before app services start.
+    ///
+    /// Scripted runs keep this directory beneath their process-reaping scope.
+    /// Restart fixtures may share an explicitly supplied private temporary directory.
+    /// Direct launches retain it for diagnostics; an attached daemon may outlive the app.
+    /// - Returns: Whether the private directory was installed.
+    private static func isolateControlDirectory() -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        if let shared = environment["UBIQUITTY_UI_TEST_CONTROL_HOME"], shared == environment["UBIQUITTY_HOME"] {
+            let path = URL(fileURLWithPath: shared).resolvingSymlinksInPath().path
+            let roots = ["/tmp", NSTemporaryDirectory()]
+                .map {
+                    URL(fileURLWithPath: $0).resolvingSymlinksInPath().path
+                }
+            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+            return roots.contains { path.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }
+                && (attributes?[.type] as? FileAttributeType) == .typeDirectory
+                && (attributes?[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid()
+                && (attributes?[.posixPermissions] as? NSNumber)?.intValue == 0o700
+        }
+        let parent = environment["UBQ_TEST_RUN"] != nil ? environment["UBIQUITTY_HOME"] : nil
+        let root = parent ?? "/tmp"
+        do {
+            if parent != nil {
+                try FileManager.default.createDirectory(
+                    atPath: root,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+            }
+            var template = Array(((root as NSString).appendingPathComponent("ui-test-control.XXXXXX")).utf8CString)
+            let directory = template.withUnsafeMutableBufferPointer { buffer -> String? in
+                guard let base = buffer.baseAddress, mkdtemp(base) != nil else { return nil }
+                return String(cString: base)
+            }
+            guard let directory else { return false }
+            guard setenv("UBIQUITTY_HOME", directory, 1) == 0 else {
+                try? FileManager.default.removeItem(atPath: directory)
+                return false
+            }
+            print("UI test control directory: \(directory)")
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Boots the app, runs the scenarios `--ui-test` names, prints a line
     /// each and a tally, and exits: 0 when every one passed, 1 on a failure or
     /// a name that matches nothing, 2 when a scenario was refused and none

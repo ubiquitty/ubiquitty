@@ -12071,7 +12071,7 @@ private:
         // about a failure is the tail the person is shown, and this app has no
         // console for an inherited stderr to reach.
         const std::string command = "ssh " + Ubiquitty::Transport::shellSingleQuote(deploy.sshHost) + " "
-            + Ubiquitty::Transport::shellSingleQuote(Ubiquitty::Session::hostProbeCommand()) + " 2>&1";
+            + Ubiquitty::Transport::shellSingleQuote(Ubiquitty::Transport::remoteShellCommand(Ubiquitty::Session::hostProbeCommand())) + " 2>&1";
         // Copied rather than borrowed: nothing joins the thread, and the
         // dispatcher lives inside the session. Two plain fields, so the copy
         // carries no lifetime with it.
@@ -12156,7 +12156,7 @@ private:
             } else {
                 const std::string script = Ubiquitty::Session::hostInstallCommand(Ubiquitty::Session::hostUploadDigest(bytes), mode);
                 const RemoteCommandRun run = runRemoteCommand("ssh " + Ubiquitty::Transport::shellSingleQuote(sshHost) + " "
-                        + Ubiquitty::Transport::shellSingleQuote(script) + " 2>&1",
+                        + Ubiquitty::Transport::shellSingleQuote(Ubiquitty::Transport::remoteShellCommand(script)) + " 2>&1",
                     bytes);
                 if (run.failure.empty())
                     outcome = Ubiquitty::Session::readHostInstallOutput(run.output, Ubiquitty::Session::deployFailureDetail(run.output));

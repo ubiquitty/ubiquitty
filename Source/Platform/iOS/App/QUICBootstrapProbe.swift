@@ -129,7 +129,9 @@ final class QUICBootstrapProbe: QUICBootstrapAsking, SSHCarrierDelegate, @unchec
             hostKeyValidator: validator,
             // exec, not shell: no pseudo-terminal, so the daemon's one line
             // arrives as itself rather than mixed into a shell's output.
-            sessionKind: .exec(command: bootstrapCommand),
+            sessionKind: .exec(
+                command: bootstrapCommand.withCString { String(Ubiquitty.Transport.remoteShellCommand(std.string_view($0))) }
+            ),
             delegate: self
         )
         lock.lock()

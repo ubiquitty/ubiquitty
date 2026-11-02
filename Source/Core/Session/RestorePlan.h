@@ -19,8 +19,10 @@
 #include "Core/Preferences/PreferencesAccessors.h"
 #include "Core/Session/RemoteBootstrap.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Ubiquitty::Session {
@@ -58,6 +60,81 @@ enum class QuitReason : std::uint8_t {
     return reason == QuitReason::UpdateRelaunch || Preferences::Effective::sessionPersistence(values);
 }
 
+/// The facts an update must prove before Sparkle may replace the running app.
+/// A successful socket preflight is not an adoption, and a started successor
+/// is not proof that it took every session the app placed in its predecessor.
+struct UpdateRelaunchFacts {
+    std::size_t localPaneCount = 0;
+    std::size_t adoptedLocalPaneCount = 0;
+    std::size_t attachedLocalPaneCount = 0;
+    std::size_t movedLocalPaneCount = 0;
+    std::size_t unresolvedAdoptionCount = 0;
+    bool isNewHostVerified = false;
+    bool isNewHostInstalled = false;
+    bool isNewHostAnswering = false;
+    std::size_t olderHostCount = 0;
+    std::size_t pendingSessionCount = 0;
+};
+
+/// Whether the app may relinquish its old binary to Sparkle.
+[[nodiscard]] inline bool mayInstallUpdateAndRelaunch(const UpdateRelaunchFacts& facts)
+{
+    return facts.adoptedLocalPaneCount == facts.localPaneCount
+        && facts.attachedLocalPaneCount == facts.localPaneCount
+        && facts.movedLocalPaneCount == facts.localPaneCount && !facts.unresolvedAdoptionCount
+        && facts.isNewHostVerified && facts.isNewHostInstalled && facts.isNewHostAnswering
+        && !facts.olderHostCount && !facts.pendingSessionCount;
+}
+
+/// Selects the installation path allowed by the terminal ownership evidence.
+enum class UpdateRelaunchAction {
+    InstallNow,
+    AskBeforeRestart,
+    InstallOnQuit,
+};
+
+/// Names the person's answer to the update's process-loss warning.
+enum class UpdateRiskChoice {
+    Unasked,
+    NotNow,
+    RestartAnyway,
+};
+
+/// Chooses the installation path from the transfer proof and the person's answer.
+///
+/// A confirmed restart still cannot discard an unresolved local adoption.
+///
+/// - Parameters:
+///   - facts: The ownership proof collected before installation.
+///   - choice: The person's answer, or `Unasked` before any warning.
+/// - Returns: The path Sparkle may take without losing an unresolved owner.
+[[nodiscard]] inline UpdateRelaunchAction updateRelaunchAction(const UpdateRelaunchFacts& facts, UpdateRiskChoice choice)
+{
+    if (mayInstallUpdateAndRelaunch(facts))
+        return UpdateRelaunchAction::InstallNow;
+    if (choice == UpdateRiskChoice::Unasked)
+        return UpdateRelaunchAction::AskBeforeRestart;
+    return choice == UpdateRiskChoice::RestartAnyway && !facts.unresolvedAdoptionCount
+        ? UpdateRelaunchAction::InstallNow
+        : UpdateRelaunchAction::InstallOnQuit;
+}
+
+/// The warning names the terminals whose process ownership the update could
+/// not prove. It does not promise that an explicit restart will keep them.
+[[nodiscard]] inline std::string updateRelaunchRiskDetail(std::size_t terminalCount)
+{
+    if (!terminalCount)
+        return "Ubiquitty couldn’t prepare the new host. Restarting now could close open processes. Ubiquitty will update the next time you quit it if you choose Not Now.";
+    const std::string count = std::to_string(terminalCount);
+    return terminalCount == 1
+        ? "Ubiquitty couldn’t move 1 terminal to the new host. Restarting now would close its process. Ubiquitty will update the next time you quit it if you choose Not Now."
+        : "Ubiquitty couldn’t move " + count + " terminals to the new host. Restarting now would close their processes. Ubiquitty will update the next time you quit it if you choose Not Now.";
+}
+
+[[nodiscard]] inline std::string_view updateRelaunchRiskTitle() { return "The Update Couldn’t Keep Your Terminals"; }
+[[nodiscard]] inline std::string_view updateRelaunchProceedTitle() { return "Restart Anyway"; }
+[[nodiscard]] inline std::string_view updateRelaunchPostponeTitle() { return "Not Now"; }
+
 /// Session-restore classification: a restored tab reattaches iff it carries both
 /// a daemon session (sessionID != 0) and a bridge command to reach it; else a
 /// fresh local shell. Launch-side decision only.
@@ -80,6 +157,9 @@ struct RestoredTab {
     std::string hostLabel;
     /// The split topology to rebuild, empty for a lone pane.
     std::string paneLayout;
+    /// Exact daemon sessions adopted for the update. A split may also contain
+    /// sessions that were hosted before it and must remain hosted.
+    std::vector<std::uint32_t> reclaimSessionIDsAfterUpdate;
 };
 
 /// What opening one restored tab requires.
@@ -96,6 +176,7 @@ struct RestoredTabPlan {
     RemoteTransportPlan transport;
     /// The split topology to rebuild.
     std::string paneLayout;
+    std::vector<std::uint32_t> reclaimSessionIDsAfterUpdate;
 };
 
 /// The label a tab carries when it was captured on this machine.
@@ -126,6 +207,8 @@ inline constexpr const char* localHostLabel = "local";
         return plan;
 
     plan.sessionID = tab.sessionID;
+    if (plan.hostLabel == localHostLabel)
+        plan.reclaimSessionIDsAfterUpdate = tab.reclaimSessionIDsAfterUpdate;
     plan.bridgeCommand = substituteReattachSocket(tab.bridgeCommand, tab.socketName);
     plan.transport = plan.hostLabel == localHostLabel
         ? localTransportPlan(quotedLocalBinary)
@@ -139,6 +222,9 @@ enum class CaptureOccasion {
     /// The application is quitting: a local shell the daemon can adopt is
     /// handed over, so it outlives the process and the restore rejoins it.
     Quit,
+    /// A relaunch may proceed only after its captured local panes are adopted
+    /// and the new host has taken them from this app's old host.
+    UpdateRelaunch,
     /// A workspace is saved while its windows stay open: nothing is handed
     /// over, because the live windows must not change under the reader.
     SavedWorkspace,
@@ -218,7 +304,7 @@ struct CaptureConditions {
     }
     if (facts.isRenderOnly)
         return TabCaptureAction::Excluded;
-    const bool isHandedOver = conditions.occasion == CaptureOccasion::Quit && conditions.isLocalDaemonReady && facts.isShareableLocalSession;
+    const bool isHandedOver = conditions.occasion != CaptureOccasion::SavedWorkspace && conditions.isLocalDaemonReady && facts.isShareableLocalSession;
     if (!facts.paneLayout.empty())
         return isHandedOver ? TabCaptureAction::ReHomes : TabCaptureAction::FreshWithLayout;
     if (facts.isRemote)

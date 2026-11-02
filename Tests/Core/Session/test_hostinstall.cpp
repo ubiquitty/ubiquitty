@@ -28,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
 
@@ -116,6 +117,7 @@ public:
 
     const std::string& directory() const { return m_directory; }
     std::string binary() const { return m_directory + "/ubiquitty-host"; }
+    int exitStatus() const { return m_exitStatus; }
 
     void installHost(const std::string& contents) { writeFile(binary(), contents, 0700); }
 
@@ -177,12 +179,16 @@ public:
 
     /// Runs one script as the remote shell would, with `upload` on its
     /// standard input.
-    std::string run(const std::string& script, const std::string& upload = {})
+    std::string run(const std::string& script, const std::string& upload = {}, std::string_view shell = "/bin/sh")
     {
         const std::string input = m_home + "/upload";
         writeFile(input, upload, 0600);
-        const std::string command = "HOME=" + Ubiquitty::Transport::shellSingleQuote(m_home) + " UBIQUITTY_HOME= /bin/sh -c "
-            + Ubiquitty::Transport::shellSingleQuote(script) + " < " + Ubiquitty::Transport::shellSingleQuote(input) + " 2>&1";
+        const std::string options = shell == "zsh" ? " -f -c " : shell == "fish" ? " --no-config -c "
+                                                                                 : " -c ";
+        const std::string command = "HOME=" + Ubiquitty::Transport::shellSingleQuote(m_home) + " UBIQUITTY_HOME= "
+            + Ubiquitty::Transport::shellSingleQuote(shell) + options
+            + Ubiquitty::Transport::shellSingleQuote(Ubiquitty::Transport::remoteShellCommand(script))
+            + " < " + Ubiquitty::Transport::shellSingleQuote(input) + " 2>&1";
         std::FILE* pipe = ::popen(command.c_str(), "r");
         if (!pipe)
             return {};
@@ -191,7 +197,8 @@ public:
         std::size_t read = 0;
         while ((read = std::fread(buffer, 1, sizeof(buffer), pipe)) > 0)
             output.append(buffer, read);
-        ::pclose(pipe);
+        const int status = ::pclose(pipe);
+        m_exitStatus = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         return output;
     }
 
@@ -213,6 +220,7 @@ private:
     std::string m_home;
     std::string m_directory;
     pid_t m_daemon { 0 };
+    int m_exitStatus = -1;
 };
 
 Ubiquitty::Session::HostInstallOutcome install(FakeHost& host, const std::string& upload, const std::string& claimedDigest, HostInstallMode mode)
@@ -277,6 +285,34 @@ TEST(aFirstInstallHasNothingToBackUp)
     CHECK(outcome.kind == HostInstallOutcomeKind::Installed);
     CHECK(readFile(host.binary()) == upload);
     CHECK(host.backups().empty());
+}
+
+TEST(anInstallWithNoBackupFilesSurvivesEveryLoginShell)
+{
+    for (const std::string shell : { "/bin/sh", "zsh", "fish" }) {
+        if (std::system(("command -v " + Ubiquitty::Transport::shellSingleQuote(shell) + " >/dev/null 2>&1").c_str()) != 0) {
+            std::printf("remote install: %s unavailable\n", shell.c_str());
+            continue;
+        }
+        for (const HostInstallMode mode : { HostInstallMode::IfIdle, HostInstallMode::Now, HostInstallMode::WhenSessionsEnd }) {
+            FakeHost host;
+            const std::string old = fakeHost("old");
+            host.installHost(old);
+            REQUIRE(host.backups().empty());
+            const std::string upload = fakeHost("new");
+            const auto script = Ubiquitty::Session::hostInstallCommand(Ubiquitty::Crypto::sha256Hex(upload), mode);
+            const auto output = host.run(script, upload, shell);
+            CHECK_EQ(host.exitStatus(), 0);
+            CHECK(output.find("no matches found") == std::string::npos);
+            const auto outcome = Ubiquitty::Session::readHostInstallOutput(output, output);
+            CHECK_MSG(outcome.kind == HostInstallOutcomeKind::Installed, output.c_str());
+            CHECK(readFile(host.binary()) == upload);
+            CHECK_EQ(host.backups().size(), 1u);
+            const auto probe = Ubiquitty::Session::parseHostProbe(host.run(Ubiquitty::Session::hostProbeCommand(), {}, shell));
+            REQUIRE(probe);
+            CHECK_EQ(probe->liveSessionCount, 0u);
+        }
+    }
 }
 
 TEST(theProbeCountsTheSessionsOfTheInstalledHostsDaemon)

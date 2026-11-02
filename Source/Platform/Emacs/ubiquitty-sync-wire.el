@@ -126,7 +126,7 @@
   "Maximum user variable name bytes.")
 (defconst ubiquitty-sync--max-user-value-bytes 1024
   "Maximum user variable value bytes.")
-(defconst ubiquitty-sync--wire-version 1
+(defconst ubiquitty-sync--wire-version 2
   "The Sync wire version these tables were written at.")
 (defconst ubiquitty-sync--max-envelope-header 9
   "Maximum canonical envelope header bytes.")
@@ -189,8 +189,8 @@
 (defconst ubiquitty-sync--line-double-height-bottom 3
   "Row attribute: DECDHL bottom half.")
 (defconst ubiquitty-sync--wire-fingerprint
-  (unibyte-string 121 198 63 62 55 76 85 204 86 211 186 122 47 53 25 200 53 172 158 211 250 69 212 84 36 83 123
-   132 230 132 59 138)
+  (unibyte-string 106 61 215 22 99 58 244 199 0 46 119 191 57 10 224 217 197 232 233 141 112 54 86 169 203 23
+   133 106 218 37 128 17)
   "The Sync wire fingerprint these tables were written at, sent in every Greet.")
 
 ;; Role.

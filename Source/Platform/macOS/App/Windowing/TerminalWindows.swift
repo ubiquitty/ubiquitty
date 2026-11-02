@@ -612,6 +612,9 @@ final class TerminalWindows: NSObject {
         stored.socketName = std.string(tab.socketName ?? "")
         stored.hostLabel = std.string(tab.hostLabel ?? "")
         stored.paneLayout = std.string(tab.paneLayout ?? "")
+        for session in tab.reclaimSessionIDsAfterUpdate {
+            stored.reclaimSessionIDsAfterUpdate.push_back(session)
+        }
         if let live = presentation?.liveWorkspace {
             guard live.sessionID != 0, live.daemonInstanceID != 0, !live.bridgeCommand.isEmpty else {
                 let alert = NSAlert()
@@ -1011,6 +1014,100 @@ final class TerminalWindows: NSObject {
         return .terminateNow
     }
 
+    /// The arrangement and original local owners held while Sparkle waits to
+    /// install. No saved session is published until the successor has taken
+    /// every adopted session.
+    struct PreparedUpdateCapture {
+        let groups: [LayoutGroup]
+        let localPanes: [TerminalSurface]
+        let adoptedLocalPaneCount: Int
+    }
+
+    static func prepareUpdateCapture() -> PreparedUpdateCapture {
+        let controllers = keptBySession().compactMap { $0 as? TerminalWindowController }
+        var seen: Set<ObjectIdentifier> = []
+        let localPanes = controllers.filter { !$0.isRenderOnly && $0.remoteSurface == nil }
+            .flatMap(\.projectedSurfaces)
+            .filter { surface in
+                guard seen.insert(ObjectIdentifier(surface)).inserted else { return false }
+                return !surface.drive.isRemoteAttached && !surface.drive.isSharedIntoLocalDaemon
+            }
+        let daemon = Ubiquitty.Session.readyLocalDaemon(std.string(ShareSessionSupport.localHostBinaryPath() ?? ""))
+        let groups = capturedGroups(
+            Ubiquitty.Session.CaptureConditions(
+                occasion: .UpdateRelaunch,
+                isLocalDaemonReady: !daemon.socketPath.empty()
+            ),
+            daemon: daemon,
+            localBeforeUpdate: Set(localPanes.map { ObjectIdentifier($0) })
+        )
+        return PreparedUpdateCapture(
+            groups: groups,
+            localPanes: localPanes,
+            adoptedLocalPaneCount: localPanes.filter { $0.drive.isSharedIntoLocalDaemon }.count
+        )
+    }
+
+    /// Each adopted pane must have an established attachment before the
+    /// successor is started, so its exact session and predecessor are known.
+    static func settledUpdateAdoptions(_ capture: PreparedUpdateCapture) async -> [UInt64]? {
+        for _ in 0..<100 {
+            let attached = capture.localPanes.allSatisfy { pane in
+                pane.drive.isSharedIntoLocalDaemon && pane.drive.remoteState == .Connected
+                    && pane.drive.remoteSessionID == pane.drive.sharedSessionID
+                    && pane.drive.remoteDaemonInstanceID != 0
+            }
+            if attached { return capture.localPanes.map { $0.drive.remoteDaemonInstanceID } }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return nil
+    }
+
+    /// A matching session on a new daemon, reached through the original
+    /// attachment, is evidence that the successor took this pane.
+    static func movedUpdateAdoptionCount(_ capture: PreparedUpdateCapture, from predecessors: [UInt64]) async -> Int {
+        guard predecessors.count == capture.localPanes.count else { return 0 }
+        var moved = 0
+        for _ in 0..<100 {
+            moved =
+                zip(capture.localPanes, predecessors)
+                .filter { pair in
+                    let pane = pair.0
+                    let predecessor = pair.1
+                    return pane.drive.isSharedIntoLocalDaemon && pane.drive.remoteState == .Connected
+                        && pane.drive.remoteSessionID == pane.drive.sharedSessionID
+                        && pane.drive.remoteDaemonInstanceID != 0
+                        && pane.drive.remoteDaemonInstanceID != predecessor
+                }
+                .count
+            if moved == capture.localPanes.count { return moved }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return moved
+    }
+
+    /// A refused update keeps the old app alive. Reclaim is requested only
+    /// after each adopted pane has attached to its original local daemon.
+    static func reclaimUpdateAdoptions(_ capture: PreparedUpdateCapture) async {
+        reattachCommittedLocalAdoptions()
+        var requested: Set<ObjectIdentifier> = []
+        for _ in 0..<100 {
+            for pane in capture.localPanes where pane.drive.isSharedIntoLocalDaemon {
+                let identity = ObjectIdentifier(pane)
+                if !requested.contains(identity), pane.drive.requestReclaim() {
+                    requested.insert(identity)
+                }
+            }
+            if capture.localPanes.allSatisfy({ !$0.drive.isSharedIntoLocalDaemon }) { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    static func commitUpdateCapture(_ capture: PreparedUpdateCapture) {
+        SessionLayout.saveCurrentLayout(capture.groups, keptFor: .UpdateRelaunch)
+        RemoteSessionLifecycle.shared.suspendForTermination()
+    }
+
     private static func confirmQuitEndingJobs(present: (NSAlert) -> NSApplication.ModalResponse) -> Bool {
         let alert = NSAlert()
         alert.icon = NSApp.applicationIconImage
@@ -1112,7 +1209,8 @@ final class TerminalWindows: NSObject {
     /// answers costs the whole handoff deadline for every window.
     private static func capturedGroups(
         _ startingConditions: Ubiquitty.Session.CaptureConditions,
-        daemon: Ubiquitty.Session.LocalDaemonTarget
+        daemon: Ubiquitty.Session.LocalDaemonTarget,
+        localBeforeUpdate: Set<ObjectIdentifier> = []
     ) -> [LayoutGroup] {
         var conditions = startingConditions
         var groups: [LayoutGroup] = []
@@ -1136,7 +1234,15 @@ final class TerminalWindows: NSObject {
                     conditions = Ubiquitty.Session.conditionsAfterHandOff(conditions, reHomedSessionID)
                     if Ubiquitty.Runtime.TerminalSession.unresolvedLocalAdoptionCount() != 0 { return [] }
                 }
-                tabs.append(layoutTab(Ubiquitty.Session.storedTab(facts, action, daemon, reHomedSessionID), of: tabTerminal))
+                let tab = layoutTab(Ubiquitty.Session.storedTab(facts, action, daemon, reHomedSessionID), of: tabTerminal)
+                if conditions.occasion == .UpdateRelaunch, let shell = tabTerminal as? TerminalWindowController {
+                    tab.reclaimSessionIDsAfterUpdate = shell.projectedSurfaces.compactMap { pane in
+                        guard localBeforeUpdate.contains(ObjectIdentifier(pane)) else { return nil }
+                        let session = pane.drive.sharedSessionID
+                        return session == 0 ? nil : session
+                    }
+                }
+                tabs.append(tab)
             }
             guard !tabs.isEmpty else { continue }
             let group = LayoutGroup()

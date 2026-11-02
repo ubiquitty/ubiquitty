@@ -2733,6 +2733,9 @@ public final class RuntimeDrive {
     /// Whether the local daemon drives this session's PTY on its behalf.
     public var isSharedIntoLocalDaemon: Bool { session.isSharedIntoLocalDaemon() }
 
+    /// The host's id for a locally shared session, or zero before adoption.
+    public var sharedSessionID: UInt32 { session.sharedSessionID() }
+
     /// Other running daemon instances on the machine this directory lists.
     public var hostInstances: [HostDaemonInstance] { HostDaemonInstance.read(session.hostInstances()) }
 
@@ -4624,6 +4627,7 @@ public struct HostDaemonInstance: Hashable, Codable, Sendable, Identifiable {
     public let socketName: String
     public let executable: String
     public let startedUnixSeconds: UInt64
+    public var appVersion: String? = nil
     public var id: String { socketName }
 
     public var title: String {
@@ -4636,6 +4640,7 @@ public struct HostDaemonInstance: Hashable, Codable, Sendable, Identifiable {
         value.socketName = std.string(socketName)
         value.executable = std.string(executable)
         value.startedUnixSeconds = startedUnixSeconds
+        value.appVersion = std.string(appVersion ?? "")
         return value
     }
 
@@ -4658,7 +4663,8 @@ public struct HostDaemonInstance: Hashable, Codable, Sendable, Identifiable {
                 return Self(
                     socketName: String(value.socketName),
                     executable: String(value.executable),
-                    startedUnixSeconds: value.startedUnixSeconds
+                    startedUnixSeconds: value.startedUnixSeconds,
+                    appVersion: value.appVersion.empty() ? nil : String(value.appVersion)
                 )
             }
     }

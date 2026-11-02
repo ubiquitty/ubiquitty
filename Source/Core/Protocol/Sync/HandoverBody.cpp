@@ -3051,7 +3051,7 @@ std::expected<HandoverTerminal, HandoverBodyError> decodeHandoverTerminal(std::s
     if (!covered)
         return std::unexpected(covered.error());
     WireReader reader(*covered);
-    (void)reader.u16();
+    const auto version = reader.u16();
     const auto nextRichTextSerial = reader.u32();
     const auto richTextStorageLimit = reader.u32();
     if (richTextStorageLimit > RichText::maxRetainedBytes)
@@ -3066,6 +3066,13 @@ std::expected<HandoverTerminal, HandoverBodyError> decodeHandoverTerminal(std::s
         if (size > sectionLimits[index])
             return std::unexpected(HandoverBodyError::OverCapacity);
         sections[index] = reader.take(size);
+        // The checkpoint has its own wire grammar; the remaining sections
+        // share this record's handover grammar, even when two are readable.
+        if (index != std::to_underlying(TerminalSection::Checkpoint)) {
+            WireReader sectionReader(sections[index]);
+            if (sectionReader.u16() != version || !sectionReader.ok())
+                return std::unexpected(HandoverBodyError::Malformed);
+        }
     }
     if (!reader.ok() || !reader.isAtEnd() || !nextRichTextSerial)
         return std::unexpected(HandoverBodyError::Malformed);
@@ -4125,7 +4132,7 @@ std::expected<HandoverPaneImage, HandoverBodyError> decodePaneHandover(std::span
     if (!verified)
         return std::unexpected(verified.error());
     WireReader reader(*verified);
-    (void)reader.u16();
+    const auto version = reader.u16();
     const auto paneID = readIdentity(reader);
     const std::array<std::size_t, paneSectionCount> sectionLimits { limits.terminal.maxRecordBytes,
         limits.publication.maxSectionBytes, limits.maxSourceBytes, limits.maxSessionBytes,
@@ -4134,6 +4141,9 @@ std::expected<HandoverPaneImage, HandoverBodyError> decodePaneHandover(std::span
     for (std::size_t index = 0; index < sections.size(); ++index) {
         sections[index] = readHostBytes(reader, sectionLimits[index]);
         if (!reader.ok())
+            return std::unexpected(HandoverBodyError::Malformed);
+        WireReader sectionReader(sections[index]);
+        if (sectionReader.u16() != version || !sectionReader.ok())
             return std::unexpected(HandoverBodyError::Malformed);
     }
     if (!reader.isAtEnd() || paneID == ID128 {})

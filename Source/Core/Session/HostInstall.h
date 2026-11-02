@@ -8,9 +8,9 @@
 // running daemon holds, the install that verifies an upload before anything
 // is replaced, and the reading of what each printed.
 //
-// The scripts run under the remote's /bin/sh, one ssh argument each, and use
-// double quotes only so the caller can wrap them in single quotes. Nothing
-// here builds from source: a platform no bundled binary serves is told how to
+// Transport::remoteShellCommand encodes each script as one SSH exec request
+// that explicitly runs /bin/sh, independently of the remote login shell.
+// Nothing here builds from source: a platform no bundled binary serves is told how to
 // install by hand (DeployPolicy.h), never compiled for.
 //
 // Sessions are counted rather than asked for. The daemon an update replaces

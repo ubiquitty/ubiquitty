@@ -274,12 +274,24 @@ TEST(anOlderHostIsOfferedAnUpdateAndAnOlderClientNeverIs)
         REQUIRE(!connectRemedies(silent).empty());
         CHECK(connectRemedies(silent).front() == Remedy::UpdateHost);
 
-        // The newer app version is not replaced.
+        // At equal wire versions, app labels neither establish direction nor
+        // hide the explicit choice to install this app's matching host.
         ConnectFact same = refused(ByeReason::VersionMismatch, surface);
         same.update.local = build("0.2.1.4", 5);
         same.update.host = build("0.2.2", 5);
         same.update.hasBundledBinary = true;
-        CHECK(!contains(connectRemedies(same), Remedy::UpdateHost));
+        same.update.hostLabel = "Studio";
+        CHECK(olderSideOf(same.update) == Ubiquitty::Protocol::Sync::OlderSide::Unknown);
+        CHECK(versionRefusalTitle(same.update) == "Studio Runs a Different Build of Ubiquitty");
+        CHECK(contains(connectRemedies(same), Remedy::UpdateHost));
+        CHECK(connectRemedySentence(same).find("Install the same build on both.") != std::string::npos);
+        std::swap(same.update.local, same.update.host);
+        CHECK(olderSideOf(same.update) == Ubiquitty::Protocol::Sync::OlderSide::Unknown);
+        CHECK(contains(connectRemedies(same), Remedy::UpdateHost));
+        same.update.isThisMachine = true;
+        same.update.localDevice.kind = Ubiquitty::Session::LocalDeviceKind::Mac;
+        CHECK(versionRefusalTitle(same.update) == "This Mac Runs a Different Build of the Ubiquitty Host");
+        CHECK(contains(connectRemedies(same), Remedy::UpdateHost));
 
         // An older host with no build for its platform is shown the commands.
         ConnectFact manual = host;
@@ -365,6 +377,10 @@ TEST(thisMachinesOlderHostIsUpdatedInPlaceNeverByHand)
         "The Ubiquitty host you chose on this Mac is no longer running. Try again to see the sessions this Mac is running now.");
     CHECK_STR_EQ(connectRemedySentence(local(listingFailed(ListingFailure::Malformed))),
         "The Ubiquitty host on this Mac sent a reply this app doesn’t understand. Try again.");
+    const auto unreadable = local(listingFailed(ListingFailure::InstanceUnreadable));
+    CHECK(connectRemedies(unreadable) == (std::vector { Remedy::TryAgain }));
+    CHECK_STR_EQ(connectRemedySentence(unreadable),
+        "This app cannot read the running host. Its sessions keep running. Use a matching build to open them.");
     for (const auto failure : { ListingFailure::Unreachable, ListingFailure::SignInRequired, ListingFailure::AuthenticationAttemptsExhausted,
              ListingFailure::EndedBeforeAnswer, ListingFailure::NotInstalled, ListingFailure::InstanceGone, ListingFailure::Malformed }) {
         const std::string sentence = connectRemedySentence(local(listingFailed(failure)));
@@ -385,6 +401,27 @@ TEST(aSameVersionRefusalOffersTheMatchingHost)
         CHECK(contains(connectRemedies(fact), Remedy::UpdateHost));
         fact.update.hasBundledBinary = false;
         CHECK(contains(connectRemedies(fact), Remedy::CopyInstallCommands));
+    }
+}
+
+TEST(anUpdatedAppOffersToUpdateAWireOneHost)
+{
+    namespace Sync = Ubiquitty::Protocol::Sync;
+    for (const auto surface : { RemedySurface::Connect, RemedySurface::TerminalWindow }) {
+        ConnectFact fact = refused(ByeReason::VersionMismatch, surface);
+        fact.update.local = { .isKnown = true, .wireVersion = Sync::wireVersion, .appVersion = "0.3.3" };
+        fact.update.host = { .isKnown = true, .wireVersion = 1, .appVersion = "0.3.2" };
+        fact.update.hostLabel = "Studio";
+        fact.update.localDevice.kind = Ubiquitty::Session::LocalDeviceKind::IPhone;
+        fact.update.heldSessionCount = 2;
+        fact.update.hasBundledBinary = true;
+        REQUIRE(!connectRemedies(fact).empty());
+        CHECK(connectRemedies(fact).front() == Remedy::UpdateHost);
+        CHECK_STR_EQ(versionRefusalTitle(fact.update), "Studio Runs an Older Ubiquitty Host");
+        CHECK_STR_EQ(connectRemedySentence(fact),
+            "Studio’s Ubiquitty Host is from an older build (0.3.2) than this iPhone (0.3.3). Update the host on Studio. "
+            "Ubiquitty copies its current host there and connects to it. Its 2 running sessions move to the new host. "
+            "If handover is refused, the old host keeps them running.");
     }
 }
 

@@ -184,12 +184,11 @@ TEST(thePinnedHeaderRetainsItsMeaning)
     CHECK(std::span(appended).subspan(1).size() == pinnedHeader.size());
 }
 
-// A host reads only the state format it writes. The same header under any
-// earlier version is refused rather than read as this one.
+// A header below the supported release floor is refused before its fields.
 TEST(anEarlierHeaderVersionIsRefused)
 {
     auto earlier = std::vector<std::uint8_t>(pinnedHeader.begin(), pinnedHeader.end());
-    for (std::uint16_t version = 1; version < handoverBodyVersion; ++version) {
+    for (std::uint16_t version = 1; version < oldestHandoverBodyVersion; ++version) {
         earlier[0] = static_cast<std::uint8_t>(version);
         const auto refused = decodeHandoverHeader(earlier, limits);
         REQUIRE(!refused);
@@ -1598,7 +1597,7 @@ TEST(anEarlierHostStateVersionIsRefused)
     const auto encoded = encodeHandoverHostState(source, hostStateLimit);
     REQUIRE(encoded);
     std::vector<std::uint8_t> earlier(encoded->view().begin(), encoded->view().end());
-    earlier[0] = static_cast<std::uint8_t>(handoverBodyVersion - 1);
+    earlier[0] = static_cast<std::uint8_t>(oldestHandoverBodyVersion - 1);
     earlier[1] = 0;
     refreshImageDigest(earlier);
     Ubiquitty::Terminal successor;
@@ -1903,9 +1902,8 @@ TEST(terminalHandoverPreservesAZeroRichTextQuotaWithoutContent)
     CHECK(restored->terminal->richTextBlocks.isEmpty());
 }
 
-// A host reads only the state format it writes. A terminal record of an
-// earlier version is refused whether or not it places rich text, so no
-// placement is read under another version's meaning.
+// A terminal record below the release floor is refused with or without
+// rich text; no placement is read under another grammar.
 TEST(anEarlierTerminalRecordVersionIsRefused)
 {
     for (const std::string_view text : { std::string_view("carried ordinary terminal text"),
@@ -1916,11 +1914,28 @@ TEST(anEarlierTerminalRecordVersionIsRefused)
         const auto bytes = encodeHandoverTerminal(source, 19, terminalLimits);
         REQUIRE(bytes);
         const auto sections = splitTerminalRecord(bytes->view());
-        for (const std::uint16_t version : { std::uint16_t { 33 }, static_cast<std::uint16_t>(handoverBodyVersion - 1) }) {
+        for (const std::uint16_t version : { std::uint16_t { 33 }, static_cast<std::uint16_t>(oldestHandoverBodyVersion - 1) }) {
             const auto refused = decodeHandoverTerminal(joinTerminalRecord(sections, source.richTextBlocks.nextSerial(), Ubiquitty::RichText::maxRetainedBytes, version), terminalLimits);
             REQUIRE(!refused);
             CHECK(refused.error() == HandoverBodyError::Malformed);
         }
+    }
+}
+
+TEST(aTerminalRecordCannotMixHandoverGrammars)
+{
+    Ubiquitty::Terminal source;
+    const auto bytes = encodeHandoverTerminal(source, 19, terminalLimits);
+    REQUIRE(bytes);
+    const auto original = splitTerminalRecord(bytes->view());
+    for (std::size_t index = 1; index < original.size(); ++index) {
+        auto sections = original;
+        const auto other = handoverBodyVersion == lastPublishedHandoverBodyVersion ? handoverBodyVersion + 1 : lastPublishedHandoverBodyVersion;
+        writeLittle(sections[index], 0, other, 2);
+        refreshImageDigest(sections[index]);
+        const auto result = decodeHandoverTerminal(joinTerminalRecord(sections, source.richTextBlocks.nextSerial()), terminalLimits);
+        REQUIRE(!result);
+        CHECK(result.error() == HandoverBodyError::Malformed);
     }
 }
 
@@ -2202,7 +2217,7 @@ TEST(anEarlierPublicationVersionIsRefused)
         const auto bytes = encodeHandoverPublication(source, paneLimits.publication);
         REQUIRE(bytes);
         std::vector<std::uint8_t> earlier(bytes->view().begin(), bytes->view().end());
-        writeLittle(earlier, 0, handoverBodyVersion - 1, 2);
+        writeLittle(earlier, 0, oldestHandoverBodyVersion - 1, 2);
         refreshImageDigest(earlier);
         const auto refused = decodeHandoverPublication(earlier, paneLimits.publication);
         REQUIRE(!refused);
@@ -2293,7 +2308,7 @@ TEST(sessionInputPrincipalHistoryDistinguishesFreshAndInheritedUnknownSessions)
     // Facts of an earlier version are refused rather than read without the
     // input history this version carries.
     std::vector<std::uint8_t> earlier(encoded->view().begin(), encoded->view().end());
-    writeLittle(earlier, 0, handoverBodyVersion - 1, 2);
+    writeLittle(earlier, 0, oldestHandoverBodyVersion - 1, 2);
     refreshImageDigest(earlier);
     const auto refused = decodeHandoverSessionFacts(earlier, limits);
     REQUIRE(!refused);
@@ -2779,8 +2794,11 @@ namespace {
 
 /// The frozen pane record of the version this build writes, by the content
 /// hash the fuzzer's corpus names its units with. A grammar change takes a new
-/// body version and a newly minted fixture for it; a host reads no other.
+/// body version and a newly minted fixture; the published fixture stays readable.
 constexpr std::string_view frozenCurrentPaneRecordName = "6b76710f4379439cbb9afaaef26fa3a59a1701d8";
+/// The v0.3.2 record retained independently of the current encoder fixture.
+/// Its provenance and minting command are in Tests/Corpus/sync/handover-release.md.
+constexpr std::string_view frozenPublishedPaneRecordName = "6b76710f4379439cbb9afaaef26fa3a59a1701d8";
 
 /// The state the frozen record was written from, rebuilt the same way.
 struct FrozenPane {
@@ -2860,6 +2878,54 @@ TEST(theFrozenCurrentPaneRecordRestores)
     CHECK_EQ(restored->terminal->scrollbackCount, original.terminal.scrollbackCount);
 }
 
+TEST(theLastPublishedHandoverFormatRemainsReadable)
+{
+    CHECK(oldestHandoverBodyVersion <= lastPublishedHandoverBodyVersion);
+    CHECK(lastPublishedHandoverBodyVersion <= handoverBodyVersion);
+    const auto frozen = readFrozenPaneRecord(frozenPublishedPaneRecordName);
+    REQUIRE(frozen);
+    WireReader reader(*frozen);
+    CHECK_EQ(reader.u16(), lastPublishedHandoverBodyVersion);
+    auto restored = decodePaneHandover(*frozen, paneLimits);
+    REQUIRE(restored);
+    CHECK((restored->source->paneID() == ID128 { 17, 18 }));
+    CHECK_EQ(restored->session.sessionID, 17u);
+    CHECK(restored->source->facts().programTitle == "frozen pane");
+    CHECK_EQ(restored->source->inputLedger().lastWritten({ 21, 22 }).value_or(0), 1u);
+    FrozenPane original;
+    CHECK(UbiquittyTest::firstDisagreement(original.terminal, *restored->terminal).empty());
+    CHECK_EQ(restored->terminal->scrollbackCount, original.terminal.scrollbackCount);
+}
+
+TEST(aPaneCannotMixSupportedHandoverGrammars)
+{
+    const auto original = readFrozenPaneRecord(frozenPublishedPaneRecordName);
+    REQUIRE(original);
+    for (unsigned index = 0; index < 5; ++index) {
+        auto changed = *original;
+        WireReader reader(changed);
+        const auto version = reader.u16();
+        (void)reader.take(16);
+        for (unsigned preceding = 0; preceding < index; ++preceding) {
+            const auto size = reader.u32();
+            (void)reader.take(size);
+        }
+        const auto size = reader.u32();
+        const auto section = reader.take(size);
+        REQUIRE(reader.ok() && size >= 18);
+        const auto offset = static_cast<std::size_t>(section.data() - changed.data());
+        const auto other = version == handoverBodyVersion ? handoverBodyVersion + 1 : handoverBodyVersion;
+        writeLittle(changed, offset, other, 2);
+        const auto digest = digestOf(std::span(changed).subspan(offset, size - 16));
+        writeLittle(changed, offset + size - 16, digest.low, 8);
+        writeLittle(changed, offset + size - 8, digest.high, 8);
+        refreshImageDigest(changed);
+        const auto result = decodePaneHandover(changed, paneLimits);
+        REQUIRE(!result);
+        CHECK(result.error() == HandoverBodyError::Malformed);
+    }
+}
+
 // A record in a format newer than this host writes is refused before any of
 // it is read, so the host that sent it keeps its sessions.
 TEST(aPaneRecordInANewerFormatIsRefusedUnread)
@@ -2873,14 +2939,13 @@ TEST(aPaneRecordInANewerFormatIsRefusedUnread)
     CHECK(refused.error() == HandoverBodyError::NewerVersion);
 }
 
-// A host reads only the state format it writes. A pane record of an earlier
-// version is refused whole, so the host that sent it keeps its sessions and
-// nothing in it is read under this version's meaning.
-TEST(aPaneRecordOfAnEarlierVersionIsRefused)
+// A pane record below the supported release floor is refused whole, so
+// its holder keeps the sessions.
+TEST(aPaneRecordBelowThePublishedReleaseFloorIsRefused)
 {
     auto record = readFrozenPaneRecord();
     REQUIRE(record.has_value());
-    for (std::uint16_t version = 1; version < handoverBodyVersion; ++version) {
+    for (std::uint16_t version = 1; version < oldestHandoverBodyVersion; ++version) {
         writeLittle(*record, 0, version, 2);
         refreshImageDigest(*record);
         const auto refused = decodePaneHandover(*record, paneLimits);

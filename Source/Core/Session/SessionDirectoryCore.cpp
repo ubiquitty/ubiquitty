@@ -101,6 +101,8 @@ std::string listingFailureNotice(const DirectoryFailureReport& report, NoticePla
     case ListingFailure::InstanceGone:
         notice = "the Ubiquitty host this list was asked of is no longer running"; // copy-ok: a clause; placedNotice punctuates it
         break;
+    case ListingFailure::InstanceUnreadable:
+        return placedNotice(report.detail, placement);
     case ListingFailure::NotInstalled:
         notice = report.remotePlatform.empty() ? std::string("this host has no ubiquitty-host installed")
                                                : "this " + report.remotePlatform + " host has no ubiquitty-host installed";
@@ -482,6 +484,16 @@ void SessionDirectoryCore::requestFinish(Finish finish, TerminateOutcome outcome
 
 void SessionDirectoryCore::requestFailure(DirectoryFailureReport failure)
 {
+    if (isValidHostInstance(m_expectedDaemon)
+        && (failure.failure == ListingFailure::Malformed
+            || (failure.failure == ListingFailure::Refused && failure.deniedReason == Protocol::Sync::ByeReason::Malformed))) {
+        failure.failure = ListingFailure::InstanceUnreadable;
+        failure.hostBuild = m_core->hostBuild();
+        const auto& version = failure.hostBuild.appVersion.empty() ? m_expectedDaemon.appVersion : failure.hostBuild.appVersion;
+        failure.detail = "This app cannot read the running Ubiquitty host" // copy-ok: the optional version and sentence ending follow
+            + (version.empty() ? std::string {} : " (" + version + ")")
+            + ". Its sessions keep running. Use a matching build to open them.";
+    }
     if (m_errand == Errand::Terminate) {
         requestFinish(Finish::TerminateSettled, TerminateOutcome::Failed);
         return;
@@ -638,9 +650,11 @@ void SessionDirectoryCore::handleData(std::uint64_t generation, const std::vecto
         // A Bye on the Sync connection carries the host's reason; any
         // other stop is bytes the decoder cannot read.
         const Protocol::Sync::ClientConnection* screen = m_core->screen();
-        if (screen && screen->byeReason())
-            requestFailure(failureReport(ListingFailure::Refused, screen->notice()));
-        else
+        if (screen && screen->byeReason()) {
+            auto failure = failureReport(ListingFailure::Refused, screen->notice());
+            failure.deniedReason = *screen->byeReason();
+            requestFailure(std::move(failure));
+        } else
             requestFailure(failureReport(ListingFailure::Malformed, {}));
     }
     completeFinish();
@@ -759,8 +773,7 @@ void SessionDirectoryCore::handleClose(std::uint64_t generation, const std::stri
     if (m_errand == Errand::Terminate)
         requestFinish(Finish::TerminateSettled, TerminateOutcome::Failed);
     else if (m_bootstrapResponse.isIncomplete())
-        requestFinish(Finish::Failed, TerminateOutcome::Failed,
-            failureReport(ListingFailure::Malformed, "the connection ended before ubiquitty-host started"));
+        requestFailure(failureReport(ListingFailure::Malformed, "the connection ended before ubiquitty-host started"));
     else {
         // The detail is what ssh said, never the channel's own words for its
         // pipe: "the connection closed" names nothing a person can act on.
@@ -836,6 +849,11 @@ bool SessionDirectoryCore::writeFrame(const std::vector<std::uint8_t>& built)
 
 void SessionDirectoryCore::onHelloAck(std::uint32_t, const std::string& socketName)
 {
+    if (isValidHostInstance(m_expectedDaemon) && socketName != m_expectedDaemon.socketName) {
+        requestFailure(failureReport(ListingFailure::InstanceUnreadable,
+            "A different host answered the listing. The selected host has not been reported stopped. Try again to list its sessions."));
+        return;
+    }
     m_daemonSocketName = socketName;
     m_daemonInstanceID = m_core->daemonInstanceID();
     m_didSeeAck = true;
@@ -861,6 +879,12 @@ void SessionDirectoryCore::onRefused(Protocol::Sync::ByeReason reason)
     report.hostBuild = m_core->hostBuild();
     report.olderSide = Protocol::Sync::olderSideOfRefusal(reason, report.hostBuild);
     report.remotePlatform = m_core->hostPlatform();
+    if ((reason == Protocol::Sync::ByeReason::VersionMismatch || reason == Protocol::Sync::ByeReason::Malformed)
+        && isValidHostInstance(m_expectedDaemon)) {
+        report.failure = ListingFailure::Malformed;
+        requestFailure(std::move(report));
+        return;
+    }
     requestFinish(Finish::Failed, TerminateOutcome::Failed, std::move(report));
 }
 

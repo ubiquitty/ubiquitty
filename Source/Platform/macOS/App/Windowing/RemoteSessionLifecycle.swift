@@ -78,6 +78,14 @@ package final class RemoteSessionLifecycle {
         Self.eachRemoteSurface { $0.drive.suspendRemote() }
     }
 
+    /// A postponed installation that aborts leaves the old app serving its
+    /// windows, so its suspended connections resume under that app.
+    package func resumeAfterCancelledTermination() {
+        guard isTerminating else { return }
+        isTerminating = false
+        Self.eachRemoteSurface { $0.drive.resumeAfterSuspension(secondsSuspended: 0) }
+    }
+
     /// Hands each session the time the Mac slept, which Core weighs against
     /// how long the host keeps an idle connection.
     private func didWake() {

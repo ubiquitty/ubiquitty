@@ -39,7 +39,7 @@ final class HostManagementModel: ObservableObject {
                 status = "This host’s connection settings are incomplete."
                 return
             }
-            let shared = HostDirectoryClients.shared.endpoint(for: plan.shellCommand)
+            let shared = HostDirectoryClients.shared.endpoint(for: plan.shellCommand, instance: server.daemonInstance)
             shared.subscribe(self) { [weak self] in self?.receive() }
             endpoint = shared
         }

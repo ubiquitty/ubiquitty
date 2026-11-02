@@ -690,6 +690,14 @@ enum ShareSessionScenarios {
         )
         model.selectHostInstance(String(found.socketName))
         t.expect(
+            model.selectedHostSocket == String(found.socketName),
+            desc: "the picker retains the selected socket while its listing starts"
+        )
+        t.expect(
+            model.directory.server?.daemonInstance?.socketName == String(found.socketName),
+            desc: "the directory is pointed at the picked daemon before it can report"
+        )
+        t.expect(
             t.wait(until: { model.directory.daemonInstanceID == selected.snapshot().daemonInstanceID }, timeout: 20),
             desc: "Connect switches its directory to the selected installation"
         )

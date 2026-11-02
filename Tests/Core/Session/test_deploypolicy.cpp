@@ -232,9 +232,10 @@ TEST(aVersionRefusalDoesNotDowngradeAKnownNewerHost)
     CHECK(decideUpdateAction(clientOlder) == UpdateAction::None);
     CHECK(hostUpdateNotice(clientOlder).empty());
 
-    // A newer app version is not replaced even when its wire version matches.
+    // Equal wire versions identify different builds without choosing an
+    // older side. Installing this app's matching host remains an explicit choice.
     const UpdateFacts same = refusalBetween(build("0.2.1.4", 5), build("0.2.2", 5));
-    CHECK(decideUpdateAction(same) == UpdateAction::None);
+    CHECK(decideUpdateAction(same) == UpdateAction::OfferHostUpdate);
 
     // The notice explains that live sessions move and refusing holders keep them.
     UpdateFacts facts = refusalBetween(build("0.2.1.4", 5), build("0.2.0.7", 3));
@@ -248,9 +249,8 @@ TEST(aVersionRefusalDoesNotDowngradeAKnownNewerHost)
 
 // A host installed before versions counted commits states `0.9.1`, a larger
 // number than any `0.2.0.N` this client states. Another wire version decides
-// before the numbers do: that host is offered this client's build when its
-// protocol is below the client's. At the same protocol only the app versions
-// can order the two builds, and then they are read as stated.
+// independently of the app numbers: that host is offered this client's build
+// when its protocol is below the client's. Equal protocols name no older side.
 TEST(aHostFromBeforeCountedVersionsIsJudgedByItsProtocolNotItsNumber)
 {
     using Ubiquitty::Protocol::Sync::compareAppVersions;
@@ -273,11 +273,13 @@ TEST(aHostFromBeforeCountedVersionsIsJudgedByItsProtocolNotItsNumber)
         == "Studio’s Ubiquitty Host is from an older build (0.9.1) than this Mac (0.2.0.7). Update the host on Studio.");
     CHECK(versionRefusalTitle(installedHostOlder) == "Studio Runs an Older Ubiquitty Host");
 
-    // The same host speaking this client's protocol reads as the newer build,
-    // and nothing is pushed over it.
+    // The same host speaking this client's protocol names no newer build.
     const auto installedHostCurrent = refusalBetween(build("0.2.0.7", 20), build("0.9.1", 20));
-    CHECK(olderSideOf(installedHostCurrent) == Ubiquitty::Protocol::Sync::OlderSide::Client);
-    CHECK(decideUpdateAction(installedHostCurrent) == UpdateAction::None);
+    CHECK(olderSideOf(installedHostCurrent) == Ubiquitty::Protocol::Sync::OlderSide::Unknown);
+    CHECK(decideUpdateAction(installedHostCurrent) == UpdateAction::OfferHostUpdate);
+    CHECK(versionRefusalTitle(installedHostCurrent) == "Studio Runs a Different Build of Ubiquitty");
+    CHECK(versionRefusalSentence(installedHostCurrent)
+        == "This Mac (0.2.0.7) and Studio’s host (0.9.1) are from different builds of Ubiquitty. Install the same build on both.");
 
     // A counted version reads in the sentence as it is stated.
     const auto clientOlder = refusalBetween(build("0.2.0.7", 20), build("0.2.1.12", 22));
@@ -315,14 +317,13 @@ TEST(aVersionRefusalNamesTheOlderEndAndBothBuilds)
     CHECK(versionRefusalSentence(bare).starts_with("Studio’s Ubiquitty Host is from an older build than this Mac (0.2.1.4)."));
     CHECK(versionRefusalSentence(bare).find("protocol") == std::string::npos);
 
-    // Builds of one protocol are ordered by their app versions; builds that do
-    // not order are told apart without guessing an end.
+    // Equal protocol versions never use app labels to choose an older end.
     const auto sameWireHostOlder = refusalBetween(build("0.2.0.9", 1), build("0.2.0.3", 1));
     CHECK(versionRefusalSentence(sameWireHostOlder)
-        == "Studio’s Ubiquitty Host is from an older build (0.2.0.3) than this Mac (0.2.0.9). Update the host on Studio.");
+        == "This Mac (0.2.0.9) and Studio’s host (0.2.0.3) are from different builds of Ubiquitty. Install the same build on both.");
     const auto sameWireClientOlder = refusalBetween(build("0.2.0.3", 1), build("0.2.0.9", 1));
     CHECK(versionRefusalSentence(sameWireClientOlder)
-        == "This Mac is from an older build of Ubiquitty (0.2.0.3) than Studio’s host (0.2.0.9). Update Ubiquitty on this Mac.");
+        == "This Mac (0.2.0.3) and Studio’s host (0.2.0.9) are from different builds of Ubiquitty. Install the same build on both.");
     const auto unordered = refusalBetween(build("0.2.0.7", 1), build("0.2.0.7", 1));
     CHECK(versionRefusalSentence(unordered)
         == "This Mac and Studio’s host run different builds of Ubiquitty 0.2.0.7. Install the same build on both.");

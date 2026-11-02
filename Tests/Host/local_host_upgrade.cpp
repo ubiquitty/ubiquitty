@@ -7,9 +7,9 @@
 // Docs/sync.md §6.13), between real processes, real PTYs and real relays.
 //
 //   1. A holder installed at the control directory's `ubiquitty-host`, as an
-//      SSH bootstrap installs one, refuses a newer bundled host started where
-//      it lies: the file at the holder's install path is another. The holder
-//      keeps its session and serves it.
+//      SSH bootstrap installs one, refuses an unsigned bundled host started
+//      elsewhere and keeps serving. A team-signed release successor may take
+//      over from that location.
 //   2. The bundled host installed over that path, as a hard link, and started
 //      as the app starts it (`upgradeLocalHost`): the holder hands over every
 //      session and exits 0, and the successor's log counts the session. A
@@ -389,7 +389,8 @@ void upgradesAHostInstalledInTheControlDirectory(const std::string& built, const
     const bool isCrossVersion = !olderHost.empty();
     CHECK_MSG(Install::copy(isCrossVersion ? olderHost : built, machine.installPath, isCrossVersion ? std::string_view {} : "\nan older host\n"),
         "premise: the holder is installed where an SSH bootstrap installs one");
-    CHECK_MSG(Install::copy(built, machine.bundledHost, "\nthe app's bundled host\n"), "premise: the app bundles a newer host");
+    CHECK_MSG(Install::copy(built, machine.bundledHost, isCrossVersion ? std::string_view {} : "\nthe app's bundled host\n"),
+        "premise: the app bundles a newer host");
     const Install holder = machine.holderAt(machine.installPath);
     const std::string holderLeaf = holder.socketLeaf();
     const std::string bundledLeaf = Ubiquitty::Host::socketLeafForBinary(machine.bundledHost.c_str());
@@ -460,35 +461,44 @@ void upgradesAHostInstalledInTheControlDirectory(const std::string& built, const
             "the holder's shell answers");
     }
 
-    // 1. The bundled host started where it lies, as the app started it
-    //    before it installed one: the holder's install path names another
-    //    file, so the holder keeps its session. The refused host holds
-    //    nothing and keeps running, as it does on a person's Mac.
+    // A signed release successor may be admitted where it lies; an unsigned
+    // successor is admitted only after installation at the trusted path.
+    bool didTakeOverBeforeInstall = false;
     {
         const auto ready = Session::readyLocalDaemon(machine.bundledHost);
         CHECK_MSG(!ready.socketPath.empty(), "premise: the bundled host starts beside the holder");
-        CHECK_MSG(!waitForExit(holderProcess, 1000), "a holder installed elsewhere keeps running");
-        CHECK_MSG(waitForFileText(logPathFor(machine.home, bundledLeaf), "1 older hosts kept theirs", 5000),
-            "the bundled host started where it lies says the holder kept its sessions");
+        didTakeOverBeforeInstall = isCrossVersion && waitForExit(holderProcess, 1000) == std::optional { 0 };
+        if (didTakeOverBeforeInstall)
+            CHECK_MSG(waitForFileText(logPathFor(machine.home, bundledLeaf), "took over 1 sessions; 0 older hosts kept theirs", 5000),
+                "the signed bundled host takes the holder's session directly");
+        else {
+            CHECK_MSG(!waitForExit(holderProcess, 1000), "a holder installed elsewhere keeps running");
+            CHECK_MSG(waitForFileText(logPathFor(machine.home, bundledLeaf), "1 older hosts kept theirs", 5000),
+                "the bundled host started where it lies says the holder kept its sessions");
+        }
         if (!isCrossVersion)
             CHECK_MSG(Ubiquitty::HostTest::sendInput(*person.connection, "echo still-on-the-ho\"\"lder\r") && person.waitForText("still-on-the-holder"),
                 "the holder still serves its session");
     }
-    const auto refused = detachedHost(machine.home, bundledLeaf);
-    CHECK_MSG(refused.has_value(), "premise: the refused bundled host still runs");
+    const auto refused = didTakeOverBeforeInstall ? std::nullopt : detachedHost(machine.home, bundledLeaf);
+    if (!didTakeOverBeforeInstall)
+        CHECK_MSG(refused.has_value(), "premise: the refused bundled host still runs");
 
-    // 2. Installed, then started, as the app does at launch: the refused
-    //    host, which holds nothing, stops, and starts again to ask once more.
+    // Installing the trusted host starts it at the control path if it did
+    // not already take over as a signed release successor.
     const auto outcome = Session::upgradeLocalHost(machine.bundledHost, Session::LocalHostBuild::Release);
     CHECK_MSG(outcome.install.kind == Session::LocalHostInstallKind::Linked, "the bundled host is linked over the install");
     CHECK_MSG(isSameFile(machine.installPath, machine.bundledHost), "the install and the bundled host are one file");
     CHECK_MSG(Ubiquitty::Host::interfacePathForHost(machine.installPath) == machine.interface,
         "a host started from the install trusts the app whose helper it is");
-    CHECK_MSG(outcome.didStartSuccessor && outcome.isBundledHostAnswering, "the bundled host is started again to take the holder over");
-    CHECK_MSG(waitForFileText(logPathFor(machine.home, bundledLeaf), "asked to stop while it holds nothing", 5000),
-        "the refused bundled host stopped as it held nothing");
-    CHECK_MSG(refused && ::kill(*refused, 0) != 0, "the refused bundled host is gone");
-    const auto holderExit = waitForExit(holderProcess, 30'000);
+    CHECK_MSG(outcome.isBundledHostAnswering, "the bundled host answers after installation");
+    if (!didTakeOverBeforeInstall) {
+        CHECK_MSG(outcome.didStartSuccessor, "the bundled host is started again to take the holder over");
+        CHECK_MSG(waitForFileText(logPathFor(machine.home, bundledLeaf), "asked to stop while it holds nothing", 5000),
+            "the refused bundled host stopped as it held nothing");
+        CHECK_MSG(refused && ::kill(*refused, 0) != 0, "the refused bundled host is gone");
+    }
+    const auto holderExit = didTakeOverBeforeInstall ? std::optional { 0 } : waitForExit(holderProcess, 30'000);
     CHECK_MSG(holderExit == std::optional { 0 }, "the holder hands over and exits cleanly");
     CHECK_MSG(waitForFileText(logPathFor(machine.home, bundledLeaf), "took over 1 sessions; 0 older hosts kept theirs", 5000),
         "the successor took the holder's session and no host kept any");
@@ -657,6 +667,24 @@ void upgradesAHostStartedFromAnEarlierBundle(const std::string& built, InstallWa
 }
 
 /// 4: installs that change nothing, a copy, a newer install, and two at once.
+void refusesAnUpdateHostWhoseBinaryStatesAnotherVersion(const std::string& built)
+{
+    Machine machine;
+    if (!machine.create("lhu")) {
+        CHECK_MSG(false, "a private machine");
+        return;
+    }
+    machine.adopt();
+    CHECK_MSG(Install::copy(built, machine.bundledHost), "premise: the update archive carries a host");
+    const auto outcome = Session::upgradeLocalHostForUpdate(machine.bundledHost, Session::LocalHostBuild::Release, "0.0.0");
+    CHECK_MSG(outcome.install.kind == Session::LocalHostInstallKind::Refused, "a host stating another version cannot be installed for the update");
+    CHECK_MSG(::access(machine.installPath.c_str(), F_OK) != 0, "the mismatched host changed no install");
+    const auto admitted = Session::upgradeLocalHostForUpdate(machine.bundledHost, Session::LocalHostBuild::Release, std::string(Sync::appVersion()));
+    CHECK_MSG((admitted.isInstalled || admitted.install.kind == Session::LocalHostInstallKind::Copied) && admitted.olderHostCount == 0,
+        "the host stating the update's version is installed before takeover");
+    machine.finish();
+}
+
 void installsOnlyWhatItCan(const std::string& built)
 {
     Machine machine;
@@ -914,6 +942,31 @@ bool signHost(const std::string& path, const std::string& identity, const std::s
     arguments.push_back(path);
     return runAndRead(arguments).has_value();
 }
+
+/// A configured development identity may sign code without the release team's
+/// Apple-issued certificate. Only the latter can exercise the team route.
+bool hasTrustedTeamSignature(const std::string& path)
+{
+    const std::string requirement = "=" + Ubiquitty::Host::trustedHostSignatureRequirement();
+    const pid_t child = ::fork();
+    if (child == 0) {
+        std::array<char*, 7> arguments {
+            const_cast<char*>("/usr/bin/codesign"), const_cast<char*>("--verify"), const_cast<char*>("--strict"),
+            const_cast<char*>("-R"), const_cast<char*>(requirement.c_str()),
+            const_cast<char*>(path.c_str()), nullptr
+        };
+        ::execv(arguments[0], arguments.data());
+        _exit(127);
+    }
+    if (child < 0)
+        return false;
+    int status = 0;
+    pid_t waited = -1;
+    do {
+        waited = ::waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
 #endif
 
 /// 8, macOS: a host binary the trusted team signed succeeds a holder the
@@ -934,9 +987,19 @@ void admitsATeamSignedSuccessorWhereverItLies(const std::string& built)
     // Two signatures of one build, told apart by an option, so the two own
     // two sockets. They are made before the machine takes HOME over, because
     // codesign finds the team's identity through the person's own keychains.
-    CHECK_MSG(Install::copy(built, machine.installPath) && signHost(machine.installPath, identity, {}), "premise: the holder is signed by the team");
-    CHECK_MSG(Install::copy(built, machine.bundledHost) && signHost(machine.bundledHost, identity, "runtime"),
-        "premise: the bundled host is signed by the team");
+    const bool didSignHolder = Install::copy(built, machine.installPath) && signHost(machine.installPath, identity, {});
+    const bool didSignBundled = Install::copy(built, machine.bundledHost) && signHost(machine.bundledHost, identity, "runtime");
+    CHECK_MSG(didSignHolder, "premise: the holder is signed with the configured identity");
+    CHECK_MSG(didSignBundled, "premise: the bundled host is signed with the configured identity");
+    if (!didSignHolder || !didSignBundled) {
+        machine.finish();
+        return;
+    }
+    if (!hasTrustedTeamSignature(machine.installPath) || !hasTrustedTeamSignature(machine.bundledHost)) {
+        std::printf("local_host_upgrade: configured signing identity lacks the trusted team's Apple-issued certificate; team-route case not run\n");
+        machine.finish();
+        return;
+    }
     machine.adopt();
     const Install holder = machine.holderAt(machine.installPath);
     const std::string bundledLeaf = Ubiquitty::Host::socketLeafForBinary(machine.bundledHost.c_str());
@@ -1158,6 +1221,7 @@ int main(int argc, char** argv)
         remoteUpdateKeepsLiveSessions(built, RemoteHolderPlacement::Elsewhere);
         upgradesAHostStartedFromAnEarlierBundle(built, InstallWay::Linked);
         upgradesAHostStartedFromAnEarlierBundle(built, InstallWay::Copied);
+        refusesAnUpdateHostWhoseBinaryStatesAnotherVersion(built);
         installsOnlyWhatItCan(built);
         startsTheBundledHostForEveryOlderHost(built);
         CHECK_MSG(!selfError, "premise: this binary's own path");
@@ -1168,12 +1232,12 @@ int main(int argc, char** argv)
     }
     endChildren();
     if (failures == 0)
-        std::printf(argc == 4 ? "local_host_upgrade: an older release's host installed in the control directory refuses the bundled host started where it lies, "
-                                "and hands its session to the bundled host installed over it, which runs it on\n"
+        std::printf(argc == 4 ? "local_host_upgrade: an older release's host hands its live session to the signed bundled successor, "
+                                "before or after that successor is installed at the control path\n"
                               : "local_host_upgrade: a host installed in the control directory refuses the bundled host started where it lies and hands "
                                 "every session to it once it is linked over the install; a saved reference to its workspace reattaches on the successor; "
                                 "a host started from an earlier bundle hands over to the updated one, linked or copied; installs change nothing they cannot; "
                                 "a copy trusts the app whose helper holds its code; an idle stop never ends a starting host or a greeting client's; "
-                                "a host the team signed succeeds one the team signed wherever it lies, where an identity of the team signs here\n");
+                                "the team-signature route runs only with an identity whose certificate meets the trusted-team requirement\n");
     return failures == 0 ? 0 : 1;
 }

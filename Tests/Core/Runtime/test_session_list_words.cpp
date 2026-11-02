@@ -232,6 +232,8 @@ TEST(aHostsSectionIsInOneStateDecidedFromWhatTheDirectoryReports)
         CHECK(state(facts) == HostSectionState::NotInstalled);
         facts.failure = ListingFailure::Malformed;
         CHECK(state(facts) == HostSectionState::Malformed);
+        facts.failure = ListingFailure::InstanceUnreadable;
+        CHECK(state(facts) == HostSectionState::Malformed);
         facts.failure = ListingFailure::Refused;
         const std::pair<ByeReason, HostSectionState> refusals[] = {
             { ByeReason::TokenMissing, HostSectionState::NeedsToken },

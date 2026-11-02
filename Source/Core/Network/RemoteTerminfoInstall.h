@@ -59,7 +59,7 @@ inline constexpr std::string_view terminfoEntryName = "xterm-ubiquitty";
     std::vector<std::string> argv = buildSSHArguments(sshPath, host, options);
     if (argv.empty())
         return argv;
-    argv.emplace_back(buildRemoteTerminfoInstallCommand(terminfoSource));
+    argv.emplace_back(Transport::remoteShellCommand(buildRemoteTerminfoInstallCommand(terminfoSource)));
     return argv;
 }
 

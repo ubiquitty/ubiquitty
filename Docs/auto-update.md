@@ -79,38 +79,49 @@ never checked runs its first scheduled check at launch.
 
 ## Your terminals across an update
 
-When you choose **Install and Relaunch**, Sparkle tells Ubiquitty that it's
-about to relaunch it, then asks it to quit. That quit keeps your session the
-way **Restore Last Session on Launch** does, whether or not that setting is on
-(`Session::isSessionKeptByQuit`):
+When you choose **Install and Relaunch**, Ubiquitty holds Sparkle before the
+installation and prepares the terminals while the old app still runs. This
+does not depend on the later relaunch notice or on the quit request's timing.
+The preparation keeps your session whether or not **Restore Last Session on
+Launch** is on (`Session::isSessionKeptByQuit`):
 
 - Each local tab's shell, and each pane of a split, moves to the local
-  `ubiquitty-host` daemon and keeps running. Sync and remote windows keep
-  their sessions on their hosts.
+  `ubiquitty-host` daemon and keeps running. Ubiquitty waits for each adopted
+  pane's attachment to reach its exact session. Sync and remote panes remain
+  on their hosts. The arrangement records the exact session IDs of panes that
+  were local before the update, including a split with both local and hosted
+  panes.
+- The verified host from the update archive is installed in this Mac's private
+  control directory. Ubiquitty starts its takeover and waits for each adopted
+  pane to reconnect to the same session on the new daemon. An older daemon or
+  a pending session prevents the automatic relaunch.
 - Ubiquitty saves every window: its frame and screen, whether it was in full
   screen, its place in front of or behind the others, its tabs and the
   selected one, and each tab's split and focused pane.
-- The updated Ubiquitty opens every window as it was, with each tab rejoining
-  its running shell, and Sync and remote tabs in the same windows as the
-  local ones beside them.
+- Only after those checks pass does Ubiquitty release Sparkle's installation.
+  The updated app opens every window as it was, with each pane rejoining its
+  running session. The panes adopted for the update remain attached to the
+  local host after this relaunch; returning their PTYs to the new app process
+  requires the separate, authenticated reverse-transfer operation.
 
 The saved arrangement carries a mark that only the launch after the update
 reads, and that launch removes it. With **Restore Last Session on Launch**
 off, the next time you open Ubiquitty it starts with a new window as usual.
 
-If the update can't keep a program that's running, because the daemon doesn't
-start or refuses a shell, Ubiquitty asks before it quits, as it does for any
-quit. Click **Cancel** to keep working: the update waits, and Sparkle installs
-it the next time Ubiquitty quits, then opens the new version. To install it
-sooner, choose **Check for Updates…** again and click **Install and
-Relaunch**.
+If adoption, host verification, or takeover fails, Ubiquitty requests the
+adopted panes back into the still-running app and asks before restarting. **Not
+Now** leaves the app open with its panes alive. Sparkle keeps the prepared
+update and installs it when you next quit Ubiquitty; that ordinary quit does
+not reopen the app. The next launch uses the new version. **Restart Anyway** confirms that a new attempt to
+capture the session may still close running processes; an unresolved ownership
+transfer continues to forbid quitting.
 
-Sparkle reports the relaunch through its updater delegate
-(`updaterWillRelaunchApplication:`), which `Updater.swift` passes to the app
-delegate as the reason the app quits; Ubiquitty never infers it from the quit
-itself. The UI scenario
-`swift_update_relaunch_keeps_every_window_tab_split_and_shell` drives that
-quit, the launch after it, and the launch after that.
+The standard Sparkle user driver waits for preparation before answering its
+Install and Relaunch choice. A failed preparation answered with Not Now gives
+Sparkle its Dismiss choice while the update is in the installing stage; Sparkle
+keeps that update for installation at ordinary termination. The later
+`updaterWillRelaunchApplication:` notice still names an immediate relaunch;
+the pre-install gate is the proof that authorizes that quit.
 
 ## Code map
 
@@ -121,7 +132,7 @@ quit, the launch after it, and the launch after that.
 | `[updates] check_automatically` | `Source/Core/Preferences` (`Key::UpdatesCheckAutomatically`, `Effective::shouldCheckForUpdatesAutomatically`) |
 | Settings ▸ Software Update | `Source/Platform/macOS/App/SettingsCatalog.swift` (`softwareUpdateCategories`) |
 | `SUFeedURL` + `SUPublicEDKey` + the schedule keys | `Source/Platform/macOS/Info.plist.in` (the template the build fills in) |
-| The relaunch notice, the quit it decides, and the one launch that restores it | `Updater.swift` (`isRelaunchingForUpdate`), `AppDelegate.swift` (`quitReason`), `Source/Platform/macOS/App/Windowing/TerminalWindows.swift` (`terminationReply`, `restoreLaunchArrangement`), `Source/Platform/macOS/App/Application/SessionLayout.swift` (`takeLayoutForLaunch`), `Source/Core/Session/RestorePlan.h` (`isSessionKeptByQuit`) |
+| The pre-install gate, quit and one launch that restores it | `Updater.swift` (`UpdateUserDriver.showReadyToInstallAndRelaunch`, `prepareUpdateRelaunch`), `AppDelegate.swift` (`applicationShouldTerminate`), `Source/Platform/macOS/App/Windowing/TerminalWindows.swift` (`prepareUpdateCapture`, `restoreLaunchArrangement`), `Source/Platform/macOS/App/Application/SessionLayout.swift` (`takeLayoutForLaunch`), `Source/Core/Session/RestorePlan.h` (`UpdateRelaunchFacts`, `isSessionKeptByQuit`) |
 | CMake gate `UBIQUITTY_SPARKLE` (link + embed) | `Source/Platform/macOS/CMakeLists.txt` |
 | Fetch the pinned prebuilt framework + tools | `Scripts/fetch-sparkle.sh` → `$UBQ_BUILD_ROOT/sparkle` |
 | Sign the framework's nested code | `Scripts/sign-sparkle.sh` (called from `build-macos.sh`) |

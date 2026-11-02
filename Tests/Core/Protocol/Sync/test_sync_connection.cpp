@@ -342,7 +342,7 @@ std::vector<QueuedFrame> hostFrames(HostConnection& host, std::vector<std::uint8
 // VersionMismatch by either end, and no side is guessed older.
 TEST(aPeerAtAnotherVersionIsRefusedAndNoSideIsGuessed)
 {
-    CHECK_EQ(wireVersion, 1);
+    CHECK(wireVersion >= lastPublishedWireVersion);
 
     // The client refuses a Welcome from a host at another version.
     ClientConnection client(clientPolicy, ClientIdentity {});
@@ -362,7 +362,7 @@ TEST(aPeerAtAnotherVersionIsRefusedAndNoSideIsGuessed)
     CHECK(clientByeBody && clientByeBody->reason == ByeReason::VersionMismatch && clientByeBody->detail == versionMismatchNotice());
 
     // The host refuses a Greet at any other version, and welcomes nobody.
-    for (const std::uint16_t version : { std::uint16_t { 2 }, std::uint16_t { 28 } }) {
+    for (const std::uint16_t version : { std::uint16_t { wireVersion - 1 }, std::uint16_t { wireVersion + 1 } }) {
         HostConnection host(hostPolicy(0), HostIdentity {});
         host.receiveStream(greetFrame(version), 1);
         CHECK(host.state() == ConnectionState::Closed);
@@ -390,11 +390,11 @@ TEST(aPeerAtAnotherVersionIsRefusedAndNoSideIsGuessed)
     CHECK(unversioned.byeReason() == ByeReason::Malformed);
 }
 
-// Builds whose body layouts differ speak the same wire version, so each end
-// refuses the other for its fingerprint, from the handshake's prefix and
+// A build that changes its layout without advancing the wire version is
+// refused for its fingerprint, from the handshake's prefix and
 // before anything past it is read: the pair never gets as far as a body one
 // of them cannot decode. The refusal carries the refusing end's build, so the
-// sentence a person reads can name the older one.
+// sentence a person reads can name both without guessing which is older.
 TEST(aBuildWhoseLayoutsDifferIsRefusedAtTheHandshakeByEitherEnd)
 {
     EngineFingerprint other = wireFingerprint;
@@ -426,7 +426,7 @@ TEST(aBuildWhoseLayoutsDifferIsRefusedAtTheHandshakeByEitherEnd)
     CHECK(client.byeReason() == ByeReason::VersionMismatch);
     CHECK(!client.welcome());
     CHECK(client.notice() == versionMismatchNotice());
-    CHECK(olderSideOfRefusal(ByeReason::VersionMismatch, bye->peer->build, PeerBuild { .isKnown = true, .wireVersion = wireVersion, .appVersion = "0.2.0.3" }) == OlderSide::Client);
+    CHECK(olderSideOfRefusal(ByeReason::VersionMismatch, bye->peer->build, PeerBuild { .isKnown = true, .wireVersion = wireVersion, .appVersion = "0.2.0.3" }) == OlderSide::Unknown);
 
     // A Greet whose body past the prefix this build cannot read is refused
     // for its build, not taken for a malformed one of this build.
@@ -455,7 +455,7 @@ TEST(aBuildWhoseLayoutsDifferIsRefusedAtTheHandshakeByEitherEnd)
     CHECK(!newerClient.welcome());
     REQUIRE(newerClient.refusedHostBuild());
     CHECK(newerClient.refusedHostBuild()->appVersion == "0.2.0.3");
-    CHECK(olderSideOfRefusal(ByeReason::VersionMismatch, *newerClient.refusedHostBuild(), PeerBuild { .isKnown = true, .wireVersion = wireVersion, .appVersion = "0.2.0.7" }) == OlderSide::Host);
+    CHECK(olderSideOfRefusal(ByeReason::VersionMismatch, *newerClient.refusedHostBuild(), PeerBuild { .isKnown = true, .wireVersion = wireVersion, .appVersion = "0.2.0.7" }) == OlderSide::Unknown);
 
     // The same build is welcomed, and a client refuses no Welcome of its own build.
     ClientConnection sameClient(clientPolicy, ClientIdentity {});

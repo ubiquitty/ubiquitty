@@ -696,6 +696,7 @@ final class ConnectModel {
     /// Records what the selected host answered, for its sidebar row.
     func noteDirectoryChanged() {
         guard let server = selectedServer else { return }
+        guard directory.server?.daemonInstance == server.daemonInstance else { return }
         // The daemon picked under Running Sessions stopped: it leaves the
         // picker, and the host's current daemon is listed in its place.
         let goneSocket = directory.failure?.kind == .instanceGone ? selectedHostSocket : ""
@@ -1283,6 +1284,7 @@ final class ConnectModel {
         case .authenticationAttemptsExhausted: fact.listingFailure = .AuthenticationAttemptsExhausted
         case .endedBeforeAnswer: fact.listingFailure = .EndedBeforeAnswer
         case .instanceGone: fact.listingFailure = .InstanceGone
+        case .instanceUnreadable: fact.listingFailure = .InstanceUnreadable
         case .notInstalled: fact.listingFailure = .NotInstalled
         case .refused: fact.listingFailure = .Refused
         case .malformed: fact.listingFailure = .Malformed
@@ -1317,7 +1319,7 @@ final class ConnectModel {
         let isVersionRefusal = failure.kind == .refused && failure.deniedReason == .VersionMismatch
         return RemedyList(
             remedies: remedies,
-            sentence: String(Ubiquitty.Session.connectRemedySentence(fact)),
+            sentence: failure.kind == .instanceUnreadable ? failure.detail : String(Ubiquitty.Session.connectRemedySentence(fact)),
             versionTitle: isVersionRefusal ? String(Ubiquitty.Session.versionRefusalTitle(fact.update)) : ""
         )
     }

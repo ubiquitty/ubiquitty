@@ -257,7 +257,14 @@ final class UBAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMe
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        TerminalWindows.terminationReply(for: quitReason)
+        if updater?.isUpdatePreparationInProgress == true { return .terminateCancel }
+        if updater?.mayTerminateAfterUpdatePreparation == true,
+            Ubiquitty.Runtime.TerminalSession.unresolvedLocalAdoptionCount() == 0
+        {
+            updater?.commitPreparedUpdateAtQuit()
+            return .terminateNow
+        }
+        return TerminalWindows.terminationReply(for: quitReason)
     }
 
     /// Why the app would quit now: to relaunch into an update the updater

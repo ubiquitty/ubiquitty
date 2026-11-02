@@ -627,8 +627,9 @@ struct OtherHost {
 ///   - ownLeaf: The bundled host's own socket.
 ///   - bundledProcess: The process serving it, if one does.
 ///   - bundledInstance: Its instance, zero when unknown.
+///   - bundledVersion: The successor's version, including when it comes from an update.
 std::vector<OtherHost> otherHosts(const std::string& bundledHostPath, const std::string& root, std::string_view ownLeaf, std::optional<pid_t> bundledProcess,
-    std::uint64_t bundledInstance)
+    std::uint64_t bundledInstance, std::string_view bundledVersion)
 {
     std::vector<std::string> leaves;
     if (DIR* listing = ::opendir(root.c_str())) {
@@ -639,7 +640,6 @@ std::vector<OtherHost> otherHosts(const std::string& bundledHostPath, const std:
         }
         ::closedir(listing);
     }
-    const std::string_view bundledVersion = Protocol::Sync::appVersion();
     std::vector<OtherHost> hosts;
     for (const std::string& leaf : leaves) {
         const auto process = servingProcess(root + "/" + leaf);
@@ -789,7 +789,25 @@ bool isLocalHostUpgradable(LocalHostBuild build)
     return build == LocalHostBuild::Release || (privateHome && privateHome[0]);
 }
 
+static LocalHostTakeoverOutcome takeOverLocalHostsForVersion(const std::string&, LocalHostTakeoverMode, std::string_view);
+static LocalHostUpgradeOutcome upgradeLocalHostAtVersion(const std::string&, LocalHostBuild, std::string_view);
+
 LocalHostUpgradeOutcome upgradeLocalHost(const std::string& bundledHostPath, LocalHostBuild build)
+{
+    return upgradeLocalHostAtVersion(bundledHostPath, build, Protocol::Sync::appVersion());
+}
+
+LocalHostUpgradeOutcome upgradeLocalHostForUpdate(const std::string& bundledHostPath, LocalHostBuild build, const std::string& version)
+{
+    if (!Protocol::Sync::parseAppVersion(version) || statedVersion(bundledHostPath).version != version) {
+        LocalHostUpgradeOutcome outcome;
+        outcome.install = { .kind = LocalHostInstallKind::Refused, .reason = "the host does not state the update's version" };
+        return outcome;
+    }
+    return upgradeLocalHostAtVersion(bundledHostPath, build, version);
+}
+
+static LocalHostUpgradeOutcome upgradeLocalHostAtVersion(const std::string& bundledHostPath, LocalHostBuild build, std::string_view version)
 {
     LocalHostUpgradeOutcome outcome;
     if (!isLocalHostUpgradable(build))
@@ -797,10 +815,10 @@ LocalHostUpgradeOutcome upgradeLocalHost(const std::string& bundledHostPath, Loc
     const std::string installPath = localHostInstallPath();
     outcome.install = installPath.empty() || !ensureControlDirectory()
         ? LocalHostInstallOutcome { .kind = LocalHostInstallKind::Refused, .reason = "the control directory could not be made", .isOnAnotherVolume = false }
-        : installBundledHost(bundledHostPath, installPath, Protocol::Sync::appVersion());
+        : installBundledHost(bundledHostPath, installPath, version);
     const auto kind = outcome.install.kind;
     outcome.isInstalled = kind == LocalHostInstallKind::Current || kind == LocalHostInstallKind::Linked;
-    const auto takeover = takeOverLocalHosts(bundledHostPath, kind == LocalHostInstallKind::NewerInstalled ? LocalHostTakeoverMode::Inspect : LocalHostTakeoverMode::Start);
+    const auto takeover = takeOverLocalHostsForVersion(bundledHostPath, kind == LocalHostInstallKind::NewerInstalled ? LocalHostTakeoverMode::Inspect : LocalHostTakeoverMode::Start, version);
     outcome.didStartSuccessor = takeover.didStartSuccessor;
     outcome.isBundledHostAnswering = takeover.isHostAnswering;
     outcome.olderHostCount = takeover.olderHostCount;
@@ -809,6 +827,11 @@ LocalHostUpgradeOutcome upgradeLocalHost(const std::string& bundledHostPath, Loc
 }
 
 LocalHostTakeoverOutcome takeOverLocalHosts(const std::string& bundledHostPath, LocalHostTakeoverMode mode)
+{
+    return takeOverLocalHostsForVersion(bundledHostPath, mode, Protocol::Sync::appVersion());
+}
+
+static LocalHostTakeoverOutcome takeOverLocalHostsForVersion(const std::string& bundledHostPath, LocalHostTakeoverMode mode, std::string_view version)
 {
     LocalHostTakeoverOutcome outcome;
     const std::string ownSocket = localDaemonSocketPath(bundledHostPath);
@@ -819,7 +842,7 @@ LocalHostTakeoverOutcome takeOverLocalHosts(const std::string& bundledHostPath, 
     auto bundledProcess = servingProcess(ownSocket);
     std::uint64_t bundledInstance = bundledProcess ? askHost(bundledHostPath, ownLeaf).instance : 0;
     outcome.isHostAnswering = bundledProcess.has_value();
-    auto hosts = otherHosts(bundledHostPath, root, ownLeaf, bundledProcess, bundledInstance);
+    auto hosts = otherHosts(bundledHostPath, root, ownLeaf, bundledProcess, bundledInstance, version);
     // Nothing is started over a newer installed host, whose app installed
     // it, nor for hosts of newer builds alone. Wherever an older host runs
     // from, the bundled host asks it; one installed where the bundled file
@@ -832,7 +855,7 @@ LocalHostTakeoverOutcome takeOverLocalHosts(const std::string& bundledHostPath, 
             outcome.isHostAnswering = !readyLocalDaemon(bundledHostPath).socketPath.empty();
             bundledProcess = servingProcess(ownSocket);
             bundledInstance = bundledProcess ? askHost(bundledHostPath, ownLeaf).instance : 0;
-            hosts = otherHosts(bundledHostPath, root, ownLeaf, bundledProcess, bundledInstance);
+            hosts = otherHosts(bundledHostPath, root, ownLeaf, bundledProcess, bundledInstance, version);
         }
     }
     struct stat bundledInfo {};

@@ -1068,18 +1068,17 @@ public:
     ///
     /// The platform calls this when the OS reports a path change — a phone leaving WiFi for
     /// cellular, a laptop waking on a different network. What it fixes is a session waiting out a
-    /// backoff it no longer has any reason to wait: a redial that failed on the old path says
-    /// nothing about the new one, so the wait is retimed to now and the attempt counter cleared.
+    /// backoff earned on an old path. One retry may run immediately, but failures stay counted
+    /// until a Welcome: repeated notifications cannot renew the fast retry window.
     ///
     /// While CONNECTED the answer depends on whether the carrier survives the move. A QUIC
     /// connection migrates — `ChannelObserver::onConnect` fires once per logical connection, not per
     /// network change — so it is kept, and the host is asked for an answer on the new path; one that
     /// stays silent past a short deadline is replaced rather than left to its idle timer. A stream
     /// connection survives a move that leaves its own route alone, so it is asked the same way. An
-    /// attempt still connecting, or a connection that cannot be asked, may be bound to an address
-    /// that has just stopped being this device's: it is torn down here and redialled, because
-    /// waiting for the carrier to time out takes minutes and the session is unusable for all of
-    /// them.
+    /// attempt still connecting may be bound to an address this device no longer has. An
+    /// interrupted resume proof falls back to the bootstrap; a bootstrap gets one replacement,
+    /// after which its completion and the retry schedule own progress until a Welcome.
     ///
     /// Idempotent and cheap, so a platform that cannot tell a real move from a spurious
     /// notification may call it on every one. Session thread only, like every public method.
@@ -1116,9 +1115,9 @@ public:
     /// A connected carrier may have expired at the peer while the process was
     /// suspended. One that may have survived — a stream connection, or a QUIC
     /// one inside the host's idle window — is asked to prove it carries frames
-    /// and kept if it answers. Otherwise replaces it and any outstanding
-    /// bootstrap, preserving the session and workspace identities. Stopped and
-    /// failed sessions stay closed.
+    /// and kept if it answers. Otherwise recovery follows the same bounded
+    /// lifecycle retry as ``networkPathChanged``, preserving session and workspace
+    /// identities. Stopped and failed sessions stay closed.
     ///
     /// - Parameter secondsSuspended: How long the platform held the process, as
     ///   the frontend measured it; negative when it cannot say.
@@ -1508,7 +1507,13 @@ private:
     ///   when the turn ends.
     /// - Returns: Whether this is the turn's first report of its kind.
     bool takeLifecycleReport(bool& isReported);
-    /// Replaces the carrier at once with a fresh backoff.
+    /// Retires an old-path attempt once without renewing its retry budget.
+    ///
+    /// An interrupted proof falls back to the bootstrap. A successful Welcome
+    /// permits the next lifecycle retry.
+    /// - Parameter reason: The state detail reported when a carrier is replaced.
+    void retryAfterLifecycleChange(const std::string& reason);
+    /// Replaces the carrier at once, preserving the count of failed attempts.
     void replaceChannel(const std::string& reason);
     /// States the grid this client holds for its pane, with the pixels its
     /// frontend published, once the host has acknowledged the session and the
@@ -1695,10 +1700,8 @@ private:
     std::uint64_t m_screenTickSerial = 0;
     bool m_foregroundIsShell = true; // host's latest Status flag; gates resize reflow
     bool m_reconnectScheduled = false;
-    // Bumped whenever something supersedes a pending backoff timer — today only
-    // networkPathChanged(), which redials at once. The timer captures the value it was
-    // scheduled under and returns when it no longer matches, so the superseded timer cannot
-    // open a second channel beside the one the redial is already opening.
+    // A timer whose epoch was superseded cannot open a second channel beside
+    // the replacement attempt.
     unsigned m_reconnectEpoch = 0;
     // Consecutive failed attempts since the last HELLO_ACK; the backoff delay
     // is derived from it, so a host that is down is asked less and less often.
@@ -1724,8 +1727,8 @@ private:
     HostRefusal m_lastRefusal;
     std::string m_authToken;
     // A QUIC attempt that never reached HELLO_ACK on the current path; the next
-    // dials ask for the stream carrier. Cleared when the path changes or the
-    // process resumes, because the failure was measured on a path now gone.
+    // dials ask for the stream carrier. The bounded lifecycle retry may try
+    // QUIC on a new path; repeated notifications cannot clear this latch.
     bool m_quicFailed = false;
     // Why the latch above was set by the carrier rather than by the factory:
     // the bootstrap answered and the QUIC connection it pointed at closed
@@ -1747,6 +1750,10 @@ private:
     // Whether a resume proof was refused or went unanswered since the last
     // HELLO_ACK, so the next attempts go through the bootstrap.
     bool m_isResumeDialRefused = false;
+    /// Whether lifecycle recovery has used its immediate retry since the
+    /// last Welcome. Bootstrap fallback consumes it too, so the bootstrap
+    /// cannot be cancelled repeatedly by the notifications that led to it.
+    bool m_hasRetriedAfterLifecycleChange = false;
     // Whether the pin was dropped for a daemon reported gone since the last
     // HELLO_ACK; see reresolveGoneInstance.
     bool m_hasDroppedGonePin = false;

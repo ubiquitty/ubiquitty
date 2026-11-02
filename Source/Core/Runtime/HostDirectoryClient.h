@@ -201,6 +201,12 @@ public:
     [[nodiscard]] bool watch();
     /// Stops following the host. Does nothing when no watch is running.
     void stopWatching();
+
+    /// Sets the discovered daemon whose listing this endpoint must answer.
+    ///
+    /// Called before either a listing or a watch starts.
+    /// - Parameter instance: The picked daemon; empty for the host's default.
+    void setExpectedDaemon(Session::HostInstanceInfo instance);
     /// The rows a frontend draws for the newest tree.
     ///
     /// The title compositions and the tag rules are the live preferences',

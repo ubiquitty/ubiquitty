@@ -973,7 +973,7 @@ private func expectTitlesCarryTheirBake(
             t.expect(false, desc: "\(state) tab \(index) has a baked title to compare against")
             continue
         }
-        // The inspector returns the field whose string matches the tab's bake;
+        // The inspector returns the field carrying this tab's window identity;
         // an accessory field can precede it in AppKit's private hierarchy.
         guard let drawn = colors.first ?? nil else {
             t.expect(false, desc: "\(state) tab \(index) title draws a colour")

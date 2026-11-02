@@ -1,7 +1,9 @@
 // Copyright (C) 2026 Stanislav Yaglo
 // SPDX-License-Identifier: Apache-2.0
 
+import CxxStdlib
 import Foundation
+import UbiquittyCore
 import UbiquittyIOSBridge
 import UbiquittySSH
 
@@ -96,7 +98,7 @@ final class SyncSSHCarrier: SSHCarrierDelegate, @unchecked Sendable {
                 }
                 guard verdict == 1 else { throw SSHCarrierError.hostKeyMismatched }
             },
-            sessionKind: .exec(command: command),
+            sessionKind: .exec(command: command.withCString { String(Ubiquitty.Transport.remoteShellCommand(std.string_view($0))) }),
             outboundCapacityBytes: capacity,
             delegate: self
         )

@@ -264,6 +264,7 @@ extension UBUITestContext {
         child.executableURL = Bundle.main.executableURL
         child.arguments = ["--ui-test", scenario]
         child.environment = environment
+        child.environment?["UBIQUITTY_UI_TEST_CONTROL_HOME"] = environment["UBIQUITTY_HOME"]
         child.standardOutput = log
         child.standardError = log
         do { try child.run() } catch {

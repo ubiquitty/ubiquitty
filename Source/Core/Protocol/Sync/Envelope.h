@@ -35,21 +35,60 @@ namespace Ubiquitty::Protocol::Sync {
 
 /// The protocol version this build speaks. It covers the canonical grammar,
 /// typed operations and records, and the Unicode width table. There is one
-/// version: two builds connect only when they speak the same one, and a peer
-/// at any other is refused.
-inline constexpr std::uint16_t wireVersion = 1;
+/// active version: two builds connect only when they speak the same one, and
+/// a peer at any other is refused. Every wire change increments this version.
+inline constexpr std::uint16_t wireVersion = 2;
+
+/// The wire version published in v0.3.2, paired with its frozen fingerprint.
+inline constexpr std::uint16_t lastPublishedWireVersion = 1;
 
 /// The digest of every body layout this build's wire defines: the SHA-256 of
 /// the corpus `Tests/Core/Protocol/Sync/test_sync_wire_fingerprint.cpp`
 /// encodes, which fails until this is re-minted whenever any layout moves.
 ///
 /// Greet and Welcome carry it, and a peer whose fingerprint differs is refused
-/// as `ByeReason::VersionMismatch` before the rest of its body is read: a
-/// layout changes under a standing `wireVersion`, so the version alone admits a
-/// peer that reads this build's bodies as something else. An editor client
-/// that writes the wire itself keeps a copy, which
+/// as `ByeReason::VersionMismatch` before the rest of its body is read. This
+/// also refuses a build that changed its grammar without advancing the wire
+/// version. An editor client that writes the wire itself keeps a copy, which
 /// `Scripts/check-wire-version-pins.py` holds to this one.
 inline constexpr std::array<std::uint8_t, 32> wireFingerprint {
+    0x6a,
+    0x3d,
+    0xd7,
+    0x16,
+    0x63,
+    0x3a,
+    0xf4,
+    0xc7,
+    0x00,
+    0x2e,
+    0x77,
+    0xbf,
+    0x39,
+    0x0a,
+    0xe0,
+    0xd9,
+    0xc5,
+    0xe8,
+    0xe9,
+    0x8d,
+    0x70,
+    0x36,
+    0x56,
+    0xa9,
+    0xcb,
+    0x17,
+    0x85,
+    0x6a,
+    0xda,
+    0x25,
+    0x80,
+    0x11,
+};
+
+/// The fingerprint published in v0.3.2. This release pin is independent of
+/// the active grammar; it is never a second accepted handshake identity.
+inline constexpr std::array<std::uint8_t, 32> lastPublishedWireFingerprint {
     0x79,
     0xc6,
     0x3f,

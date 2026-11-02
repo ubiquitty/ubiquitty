@@ -34,6 +34,15 @@ inline constexpr std::string_view hostSigningIdentifier = "ubiquitty-host";
 /// The signing identifier of the released macOS app, its bundle identifier.
 inline constexpr std::string_view appSigningIdentifier = "org.ubiquitty.Ubiquitty";
 
+/// The static-code requirement the app checks before installing a successor
+/// from an update archive. The host uses the same team and identifier below.
+[[nodiscard]] inline std::string trustedHostSignatureRequirement()
+{
+    return "identifier \"" + std::string(hostSigningIdentifier)
+        + "\" and anchor apple generic and certificate leaf[subject.OU] = \""
+        + std::string(trustedSigningTeam) + "\"";
+}
+
 /// Who signed the code a process runs, as its signature says.
 ///
 /// The values are explicit because the tests pin them.

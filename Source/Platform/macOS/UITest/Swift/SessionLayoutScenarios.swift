@@ -146,6 +146,14 @@ enum SessionLayoutScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated { checkUpdateRelaunchKeepsTheArrangement(t) }
         }
+        UBUITestRegister("swift_update_not_now_returns_an_adopted_shell_to_the_app", isInDefaultSuite: false) { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { checkUpdateChoiceReturnsTheShell(t, acceptedRisk: false) }
+        }
+        UBUITestRegister("swift_update_restart_anyway_can_abort_without_losing_its_shell", isInDefaultSuite: false) { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { checkUpdateChoiceReturnsTheShell(t, acceptedRisk: true) }
+        }
         UBUITestRegister("an_older_local_host_hands_a_saved_workspace_to_the_bundled_host") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { checkOlderLocalHostHandsItsWorkspaceOver(t) }
@@ -479,9 +487,9 @@ enum SessionLayoutScenarios {
         let previousHome = ProcessInfo.processInfo.environment["UBIQUITTY_HOME"]
         setenv("UBIQUITTY_HOME", home, 1)
         defer {
+            t.closeAllWindows()
             if let previousHome { setenv("UBIQUITTY_HOME", previousHome, 1) } else { unsetenv("UBIQUITTY_HOME") }
             try? FileManager.default.removeItem(atPath: home)
-            t.closeAllWindows()
         }
 
         guard let first = openSwiftShellWindow(), let second = openSwiftShellWindow(), let third = openSwiftShellWindow(),
@@ -1442,23 +1450,95 @@ enum SessionLayoutScenarios {
         )
     }
 
+    /// A failed pre-install transfer returns the app's original local shell
+    /// before a deferred installation or a cancelled explicit restart.
+    @MainActor
+    private static func checkUpdateChoiceReturnsTheShell(_ t: UBUITestContext, acceptedRisk: Bool) {
+        t.closeAllWindows()
+        guard let updater = (NSApp.delegate as? UBAppDelegate)?.updater else {
+            t.refuse("This build has no updater.")
+            return
+        }
+        guard let bundled = t.placeBundledHost() else { return }
+        defer { bundled.remove() }
+        let files = FileManager.default
+        let root = "/tmp/ubq-update-choice-" + String(UUID().uuidString.prefix(8))
+        let home = root + "/.ubiquitty"
+        do { try files.createDirectory(atPath: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) } catch {
+            t.expect(false, desc: "the isolated update home is made (\(error))")
+            return
+        }
+        let previousHome = ProcessInfo.processInfo.environment["UBIQUITTY_HOME"]
+        setenv("UBIQUITTY_HOME", home, 1)
+        defer {
+            t.closeAllWindows()
+            if let previousHome { setenv("UBIQUITTY_HOME", previousHome, 1) } else { unsetenv("UBIQUITTY_HOME") }
+            try? files.removeItem(atPath: root)
+        }
+        let daemon = Process()
+        daemon.executableURL = URL(fileURLWithPath: bundled.path)
+        daemon.arguments = ["--daemon", "--columns", "80", "--rows", "24"]
+        daemon.environment = ProcessInfo.processInfo.environment.merging(["UBIQUITTY_HOME": home]) { $1 }
+        do { try daemon.run() } catch {
+            t.expect(false, desc: "the isolated host starts (\(error))")
+            return
+        }
+        defer {
+            t.closeAllWindows()
+            if daemon.isRunning { daemon.terminate() }
+            daemon.waitUntilExit()
+        }
+        let socket = String(Ubiquitty.Session.localDaemonSocketPath(std.string(bundled.path)))
+        guard t.wait(until: { files.fileExists(atPath: socket) }, timeout: 20),
+            let shell = openSwiftShellWindow(), let pane = shell.focusedSurfaceForTesting
+        else {
+            t.expect(false, desc: "the isolated host and local shell are ready")
+            return
+        }
+        let marker = "update-choice-" + String(UUID().uuidString.prefix(8))
+        pane.send("printf '\(marker)\\n'\n")
+        t.expect(t.wait(until: { bufferHolds(marker, in: pane) }, timeout: 10), desc: "the local shell runs before the update")
+
+        var questionCount = 0
+        let answer = Timer(timeInterval: 0.05, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                guard NSApp.modalWindow != nil else { return }
+                questionCount += 1
+                NSApp.stopModal(withCode: acceptedRisk ? .alertFirstButtonReturn : .alertSecondButtonReturn)
+            }
+        }
+        RunLoop.main.add(answer, forMode: .modalPanel)
+        defer { answer.invalidate() }
+        var isInstallAuthorized: Bool?
+        Task { @MainActor in isInstallAuthorized = await updater.prepareUpdateRelaunchForTesting() }
+        t.expect(t.wait(until: { isInstallAuthorized != nil }, timeout: 40), desc: "a refused update asks for a choice")
+        t.expect(isInstallAuthorized == acceptedRisk, desc: "the update follows the selected restart choice")
+        t.expect(questionCount == 1, desc: "the update asks once before a risky restart (\(questionCount))")
+        if acceptedRisk {
+            t.expect(updater.mayTerminateAfterUpdatePreparation, desc: "Restart Anyway authorizes only the prepared quit")
+            var didAbort = false
+            Task { @MainActor in
+                await updater.cancelPreparedUpdateForTesting()
+                didAbort = true
+            }
+            t.expect(t.wait(until: { didAbort }, timeout: 20), desc: "a cancelled install restores the app's owners")
+        }
+        t.expect(
+            t.wait(until: { !pane.drive.isSharedIntoLocalDaemon }, timeout: 10),
+            desc: "the adopted shell is local again before Not Now returns"
+        )
+        t.expect(!updater.isRelaunchingForUpdate, desc: "Not Now leaves the application open")
+        pane.send("printf 'alive-\(marker)\\n'\n")
+        t.expect(t.wait(until: { bufferHolds("alive-\(marker)", in: pane) }, timeout: 10), desc: "the same local shell remains alive")
+    }
+
     /// Sparkle's Install and Relaunch with session persistence off, driven
     /// short of the relaunch: the notice through the updater's own delegate,
     /// the quit's reply and capture, every window closed as the exit closes
     /// them, then the two launches after it.
     ///
-    /// The arrangement mixes what a relaunch has to bring back together:
-    /// back to front, a window of two local tabs whose selected one is split
-    /// with its right pane focused, a Sync window on a workspace of the
-    /// daemon's, and a window whose selected local tab runs a job beside a
-    /// Sync tab. Each pane is identified after the restore by the session it
-    /// shows and proven by its own shell's variable, so a fresh shell or a
-    /// pane in the wrong place cannot pass.
-    ///
     /// The quit that cannot keep a job runs first: with no daemon that can
-    /// start, the confirmation asks, and Cancel, which is how the updater's
-    /// quit request is refused, saves and hands over nothing and leaves the
-    /// next quit still the update's.
+    /// start, the confirmation asks, and Cancel refuses the quit request.
     @MainActor
     private static func checkUpdateRelaunchKeepsTheArrangement(_ t: UBUITestContext) {
         t.closeAllWindows()
