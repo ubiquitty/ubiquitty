@@ -274,6 +274,12 @@ enum RemoteWorkspaceScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated { run(t, processAttributionOnly: true, reorderHostTabs: true) }
         }
+        UBUITestRegister("remote_workspace_detached_tab_keeps_its_titlebar_band") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                run(t, processAttributionOnly: true, reorderHostTabs: true, detachHostTab: true)
+            }
+        }
         UBUITestRegister("remote_workspace_progress_follows_hosted_pane_focus") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { run(t, progressOnly: true) }
@@ -1443,7 +1449,8 @@ enum RemoteWorkspaceScenarios {
         controller: TerminalWindowController,
         under root: String,
         shellCommand: String,
-        reorderHostTabs: Bool
+        reorderHostTabs: Bool,
+        detachHostTab: Bool
     ) {
         guard #available(macOS 26.0, *), let firstWindow = controller.window,
             let first = controller.remoteSurface
@@ -1566,6 +1573,49 @@ enum RemoteWorkspaceScenarios {
         }
         t.pump(0.5)
         verify("after adding the third tab")
+        if detachHostTab {
+            guard let detached = members[2].window, let group = detached.tabGroup,
+                let pane = members[2].remoteSurface
+            else {
+                t.expect(false, desc: "the hosted tab belongs to a native group before detaching")
+                return
+            }
+            group.selectedWindow = detached
+            t.pump(0.2)
+            t.expect(titlebarWash(of: detached) != nil, desc: "the selected hosted tab has a themed titlebar band")
+            detached.moveTabToNewWindow(nil)
+            t.expect((detached.tabGroup?.windows.count ?? 1) == 1, desc: "AppKit has detached the hosted tab before extraction")
+            t.expect(
+                titlebarWash(of: detached) != nil,
+                desc: "the native tear-off keeps the themed titlebar band before host reconciliation"
+            )
+            let transfer = PaneTransferCoordinator.Transfer(controller: members[2], surface: pane, wholeTab: true)
+            t.expect(PaneTransferCoordinator.shared.extract(transfer, newWindow: true), desc: "the host extracts the dragged tab")
+            detached.makeKeyAndOrderFront(nil)
+            t.expect(
+                t.wait(until: { (detached.tabGroup?.windows.count ?? 1) == 1 }, timeout: 10),
+                desc: "the detached hosted tab stands alone (\(detached.tabGroup?.windows.count ?? 1) windows)"
+            )
+            t.pump(0.4)
+            t.expect(titlebarWash(of: detached) != nil, desc: "the detached hosted tab keeps its themed titlebar band")
+            t.expect(
+                titlebarStrip(of: detached).flatMap(titleField(in:))?.stringValue.contains(markers[2]) == true,
+                desc: "the detached hosted tab's title stays in its own titlebar"
+            )
+            if let strip = titlebarStrip(of: detached), let field = titleField(in: strip),
+                let zoom = detached.standardWindowButton(.zoomButton)
+            {
+                let titleFrame = field.convert(field.bounds, to: nil)
+                let zoomFrame = zoom.convert(zoom.bounds, to: nil)
+                t.expect(
+                    titleFrame.minX >= zoomFrame.maxX,
+                    desc: "the detached title clears the traffic lights (title \(titleFrame), zoom \(zoomFrame))"
+                )
+            } else {
+                t.expect(false, desc: "the detached title and traffic lights are present")
+            }
+            return
+        }
         if reorderHostTabs {
             let directory = HostDirectoryEndpoint(shellCommand: shellCommand)
             directory.refresh()
@@ -1654,6 +1704,7 @@ enum RemoteWorkspaceScenarios {
         titleBarsOnly: Bool = false,
         processAttributionOnly: Bool = false,
         reorderHostTabs: Bool = false,
+        detachHostTab: Bool = false,
         linkDelayMilliseconds: ClosedRange<Int>? = nil
     ) {
         guard let hostBinary = ProcessInfo.processInfo.environment["UBIQUITTY_UI_TEST_HOST"],
@@ -1827,7 +1878,8 @@ enum RemoteWorkspaceScenarios {
                 controller: window,
                 under: root,
                 shellCommand: attachCommand,
-                reorderHostTabs: reorderHostTabs
+                reorderHostTabs: reorderHostTabs,
+                detachHostTab: detachHostTab
             )
             return
         }
