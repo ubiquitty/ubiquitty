@@ -1286,9 +1286,8 @@ int main()
         }
     }
 
-    // ---- The host's attachment, rather than a token shared by two client
-    // connections, identifies who drove the program. A resumed attachment
-    // keeps its identity; a second attachment makes later output ambiguous.
+    // ---- A newly bootstrapped human connection keeps the host-authenticated
+    // account's input principal even when its token and attachment change.
     {
         using namespace Ubiquitty::Protocol::Sync;
         Ubiquitty::PAL::UnixFileDescriptor phonePeer;
@@ -1322,21 +1321,25 @@ int main()
     }
     {
         using namespace Ubiquitty::Protocol::Sync;
-        Ubiquitty::PAL::UnixFileDescriptor firstPeer, secondPeer;
+        Ubiquitty::PAL::UnixFileDescriptor firstPeer, nextPeer;
         Daemon d;
         A::setSocketPath(d, std::string(directory) + "/socket");
+        A::configure(d, Ubiquitty::CapabilityDecisionTable {}.replacing(CapabilityOrigin::Remote, Ubiquitty::CapabilityTier::HostEscaping, Ubiquitty::CapabilityDecision::Prompt));
         StreamDouble* stream = nullptr;
         auto& s = A::addSession(d, 1, &stream);
-        const auto first = A::addAskingPhone(d, 1, firstPeer, { 221, 222 });
-        const auto second = A::addAskingPhone(d, 1, secondPeer, { 223, 224 }, "other-phone");
-        CHECK(A::grantKey(d, first) != A::grantKey(d, second));
-        CHECK(A::attachmentID(d, first) != A::attachmentID(d, second));
+        const auto first = A::addAskingPhone(d, 1, firstPeer, { 221, 222 }, "first-bootstrap-token");
+        const auto oldAttachment = A::attachmentID(d, first);
         A::typed(d, s, first);
-        A::typed(d, s, second);
-        CHECK_MSG(s.hasMultipleInputPrincipals, "two token-authenticated people were treated as one driver");
+        A::depart(d, first);
+        const auto next = A::addAskingPhone(d, 1, nextPeer, { 223, 224 }, "next-bootstrap-token");
+        CHECK(A::attachmentID(d, next) != oldAttachment);
+        A::typed(d, s, next);
+        CHECK_MSG(!s.hasMultipleInputPrincipals, "a new bootstrap by the same authenticated account became a second principal");
         stream->pushInbound("\033]52;c;Zmlyc3Q=\a");
         A::service(d, s);
-        CHECK_MSG(s.screenSource->effects().newestSequence() == 0, "ambiguous output reached a clipboard recipient");
+        A::publish(d, s);
+        A::deliver(d, s);
+        CHECK_MSG(s.screenSource->effects().newestSequence() != 0, "the newly bootstrapped human's clipboard write did not reach its recipient");
     }
     {
         using namespace Ubiquitty::Protocol::Sync;
@@ -1353,10 +1356,44 @@ int main()
         A::publish(d, s);
         A::deliver(d, s);
         CHECK_MSG(s.screenSource->effects().newestSequence() != 0, "the SSH stream client's clipboard write did not reach its recipient");
+        const auto firstEffect = s.screenSource->effects().newestSequence();
+        const std::string bridgeGrant = A::grantKey(d, first);
+        A::depart(d, first);
         const auto second = A::addSSHPhone(d, 1, secondPeer, { 233, 234 });
-        CHECK(A::grantKey(d, first) == A::grantKey(d, second));
+        CHECK(bridgeGrant == A::grantKey(d, second));
         A::typed(d, s, second);
-        CHECK_MSG(s.hasMultipleInputPrincipals, "two SSH stream clients were attributed to one bridge process");
+        CHECK_MSG(!s.hasMultipleInputPrincipals, "the SSH bridge's authenticated account changed across a new bootstrap");
+        stream->pushInbound("\033]52;c;c2Vjb25k\a");
+        A::service(d, s);
+        A::publish(d, s);
+        A::deliver(d, s);
+        CHECK_MSG(s.screenSource->effects().newestSequence() > firstEffect,
+            "the new SSH bridge's clipboard write did not reach its recipient");
+    }
+    {
+        Ubiquitty::PAL::UnixFileDescriptor sshPeer, quicPeer;
+        Daemon d;
+        A::setSocketPath(d, std::string(directory) + "/socket");
+        StreamDouble* stream = nullptr;
+        auto& s = A::addSession(d, 1, &stream);
+        const auto ssh = A::addSSHPhone(d, 1, sshPeer, { 237, 238 });
+        A::typed(d, s, ssh);
+        A::depart(d, ssh);
+        const auto quic = A::addAskingPhone(d, 1, quicPeer, { 239, 240 }, "next-carrier-token");
+        A::typed(d, s, quic);
+        CHECK_MSG(!s.hasMultipleInputPrincipals, "switching one authenticated account from SSH to QUIC made a second principal");
+    }
+    {
+        Ubiquitty::PAL::UnixFileDescriptor phonePeer, agentPeer;
+        Daemon d;
+        A::setSocketPath(d, std::string(directory) + "/socket");
+        StreamDouble* stream = nullptr;
+        auto& s = A::addSession(d, 1, &stream);
+        const auto phone = A::addPhone(d, 1, phonePeer, { 235, 236 });
+        const auto agent = A::addAgent(d, 1, agentPeer);
+        A::typed(d, s, phone);
+        A::typed(d, s, agent);
+        CHECK_MSG(s.hasMultipleInputPrincipals, "agent input was attributed to the human account");
     }
     {
         Ubiquitty::PAL::UnixFileDescriptor agentPeer;

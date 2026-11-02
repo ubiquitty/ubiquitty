@@ -89,7 +89,7 @@ struct PastePushAccess {
         const auto* attachment = d.m_clients[index].syncConnection->attachment();
         if (!attachment)
             std::abort();
-        return "attachment:" + Protocol::Sync::formatID128(attachment->attachmentID);
+        return "human-account:" + std::to_string(::geteuid());
     }
 
     static std::optional<std::string> firstInputPrincipal(const Daemon& d, std::uint32_t sessionID)
@@ -1240,7 +1240,7 @@ int main()
         const auto firstPrincipal = A::grantKey(daemon, 0);
         const auto secondPrincipal = A::grantKey(daemon, 1);
         check(!firstPrincipal.empty() && !secondPrincipal.empty() && firstPrincipal != secondPrincipal,
-            "the admitted paste clients hold different verified principals");
+            "the admitted paste clients hold different token grant identities");
         const auto firstInputPrincipal = A::inputPrincipal(daemon, 0);
         check(!A::firstInputPrincipal(daemon, 7) && !A::hasMultipleInputPrincipals(daemon, 7),
             "attachment does not record input provenance");
@@ -1268,8 +1268,8 @@ int main()
             "the other principal's upload lands");
         check(!different.path.empty() && stream->written == first.path + repeated.path + different.path,
             "the different principal's path reaches the same PTY");
-        check(A::firstInputPrincipal(daemon, 7) == firstInputPrincipal && A::hasMultipleInputPrincipals(daemon, 7),
-            "a successful paste from another principal makes input history ambiguous");
+        check(A::firstInputPrincipal(daemon, 7) == firstInputPrincipal && !A::hasMultipleInputPrincipals(daemon, 7),
+            "a paste from the same authenticated account keeps input history unambiguous");
 
         A::feedPush(daemon, 0, pngPush(81));
         Control::PastePushReply returning {};
@@ -1277,8 +1277,8 @@ int main()
             "the first principal can paste again");
         check(!returning.path.empty() && stream->written == first.path + repeated.path + different.path + returning.path,
             "the returning principal's paste also reaches the PTY");
-        check(A::firstInputPrincipal(daemon, 7) == firstInputPrincipal && A::hasMultipleInputPrincipals(daemon, 7),
-            "later input cannot erase earlier principal ambiguity");
+        check(A::firstInputPrincipal(daemon, 7) == firstInputPrincipal && !A::hasMultipleInputPrincipals(daemon, 7),
+            "later input from the same account keeps its input principal");
     }
 
     // (h) the landed file does not outlive the session. The path is typed to

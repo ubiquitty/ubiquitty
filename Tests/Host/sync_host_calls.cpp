@@ -225,16 +225,14 @@ void checkClearInputProvenance()
         Ubiquitty::processBytes(session.term.get(), "\033[?1049h");
         Caller first(daemon, session.id, { Sync::Scope::Observe, Sync::Scope::Drive }, "clear-first-principal");
         Screen::markInteractiveUser(daemon, first.index);
+        Screen::markBootstrapToken(daemon, first.index);
         first.greet();
         CHECK(first.isAttached() && first.role() == Sync::Role::Driver);
         const std::array<std::uint8_t, 1> input { 'x' };
         CHECK(first.client.sendRaw(input).has_value());
         Screen::deliver(daemon, first.index, first.client);
         CHECK(writer->written == "x");
-        const auto* attachment = Screen::connection(daemon, first.index)->attachment();
-        CHECK(attachment);
-        if (attachment)
-            CHECK(session.firstInputPrincipal == "attachment:" + Sync::formatID128(attachment->attachmentID));
+        CHECK(session.firstInputPrincipal == "human-account:" + std::to_string(::geteuid()));
         CHECK(!session.hasMultipleInputPrincipals);
         const auto firstPrincipal = session.firstInputPrincipal;
         writer->written.clear();
@@ -245,6 +243,7 @@ void checkClearInputProvenance()
         Screen::grantScope(daemon, secondIndex, { Sync::Scope::Observe, Sync::Scope::Drive });
         Screen::setTokenID(daemon, secondIndex, "clear-second-principal");
         Screen::markInteractiveUser(daemon, secondIndex);
+        Screen::markBootstrapToken(daemon, secondIndex);
         UbiquittyTest::ScreenClient second(24, 80, Sync::ID128 { 31, 32 });
         Screen::greet(daemon, secondIndex, second);
         CHECK(Screen::connection(daemon, secondIndex)->state() == Sync::ConnectionState::Attached);
@@ -263,8 +262,8 @@ void checkClearInputProvenance()
         const bool shouldRedraw = command != "scrollback";
         CHECK(writer->written == (shouldRedraw ? "\x0c" : ""));
         CHECK(session.firstInputPrincipal == firstPrincipal);
-        CHECK_MSG(session.hasMultipleInputPrincipals == shouldRedraw,
-            "only a clear that injects a redraw byte records the second input principal");
+        CHECK_MSG(!session.hasMultipleInputPrincipals,
+            "another bootstrap for the same account changed input provenance");
     }
 }
 

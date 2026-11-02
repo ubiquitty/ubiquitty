@@ -4739,13 +4739,15 @@ void Daemon::stampInputOrigin(Session& session, const Client& client)
     std::string inputPrincipal = grantIdentity;
     const Ubiquitty::CapabilityOrigin origin = capabilityOriginOf(client);
     const auto* attachment = client.syncConnection ? client.syncConnection->attachment() : nullptr;
-    if (origin == Ubiquitty::CapabilityOrigin::Remote && attachment
-        && attachment->authority.verifiedKind == Protocol::Sync::ClientKind::Human
+    const bool isAuthenticatedHuman = (client.hasToken && client.hasBootstrapToken && client.isInteractiveUser)
+        || (client.hasOwnerLocalCredentials && client.isRelayedFromSSH);
+    if (origin == Ubiquitty::CapabilityOrigin::Remote && attachment && isAuthenticatedHuman
+        && !isAgentClient(client) && attachment->authority.verifiedKind == Protocol::Sync::ClientKind::Human
         && attachment->servingConnection == client.clientID) {
-        // The attachment is minted by this host and continued only by its
-        // authenticated resume. A transport's grant label may change while
-        // the same person keeps that attachment.
-        inputPrincipal = "attachment:" + Protocol::Sync::formatID128(attachment->attachmentID);
+        // The uid-gated SSH bridge or its one-time interactive QUIC bootstrap
+        // proves this host account. A fresh token or attachment does not make
+        // the same account another input principal.
+        inputPrincipal = "human-account:" + std::to_string(::geteuid());
     }
     const bool wasAmbiguous = session.hasMultipleInputPrincipals;
     if (!session.firstInputPrincipal)

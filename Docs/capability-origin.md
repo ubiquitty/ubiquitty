@@ -156,14 +156,17 @@ question would apply none of the effects it holds.
 
 ## Input and program output
 
-`Daemon::stampInputOrigin` records the input driver and its origin. For a
-remote human, it records the host-minted attachment identity as the input
-principal. An authenticated resume keeps that identity; another attachment
-is a second input principal, even when both arrive through the same SSH
-bridge or token grant. A local agent retains its grant key as its input
-principal. The session's capability policy separately receives
-`grantKeyFor(client)` for consent decisions. Input is encoded against the
-host's current terminal modes.
+`Daemon::stampInputOrigin` records the input driver and its origin. An
+interactive human admitted through the uid-gated SSH bridge, or through a
+one-time QUIC token that bridge minted for the human, has the host account as
+its input principal. A new bootstrap or resumed attachment for that account
+keeps the same principal. Agent and control token identities remain distinct;
+agent input alongside human input makes the session ambiguous and withholds
+host-escaping grants. Two clients admitted as the same host account share that
+account's authority, but the clipboard recipient is still the human client
+that typed last. A local agent retains its grant key as its input principal.
+The session's capability policy separately receives `grantKeyFor(client)` for
+consent decisions. Input is encoded against the host's current terminal modes.
 
 Before parsing PTY output, `Daemon::servicePTY` uses the most restrictive
 origin of the session's attached, live clients with Drive scope. Observe-only
