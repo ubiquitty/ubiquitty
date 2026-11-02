@@ -97,6 +97,10 @@ struct HardResetPersistentState {
     decltype(Ubiquitty::Terminal::answerback) answerback;
     bool isAnswerbackConcealed = false;
     Ubiquitty::Unicode::Encoding inputEncoding;
+    // Set for the length of a UTF-8 parse, which a reset partway through it
+    // does not end: the bytes after RIS in the same write are still UTF-8, so
+    // a raw C1 byte among them is a stray byte rather than a control.
+    bool isParserInputUTF8;
     Ubiquitty::Unicode::InvalidUTF8Policy invalidUTF8Policy;
     VT::Emulation emulation;
     bool passwordDetect;
@@ -271,6 +275,7 @@ HardResetPersistentState takeHardResetPersistentState(Ubiquitty::Terminal& term)
     state.answerback = term.answerback;
     state.isAnswerbackConcealed = term.isAnswerbackConcealed;
     state.inputEncoding = term.parser.inputEncoding.enc;
+    state.isParserInputUTF8 = term.parser.parserInputIsUTF8;
     state.invalidUTF8Policy = term.parser.invalidUTF8Policy;
     state.emulation = term.emulation;
     state.passwordDetect = term.passwordDetect;
@@ -405,6 +410,7 @@ void restoreHardResetPersistentState(Ubiquitty::Terminal& term, HardResetPersist
     term.answerback = state.answerback;
     term.isAnswerbackConcealed = state.isAnswerbackConcealed;
     Modes::setInputEncoding(&term, state.inputEncoding);
+    term.parser.parserInputIsUTF8 = state.isParserInputUTF8;
     Modes::setInvalidUTF8Policy(&term, state.invalidUTF8Policy);
     Modes::setEmulation(&term, state.emulation);
     setPasswordDetect(&term, state.passwordDetect);

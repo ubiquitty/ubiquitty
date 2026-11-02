@@ -13,6 +13,8 @@
 
 #include "VT100Fixture.h"
 
+#include <string_view>
+
 // DEL between ESC and its final byte leaves the sequence waiting for the final.
 TEST(testDeleteBeforeTheFinalByteIsIgnored)
 {
@@ -92,6 +94,27 @@ TEST(testARawC1ByteIsNotNextLine)
             "C");
     CHECK(t.screens.active->cursorY == 0);
     CHECK(cell(t, 0, 2)->codePoint == 0xFFFD);
+}
+
+// A full reset partway through a write leaves the rest of the write UTF-8: a
+// raw 0x9D after RIS is a stray byte, substituted like any other, not an OSC
+// introducer that swallows what follows it. The write is split two ways because
+// the next write starts UTF-8 afresh, which is how the two ever disagreed.
+TEST(testARawC1ByteAfterAResetInTheSameWriteIsNotAControl)
+{
+    const std::string_view bytes = "\x1B"
+                                   "c\x9D"
+                                   "o?";
+    for (const std::size_t chunk : { bytes.size(), std::size_t { 1 } }) {
+        Ubiquitty::Terminal t;
+        Ubiquitty::hardReset(t);
+        for (std::size_t offset = 0; offset < bytes.size(); offset += chunk)
+            Ubiquitty::processBytes(&t, bytes.substr(offset, chunk));
+        CHECK(cell(t, 0, 0)->codePoint == 0xFFFD);
+        CHECK(cell(t, 0, 1)->codePoint == 'o');
+        CHECK(cell(t, 0, 2)->codePoint == '?');
+        CHECK(t.screens.active->cursorX == 3);
+    }
 }
 
 // The other C1 code points stay ignored: U+009B is not CSI and U+0084 is not IND.
