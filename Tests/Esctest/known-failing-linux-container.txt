@@ -1,0 +1,35 @@
+# esctest2 cases that fail on the GTK frontend under Xvfb, as a SET.
+#
+# Produced by Scripts/run-esctest-linux.sh. A case here that PASSES is a fix
+# whose baseline entry has to go, and a case not here that fails is a
+# regression — the second rule is what stops this rotting into an allowlist.
+#
+# Compared against Tests/Esctest/known-failing-macos-local.txt, the five
+# non-XTWINOPS entries are the SAME five. That is the parity claim in its
+# strongest available form: one Core, two frontends, the same conformance
+# verdict on everything that is not the window manager's.
+#
+# `?` marks a case whose verdict moves with the environment rather than with
+# the code, so it is not a regression when it flips.
+
+# ---- shared with macOS, byte for byte ----
+BSTests.test_BS_InitialReverseWraparound
+DECRQMTests.test_DECRQM_DEC_DECARM
+DECRQMTests.test_DECRQM_DEC_DECNCSM
+DECSETTests.test_DECSET_DECNCSM
+ResetSpecialColorTests.test_ResetSpecialColor_Dynamic
+
+# ---- the window manager's, and there is none under Xvfb ----
+# Xvfb is a display without a window manager, so a request to iconify or move a
+# window is accepted and never performed: the report reads Point(x=0, y=0) for
+# a window that was asked to sit at (1, 1). Running these against a session with
+# a real WM is the only way to learn anything about the frontend from them,
+# which is why they are marked as environment-dependent rather than as defects.
+?XtermWinopsTests.test_XtermWinops_IconifyDeiconfiy
+?XtermWinopsTests.test_XtermWinops_MoveToXY
+?XtermWinopsTests.test_XtermWinops_MoveToXY_Defaults
+
+# The macOS baseline lists Fullscreen, MaximizeWindow and the ResizeChars family
+# as failing; they PASS here. Under Xvfb a maximize has no screen furniture to
+# contend with, so the geometry it reports back is the one it was asked for.
+# Not evidence the GTK frontend implements them better.

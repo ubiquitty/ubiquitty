@@ -1,0 +1,96 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<meta charset="utf-8">
+<title>A scaled proportional run is the face at size</title>
+<body>
+<pre id="verdict">running</pre>
+<script type="module">
+import createModule from './ubiquitty.js';
+
+// A proportional run drawn past its size — at an OSC 66 scale, on a DECDHL
+// pair — is the browser's proportional face at the multiplied size: its letter
+// is the letter of a plain run at that font size, within antialiasing, and not
+// the plain run's letter at its own size magnified, by nearest neighbour or a
+// linear filter, which this probe checks it would have caught.
+const verdict = document.getElementById('verdict');
+try {
+  const module = await createModule();
+  module.ubiquittyFontFamily = 'monospace';
+  const call = (name, result = 'number', parameters = []) => module.cwrap(`ubiquittyWeb${name}`, result, parameters);
+  // The white-on-black coverage of one rendered screen, its ink found.
+  const render = (text, fontSize, rows, columns) => {
+    call('Create', null, ['number', 'number', 'number'])(rows, columns, 1);
+    call('SetDrawsSizedText', null, ['number'])(1);
+    call('SetDrawsProportionalText', null, ['number'])(1);
+    const fed = '\x1b[?25l\x1b[97;40m\x1b[2J\x1b[H' + text;
+    call('Feed', null, ['string', 'number'])(fed, new TextEncoder().encode(fed).length);
+    call('SetFontSize', null, ['number'])(fontSize);
+    const base = call('Render')();
+    const width = call('ImageWidth')();
+    const height = call('ImageHeight')();
+    const pixels = module.HEAPU8.slice(base, base + width * height * 4);
+    const background = pixels[((height - 1) * width + width - 1) * 4 + 1];
+    const plane = { width, height, coverage: new Uint8Array(width * height) };
+    for (let index = 0; index < width * height; ++index)
+      plane.coverage[index] = Math.max(0, Math.min(255, pixels[index * 4 + 1] - background));
+    return withInk(plane);
+  };
+  const withInk = (plane) => {
+    let left = plane.width, top = plane.height, right = -1, bottom = -1;
+    for (let y = 0; y < plane.height; ++y)
+      for (let x = 0; x < plane.width; ++x)
+        if (plane.coverage[y * plane.width + x] >= 8) {
+          left = Math.min(left, x); top = Math.min(top, y); right = Math.max(right, x); bottom = Math.max(bottom, y);
+        }
+    return Object.assign(plane, { left, top, right, bottom });
+  };
+  const at = (plane, x, y) => x < 0 || y < 0 || x >= plane.width || y >= plane.height ? 0 : plane.coverage[y * plane.width + x];
+  const meanDifference = (a, b) => {
+    const width = Math.max(a.right - a.left, b.right - b.left) + 1;
+    const height = Math.max(a.bottom - a.top, b.bottom - b.top) + 1;
+    let total = 0;
+    for (let y = 0; y < height; ++y)
+      for (let x = 0; x < width; ++x)
+        total += Math.abs(at(a, a.left + x, a.top + y) - at(b, b.left + x, b.top + y));
+    return total / (width * height);
+  };
+  const magnified = (small, factor, isFiltered) => {
+    const plane = { width: small.width * factor, height: small.height * factor };
+    plane.coverage = new Uint8Array(plane.width * plane.height);
+    for (let y = 0; y < plane.height; ++y)
+      for (let x = 0; x < plane.width; ++x) {
+        if (!isFiltered) {
+          plane.coverage[y * plane.width + x] = at(small, Math.floor(x / factor), Math.floor(y / factor));
+          continue;
+        }
+        const sx = (x + 0.5) / factor - 0.5, sy = (y + 0.5) / factor - 0.5;
+        const l = Math.floor(sx), t = Math.floor(sy), fx = sx - l, fy = sy - t;
+        plane.coverage[y * plane.width + x] = Math.round((1 - fy) * ((1 - fx) * at(small, l, t) + fx * at(small, l + 1, t))
+          + fy * ((1 - fx) * at(small, l, t + 1) + fx * at(small, l + 1, t + 1)));
+      }
+    return withInk(plane);
+  };
+  const run = (keys, letter) => `\x1b]66;p=1:c=3${keys};${letter}\x07`;
+  const fontSize = 16;
+  const tolerance = 10;
+  const results = [];
+  for (const letter of ['o', 'g']) {
+    const small = render(run('', letter), fontSize, 4, 12);
+    for (const scene of [{ name: 's=2', factor: 2, text: run(':s=2', letter) }, { name: 's=3', factor: 3, text: run(':s=3', letter) },
+      { name: 'DECDHL', factor: 2, text: '\x1b#3' + run('', letter) + '\r\n\x1b#4' + run('', letter) }]) {
+      const scaled = render(scene.text, fontSize, 4, 12);
+      const reference = render(run('', letter), fontSize * scene.factor, 4, 12);
+      const atSize = meanDifference(scaled, reference);
+      const stretched = meanDifference(magnified(small, scene.factor, false), reference);
+      const filtered = meanDifference(magnified(small, scene.factor, true), reference);
+      results.push({ letter, scene: scene.name, atSize: +atSize.toFixed(2), stretched: +stretched.toFixed(2), filtered: +filtered.toFixed(2),
+        isAtSize: atSize <= tolerance && stretched > tolerance && filtered > tolerance });
+    }
+  }
+  verdict.textContent = JSON.stringify({ verdict: results.every(result => result.isAtSize) ? 'MATCH' : 'DIFFER', results });
+} catch (error) {
+  verdict.textContent = `ERROR ${String(error).replaceAll('\n', ' ')}`;
+}
+</script>

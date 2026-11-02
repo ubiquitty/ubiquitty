@@ -1,0 +1,43 @@
+# Which selection-bounds entry point each frontend resolves through.
+#
+# Scripts/check-selection-bounds-callers.py measures the tree against this file:
+#
+#   a file whose entry point changed   -> FAIL, the record and the code disagree
+#   a file whose call count changed    -> FAIL, a site appeared or left
+#   a call site in an unlisted file    -> FAIL, a frontend defaulted silently
+#   the sets match                     -> pass, and say so
+#
+# The rule this exists for: `getBounds` and `getBoundsWide` differ by a whole
+# cell on a wide glyph, and a call reads the same whether that difference was
+# chosen or omitted. Nothing else in the tree tells them apart, so the reason
+# lives here beside the measurement.
+#
+#   getBoundsWide   with an attributesAt, snaps an anchor to a wide glyph's
+#                   leading half, and expands the trailing edge across its
+#                   continuation in word mode (Selection.h).
+#   getBounds       takes no attributesAt and does neither (Selection.h).
+#
+# What the difference costs, measured rather than described:
+# Tests/Core/Selection/test_selectiontext.cpp pins that a bound anchored on a
+# continuation half drops that glyph from the copied text entirely — the
+# continuation repeats the lead's code point and the walk skips it, so the
+# character is absent rather than clipped. Six bytes become three on 世界.
+#
+# --------------------------------------------------------------------------
+# WIDE-AWARE. Every site, which is the whole set. An anchor on a continuation
+# half snaps to the glyph's lead before the bounds are resolved.
+# --------------------------------------------------------------------------
+Source/Platform/Linux/Accessibility.cpp  getBoundsWide  1
+
+# --------------------------------------------------------------------------
+# Snapping is the policy at every site. A window that highlights a CJK
+# character through the wide entry and copies it through the plain one pastes
+# without it, and the two calls read alike, so only a count of the sites shows
+# the split. A frontend that holds `Attribute::WideContinuation` in its cells
+# and does not pass it is a wiring omission with the shape of a decision; a
+# site that passes `nullptr` for attributesAt cannot snap at all.
+#
+# The file stays with one section rather than being deleted. A new frontend
+# reaches for the shorter name, and nothing else in the tree reports that it has
+# taken the unsnapped path.
+# --------------------------------------------------------------------------

@@ -1,0 +1,184 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8" />
+<title>Browser renderer feature regression</title>
+<style>
+    body {
+        background: #1d1f22;
+        color: #c5c8ce;
+        font: 13px system-ui;
+    }
+    iframe {
+        width: 960px;
+        height: 650px;
+        border: 1px solid #555;
+    }
+    pre {
+        white-space: pre-wrap;
+    }
+</style>
+<pre id="verdict">running</pre>
+<iframe src="./index.html?font=Menlo&size=14"></iframe>
+<script type="module">
+    const verdict = document.getElementById('verdict'),
+        frame = document.querySelector('iframe');
+    await new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
+    try {
+        const api = await frame.contentWindow.ubiquitty.ready;
+        const nerdDraws = [];
+        const proto = frame.contentWindow.CanvasRenderingContext2D.prototype,
+            original = proto.fillText;
+        proto.fillText = function (text, ...args) {
+            if (text.codePointAt(0) >= 0xe000 && text.codePointAt(0) < 0x100000)
+                nerdDraws.push({ text, font: this.font, canvas: [this.canvas.width, this.canvas.height] });
+            return original.call(this, text, ...args);
+        };
+        api.feed(
+            '\x1b[2J\x1b[H\x1b[?25lKitty, Nerd Fonts, joined brackets and styled blocks\r\n\x1b_Ga=T,f=24,s=1,v=1,c=4,r=2;/wAA\x1b\\',
+        );
+        api.feed('\x1b[5;1H\ue5fa \ue700 \uea60 \uf013 \uf101 ' + String.fromCodePoint(0xf0001) + '\r\n');
+        const brackets = ['⎛ ⎡ ⎧ ⌠ ⏐ ⹙ ⎲', '⎜ ⎢ ⎪ ⎮ ⏐ ⹛ ⎳', '⎜ ⎢ ⎨ ⎮ ⏐', '⎜ ⎢ ⎪ ⎮ ⏐', '⎝ ⎣ ⎩ ⌡ ⏐'];
+        api.feed('\x1b[7;1H' + brackets.join('\r\n'));
+        const rtf =
+            '{\\rtf1{\\fonttbl{\\f0\\fswiss sans-serif;}{\\f1\\fmodern Menlo;}}{\\colortbl;\\red160\\green210\\blue170;}\\f0\\fs32 A styled paragraph with \\b bold\\b0 , \\i italic\\i0  and \\ul underlined\\ulnone  words.\\par\\cf1 Colored text\\cf0  wraps using native browser shaping. \\f1\\fs24 Monospace: fn(value)\\par\\f0\\fs32 Unicode: café and אבג}';
+        api.feed('\x1b[14;1H\x1b]7404;a=p:i=1:w=60:h=10;' + rtf + '\x1b\\');
+        const doc = frame.contentDocument;
+        const rich = doc.querySelector('#screen-viewport').lastElementChild;
+        const texts = [...rich.querySelectorAll('span')].map((node) => node.textContent).join('');
+        if (!texts.includes('styled paragraph') || !texts.includes('Colored text'))
+            throw new Error('Rich text layer did not render its source');
+        const canvas = doc.querySelector('#screen');
+        const capture = document.createElement('canvas');
+        capture.width = canvas.width;
+        capture.height = canvas.height;
+        const context = capture.getContext('2d');
+        context.drawImage(canvas, 0, 0);
+        const pixels = context.getImageData(0, 0, capture.width, capture.height).data;
+        let red = 0;
+        for (let at = 0; at < pixels.length; at += 4)
+            if (pixels[at] > 245 && pixels[at + 1] < 10 && pixels[at + 2] < 10) red++;
+        if (!red) throw new Error('Kitty image is absent from the canonical page');
+        const grid = api.capture().rows;
+        const cellWidth = canvas.width / grid[0].length,
+            cellHeight = canvas.height / grid.length;
+        const joins = [];
+        for (let column = 0; column < 7; column++) {
+            let joined = true;
+            const seams = column < 5 ? [7, 8, 9, 10] : [7];
+            for (const row of seams) {
+                const y = Math.round(row * cellHeight);
+                let sharedInk = false;
+                for (
+                    let x = Math.round(column * 2 * cellWidth);
+                    x < Math.round((column * 2 + 1) * cellWidth);
+                    x++
+                ) {
+                    if (
+                        pixels[((y - 1) * canvas.width + x) * 4] > 100 &&
+                        pixels[(y * canvas.width + x) * 4] > 100
+                    )
+                        sharedInk = true;
+                }
+                joined &&= sharedInk;
+            }
+            joins.push(joined);
+        }
+        if (joins.some((value) => !value))
+            throw new Error('A bracket stem does not join at its cell seam: ' + joins);
+        api.feed('\x1b_Ga=d,d=A\x1b\\');
+        context.drawImage(canvas, 0, 0);
+        const withoutImage = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        for (let at = 0; at < withoutImage.length; at += 4)
+            if (withoutImage[at] > 245 && withoutImage[at + 1] < 10 && withoutImage[at + 2] < 10)
+                throw new Error('CPU image pixels survived the return to the GPU renderer');
+        api.feed('\x1b[2;1H\x1b_Ga=T,f=24,s=1,v=1,c=4,r=2;/wAA\x1b\\');
+        const icons = nerdDraws.filter((draw) => draw.canvas[0] !== 48);
+        if (icons.length !== 6 || icons.some((draw) => !draw.font.includes('Symbols Nerd Font Mono')))
+            throw new Error('Private-use glyphs did not reach the bundled Nerd Font');
+        const automatic = [...rich.querySelectorAll('span')].find((node) =>
+            node.textContent.includes('wraps using'),
+        );
+        if (frame.contentWindow.getComputedStyle(automatic).color === 'rgb(160, 210, 170)')
+            throw new Error('RTF automatic color inherited the preceding explicit color');
+        const oldLine = [...rich.querySelectorAll('span')].find((node) =>
+            node.textContent.includes('A styled paragraph'),
+        );
+        api.repaint();
+        api.repaint();
+        if (![...rich.querySelectorAll('span')].includes(oldLine))
+            throw new Error('Idle frames rebuilt retained rich text');
+        await api.configure({
+            fontFamily: 'Menlo',
+            preferences: {
+                'font.proportional_family': 'Georgia',
+                'font.proportional_size': 18,
+                'underline.thickness': 2,
+            },
+        });
+        const changed = [...rich.querySelectorAll('span')].find((node) =>
+            node.textContent.includes('A styled paragraph'),
+        );
+        if (!frame.contentWindow.getComputedStyle(changed).fontFamily.includes('Georgia'))
+            throw new Error('Proportional font setting did not update existing rich text');
+        await api.configure({
+            fontFamily: 'Menlo',
+            preferences: {
+                'font.proportional_family': '',
+                'font.proportional_size': 0,
+                'underline.thickness': 1,
+            },
+        });
+        proto.fillText = original;
+        const eventOnce = (name) =>
+            new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${name}`)), 5000);
+                canvas.addEventListener(
+                    name,
+                    () => {
+                        clearTimeout(timer);
+                        resolve();
+                    },
+                    { once: true },
+                );
+            });
+        for (let cycle = 0; cycle < 3; cycle++) {
+            const lost = eventOnce('webglcontextlost');
+            const restored = eventOnce('webglcontextrestored');
+            api.setVisible(false);
+            if (cycle === 1) api.setVisible(true);
+            await lost;
+            if (cycle !== 1) api.setVisible(true);
+            await restored;
+            api.repaint();
+            context.drawImage(canvas, 0, 0);
+            const restoredPixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let restoredRed = 0;
+            for (let at = 0; at < restoredPixels.length; at += 4)
+                if (restoredPixels[at] > 245 && restoredPixels[at + 1] < 10 && restoredPixels[at + 2] < 10)
+                    restoredRed++;
+            if (restoredRed !== red) throw new Error('Context restoration lost Kitty pixels');
+        }
+        // The first normal GPU frame after restoring must also upload every atlas.
+        api.feed('\x1b_Ga=d,d=A\x1b\\');
+        context.drawImage(canvas, 0, 0);
+        const restoredText = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let textPixels = 0;
+        for (let at = 0; at < canvas.width * Math.round(cellHeight) * 4; at += 4)
+            if (restoredText[at] > 100) textPixels++;
+        if (textPixels < 100) throw new Error('Context restoration left the text atlas empty');
+        verdict.textContent = JSON.stringify({
+            verdict: 'PASS',
+            kittyPixels: red,
+            nerdIcons: icons.length,
+            retainedText: true,
+            proportionalSettings: true,
+            bracketJoins: joins,
+            gpuRoundTrip: true,
+            contextRestorations: 3,
+            canvas: [canvas.width, canvas.height],
+        });
+    } catch (error) {
+        verdict.textContent = 'ERROR ' + error.message + '\n' + error.stack;
+    }
+</script>

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleURLTypes</key>
+    <array><dict>
+        <key>CFBundleURLName</key><string>Ubiquitty Session</string>
+        <key>CFBundleURLSchemes</key><array><string>ubiquitty</string></array>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+    </dict></array>
+	<key>ATSApplicationFontsPath</key>
+	<string>fonts</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+	<key>CFBundleIdentifier</key>
+	<string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+	<key>CFBundleDisplayName</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+	<key>CFBundleVersion</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Stanislav Yaglo. Licensed under Apache-2.0.</string>
+	<key>UBBuildIdentity</key>
+	<string>@UBIQUITTY_BUILD_BADGE_PLIST@</string>
+	<key>CFBundleSignature</key>
+	<string>UBRM</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>@UBIQUITTY_MACOS_APP_MIN@</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSAppleScriptEnabled</key>
+	<true/>
+	<key>OSAScriptingDefinition</key>
+	<string>Ubiquitty.sdef</string>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>CFBundleIconName</key>
+	<string>Ubiquitty</string>
+	<key>CFBundleIconFile</key>
+	<string>Ubiquitty</string>
+	<!-- The app sets Sparkle's schedule from [updates] check_automatically.
+	     SUEnableAutomaticChecks is present so Sparkle treats its own question
+	     about automatic checks as answered and never asks it; checks are a day
+	     apart; and no update downloads or installs without the person. -->
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string>https://updates.ubiquitty.org/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>cvJzfgUXCUSWaRlAYb4dLdQB+W41mk4eOIfbEwhrA1A=</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.ubiquitty.tag-rule-reorder</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

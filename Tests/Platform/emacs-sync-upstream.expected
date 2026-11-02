@@ -1,0 +1,63 @@
+Greet version=1 viewport=80x24 focused=1 historyCacheLines=0 capabilities=72 resume=0 welcomed=1
+Facts viewport=80x24 pixels=0 refresh=0 link=0 power=0 focused=1 palette=1 ansi15=eaeaededf2f2 cursor=e0e0e4e4ecec ansi1=dddd71717a7a foreground=c8c8ccccd4d4 background=151517171c1c baselineSame=1
+View pane=1 state=0
+Viewport pane=1 viewport=80x24 cellPixels=0x0 textAreaPixels=0x0 drawablePixels=0x0
+Raw pane=1 seq=1 bytes=l
+Ack
+Ack
+Raw pane=1 seq=2 bytes=s
+Keys pane=1 seq=3 key=1 modifiers=0 writes=\x0D applicationCursor=\x0D
+Keys pane=1 seq=4 key=10 modifiers=0 writes=\x1B[A applicationCursor=\x1BOA
+Keys pane=1 seq=5 key=5 modifiers=0 writes=\x1B[3~ applicationCursor=\x1B[3~
+Keys pane=1 seq=6 key=4 modifiers=0 writes=\x7F applicationCursor=\x7F
+Keys pane=1 seq=7 key=4 modifiers=0 writes=\x7F applicationCursor=\x7F
+Keys pane=1 seq=8 key=3 modifiers=0 writes=\x09 applicationCursor=\x09
+Keys pane=1 seq=9 key=12 modifiers=0 writes=\x1B[H applicationCursor=\x1BOH
+Keys pane=1 seq=10 key=13 modifiers=0 writes=\x1B[F applicationCursor=\x1BOF
+Keys pane=1 seq=11 key=14 modifiers=0 writes=\x1B[5~ applicationCursor=\x1B[5~
+Keys pane=1 seq=12 key=15 modifiers=0 writes=\x1B[6~ applicationCursor=\x1B[6~
+Keys pane=1 seq=13 key=1 modifiers=0 writes=\x0D applicationCursor=\x0D
+Keys pane=1 seq=14 key=8 modifiers=0 writes=\x1B[D applicationCursor=\x1BOD
+Keys pane=1 seq=15 key=9 modifiers=0 writes=\x1B[C applicationCursor=\x1BOC
+Keys pane=1 seq=16 key=11 modifiers=0 writes=\x1B[B applicationCursor=\x1BOB
+Keys pane=1 seq=17 key=10 modifiers=1 writes=\x1B[1;2A applicationCursor=\x1B[1;2A
+Keys pane=1 seq=18 key=6 modifiers=0 writes=\x1B applicationCursor=\x1B
+Raw pane=1 seq=19 bytes=\x1Bb
+Pointer pane=1 seq=20 kind=0 button=0 row=2 column=5 writes=\x1B[<0;6;3M
+Pointer pane=1 seq=21 kind=1 button=0 row=2 column=5 writes=\x1B[<0;6;3m
+Pointer pane=1 seq=22 kind=0 button=65 row=2 column=5 writes=\x1B[<65;6;3M
+Paste pane=1 seq=23 offset=0 state=0 bytes=8192 first=pppppppp
+Paste pane=1 seq=23 offset=8192 state=0 bytes=8192 first=pppppppp
+Raw pane=1 seq=24 bytes=x
+Ack
+Ack
+Paste pane=1 seq=23 offset=16384 state=1 bytes=3616 first=pppppppp
+Ack
+Paste pane=1 seq=25 offset=0 state=1 bytes=2 first=\xC3\xA9
+Paste pane=1 seq=26 offset=0 state=0 bytes=8192 first=qqqqqqqq
+Paste pane=1 seq=26 offset=8192 state=0 bytes=8192 first=qqqqqqqq
+Raw pane=1 seq=27 bytes=y
+Ack
+Ack
+Ack
+Paste pane=1 seq=28 offset=0 state=0 bytes=8192 first=rrrrrrrr
+Paste pane=1 seq=28 offset=8192 state=0 bytes=8192 first=rrrrrrrr
+PasteAbort pane=1 seq=28
+Raw pane=1 seq=29 bytes=\x03
+Paste pane=1 seq=30 offset=0 state=0 bytes=8192 first=ssssssss
+Paste pane=1 seq=30 offset=8192 state=0 bytes=8192 first=ssssssss
+Raw pane=1 seq=31 bytes=\x03
+Raw pane=1 seq=32 bytes=\x07x
+PasteAbort pane=1 seq=30
+Raw pane=1 seq=33 bytes=\x07
+Raw pane=1 seq=34 bytes=\x07
+Facts viewport=80x24 pixels=0 refresh=0 link=0 power=0 focused=0 palette=1 ansi15=eaeaededf2f2 cursor=e0e0e4e4ecec ansi1=dddd71717a7a foreground=c8c8ccccd4d4 background=151517171c1c baselineSame=1
+Focus pane=1 focused=0
+Facts viewport=100x30 pixels=0 refresh=0 link=0 power=0 focused=0 palette=1 ansi15=eaeaededf2f2 cursor=e0e0e4e4ecec ansi1=dddd71717a7a foreground=c8c8ccccd4d4 background=151517171c1c baselineSame=1
+Viewport pane=1 viewport=100x30 cellPixels=0x0 textAreaPixels=0x0 drawablePixels=0x0
+Facts viewport=100x30 pixels=0 refresh=0 link=0 power=0 focused=0 palette=0
+Ack
+Ack
+Raw pane=1 seq=35 bytes=4096 first=zzzzzzzz
+Raw pane=1 seq=36 bytes=904 first=zzzzzzzz
+Ack

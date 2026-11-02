@@ -1,0 +1,109 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8" />
+<title>Native font catalog regression</title>
+<p>This optional test requests local font access only when its button is pressed.</p>
+<button id="allow-fonts" disabled>Test local font access</button>
+<pre id="verdict">running</pre>
+<script type="module">
+    import createModule from './ubiquitty.js';
+    import { loadTerminalFonts } from './fonts.js';
+    import { RichTextRenderer } from './rich-text.js';
+
+    const verdict = document.getElementById('verdict');
+    const button = document.getElementById('allow-fonts');
+    try {
+        const module = await createModule();
+        module.ubiquittyFontCoverage = await loadTerminalFonts();
+        module.ubiquittyFontFamily = 'JetBrains Mono';
+        const renderer = new RichTextRenderer(document);
+        module.ubiquittyRichText = renderer;
+        const call = (name, result = 'number', types = [], values = []) => module.ccall('ubiquittyWeb' + name, result, types, values);
+        call('Create', null, ['number', 'number', 'number'], [12, 80, 1]);
+        const feed = (text) => call('Feed', null, ['string', 'number'], [text, new TextEncoder().encode(text).length]);
+        const reply = () => {
+            const buffer = module._malloc(65536);
+            try {
+                const count = call('TakeReplies', 'number', ['number', 'number'], [buffer, 65536]);
+                return new TextDecoder().decode(module.HEAPU8.subarray(buffer, buffer + count));
+            } finally {
+                module._free(buffer);
+            }
+        };
+        const catalog = () => {
+            const families = [];
+            let epoch, total;
+            do {
+                feed(`\x1b]7404;a=f:i=1:b=${families.length}:n=255${epoch === undefined ? '' : `:E=${epoch}`};\x1b\\`);
+                const answer = reply();
+                const field = (name) => Number(answer.match(new RegExp(`:${name}=(\\d+)`))?.[1]);
+                if (!answer.includes(':s=ok;') || new TextEncoder().encode(answer).length >= 32768)
+                    throw new Error('catalog page failed or exceeded its OSC envelope');
+                if (epoch !== undefined && (field('E') !== epoch || field('t') !== total))
+                    throw new Error('catalog changed inside a pinned enumeration');
+                epoch = field('E');
+                total = field('t');
+                const payload = answer.slice(answer.lastIndexOf(';') + 1, -2);
+                const page = payload ? payload.split(',').map((name) => new TextDecoder('utf-8', { fatal: true }).decode(
+                    Uint8Array.from(name.match(/../g), (byte) => Number.parseInt(byte, 16)),
+                )) : [];
+                if (page.length !== field('n') || (!page.length && families.length < total))
+                    throw new Error('catalog page made no progress');
+                families.push(...page);
+                if (families.length === total) return { families, epoch, scope: field('F') };
+            } while (families.length < total);
+        };
+        const exposed = catalog();
+        if (exposed.scope !== 1 || !exposed.families.includes('JetBrains Mono'))
+            throw new Error('loaded page fonts were not reported as exposed scope');
+        if (!renderer.fontCatalog.canRequestSystemFonts) {
+            verdict.textContent = JSON.stringify({ verdict: 'SKIP', reason: 'Local Font Access API unavailable', exposedFamilies: exposed.families.length });
+        } else {
+            button.disabled = false;
+            button.dataset.ready = 'true';
+            button.onclick = async () => {
+                button.disabled = true;
+                try {
+                    await renderer.fontCatalog.requestSystemFonts();
+                    const system = catalog();
+                    if (system.scope !== 2 || system.epoch === exposed.epoch)
+                        throw new Error('permitted system inventory did not advance scope and epoch');
+                    if (JSON.stringify(system.families) !== JSON.stringify(renderer.fontCatalog.families))
+                        throw new Error('OSC inventory differs from the actual native enumeration');
+                    const context = document.createElement('canvas').getContext('2d');
+                    context.font = '32px sans-serif';
+                    const fallbackWidth = context.measureText('iiiiWWWW').width;
+                    const family = system.families.find((name) => {
+                        if (exposed.families.includes(name)) return false;
+                        context.font = `32px ${JSON.stringify(name)}, sans-serif`;
+                        return Math.abs(context.measureText('iiiiWWWW').width - fallbackWidth) > 1;
+                    });
+                    if (!family) throw new Error('native inventory supplied no distinguishable Latin font');
+                    const quoted = family.replace(/[\\{};]/g, '\\$&');
+                    feed(`\x1b]7404;a=p:i=3:w=80:h=6:o=c;{\\rtf1{\\fonttbl{\\f0\\fnil ${quoted};}}\\f0\\fs64 iiiiWWWW}\x1b\\`);
+                    call('BuildFrame');
+                    const frame = JSON.parse(call('RichTextFrameJSON', 'string'));
+                    const model = frame.blocks[0]?.document;
+                    if (!model || model.styles[0].name !== family) throw new Error('discovered family was not retained by RTF');
+                    const text = renderer.textElement({ ...model, families: frame.families }, 0, 8);
+                    text.element.id = 'system-font-sample';
+                    text.element.dataset.requestedFamily = family;
+                    document.body.append(text.element);
+                    const paintedWidth = text.element.getBoundingClientRect().width;
+                    const measuredWidth = Math.max(...model.clusters.map((cluster) => cluster[2] + cluster[4]));
+                    if (Math.abs(paintedWidth - measuredWidth) > 0.1 || Math.abs(paintedWidth - fallbackWidth) < 1)
+                        throw new Error('discovered system family did not shape and paint with its native metrics');
+                    verdict.textContent = JSON.stringify({
+                        verdict: 'PASS', exposedFamilies: exposed.families.length, systemFamilies: system.families.length,
+                        scope: system.scope, epochChanged: true, namedFamilyRendered: true,
+                    });
+                } catch (error) {
+                    verdict.textContent = 'ERROR ' + error.stack;
+                }
+            };
+        }
+    } catch (error) {
+        verdict.textContent = 'ERROR ' + error.stack;
+    }
+</script>

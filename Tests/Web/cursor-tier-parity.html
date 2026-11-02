@@ -1,0 +1,106 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<meta charset="utf-8">
+<title>Cursor tier GPU parity</title>
+<body>
+<pre id="verdict">running</pre>
+<script type="module">
+import { WebGLRenderer } from './webgl.js';
+import createModule from './ubiquitty.js';
+
+const verdict = document.getElementById('verdict');
+try {
+  const module = await createModule();
+  module.ubiquittyFontFamily = 'monospace';
+  const call = (name, result = 'number', parameters = []) => module.cwrap(`ubiquittyWeb${name}`, result, parameters);
+  const canvas = document.createElement('canvas');
+  document.body.appendChild(canvas);
+  const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+  if (!gl) throw new Error('No WebGL2 context');
+  const renderer = new WebGLRenderer(canvas);
+  const results = [];
+
+  // A focused block is the cursor tier: the cell re-emitted with the cursor's
+  // colours at the tail of every stream, drawn as a layer after every head.
+  // The cursor stands on a two-cell glyph, whose ink rides the pass that
+  // draws apart from the cell, and then on a Latin letter baked into its
+  // cell; both have to come out as the CPU raster draws them.
+  for (const column of [3, 6]) {
+    call('Create', null, ['number', 'number', 'number'])(2, 12, 1);
+    // A focused window: an unfocused block is an outline quad, not the tier.
+    call('SetFocus', null, ['number'])(1);
+    // A steady block by DECSCUSR, since the configured shape is the bar. No
+    // rules: the two paths round a blended rule differently with no cursor
+    // at all, which is the decoration pass's question and not this probe's.
+    const text = `\x1b[2 q\u6771\u4eac ab\x1b[1;${column}H`;
+    call('Feed', null, ['string', 'number'])(text, new TextEncoder().encode(text).length);
+    for (const fontSize of [16, 20]) {
+      call('SetFontSize', null, ['number'])(fontSize);
+      const cpuBase = call('Render')();
+      const width = call('ImageWidth')();
+      const height = call('ImageHeight')();
+      const cpu = module.HEAPU8.slice(cpuBase, cpuBase + width * height * 4);
+      canvas.width = width;
+      canvas.height = height;
+      if (!call('BuildFrame')()) throw new Error('Frame was withheld');
+      const bytes = (pointer, count, stride) => {
+        const base = call(pointer)();
+        return module.HEAPU8.subarray(base, base + count * stride);
+      };
+      const upload = (prefix, method) => {
+        const pointer = call(`${prefix}AtlasPixels`)();
+        const width = call(`${prefix}AtlasWidth`)();
+        const height = call(`${prefix}AtlasHeight`)();
+        if (pointer && width > 0 && height > 0)
+          renderer[method](module.HEAPU8.subarray(pointer, pointer + width * height), width, height);
+      };
+      upload('', 'uploadAtlas');
+      upload('Wide', 'uploadWideAtlas');
+      const cellCount = call('CellInstanceCount')();
+      const wideGlyphCount = call('WideGlyphInstanceCount')();
+      const overlayCount = call('OverlayInstanceCount')();
+      const cursorTier = {
+        cellCount: call('CursorTierCellCount')(),
+        wideGlyphCount: call('CursorTierWideGlyphCount')(),
+        proportionalGlyphCount: 0, proportionalStripCount: 0, ligatureGlyphCount: 0, colorGlyphCount: 0,
+        decorationCount: 0,
+      };
+      // The control this probe exists for: the frame holds a tier, which on
+      // the wide-glyph column carries the glyph's ink.
+      if (cursorTier.cellCount !== 1) throw new Error(`No cursor tier reached the GPU (tier cells ${cursorTier.cellCount})`);
+      if (column === 3 && cursorTier.wideGlyphCount !== 1)
+        throw new Error(`The tier on the wide glyph carries ${cursorTier.wideGlyphCount} glyph(s)`);
+      const frame = {
+        cellBytes: bytes('CellInstances', cellCount, 64), cellCount,
+        wideGlyphBytes: bytes('WideGlyphInstances', wideGlyphCount, 64), wideGlyphCount,
+        decorationBytes: null, decorationCount: 0,
+        overlayBytes: bytes('OverlayInstances', overlayCount, 112), overlayCount,
+        proportionalGlyphBytes: null, proportionalGlyphCount: 0,
+        proportionalStripBytes: null, proportionalStripCount: 0,
+        ligatureGlyphBytes: null, ligatureGlyphCount: 0,
+        colorGlyphBytes: null, colorGlyphCount: 0,
+        cursorTier,
+        cellWidth: call('CellWidth')(), cellHeight: call('CellHeight')(), width, height,
+      };
+      renderer.drawFrame(frame);
+      const gpu = new Uint8Array(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, gpu);
+      let differing = 0;
+      for (let y = 0; y < height; ++y) {
+        for (let x = 0; x < width; ++x) {
+          const source = (y * width + x) * 4;
+          const target = ((height - y - 1) * width + x) * 4;
+          if ([0, 1, 2, 3].some(channel => cpu[source + channel] !== gpu[target + channel]))
+            ++differing;
+        }
+      }
+      results.push({ column, fontSize, cursorTier, differing });
+    }
+  }
+  verdict.textContent = JSON.stringify({ verdict: results.length === 4 && results.every(result => result.differing === 0) ? 'MATCH' : 'DIFFER', results });
+} catch (error) {
+  verdict.textContent = `ERROR ${String(error).replaceAll('\n', ' ')}`;
+}
+</script>

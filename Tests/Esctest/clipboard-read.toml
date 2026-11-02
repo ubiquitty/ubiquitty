@@ -1,0 +1,6 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+
+# Opt-in conformance configuration. No capability tier is relaxed.
+[security]
+clipboard_read = "allow"

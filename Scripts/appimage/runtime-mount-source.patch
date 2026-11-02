@@ -1,0 +1,21 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+# Keep the canonical image path in the kernel mount source for updater verification.
+--- a/src/runtime/runtime.c
++++ b/src/runtime/runtime.c
+@@ -1761,2 +1761,13 @@
+-        char options[100];
+-        sprintf(options, "ro,offset=%zu", fs_offset);
++        if (dir == NULL)
++            exit(EXIT_EXECERROR);
++        char offset_options[100];
++        snprintf(offset_options, sizeof(offset_options), "ro,offset=%zu", fs_offset);
++        char* source_option = malloc(strlen(dir) + sizeof("fsname="));
++        if (source_option == NULL)
++            exit(EXIT_EXECERROR);
++        sprintf(source_option, "fsname=%s", dir);
++        char* options = NULL;
++        if (fuse_opt_add_opt(&options, offset_options) == -1 ||
++                fuse_opt_add_opt_escaped(&options, source_option) == -1)
++            exit(EXIT_EXECERROR);
++        free(source_option);

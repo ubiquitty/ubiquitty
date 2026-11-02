@@ -1,0 +1,97 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8" />
+<title>Rich text tab stops regression</title>
+<style>
+    body {
+        background: #1d1f22;
+        color: #c5c8ce;
+        font: 14px system-ui;
+    }
+    pre {
+        white-space: pre-wrap;
+    }
+</style>
+<pre id="verdict">running</pre>
+<script type="module">
+    // A block's tabs stop every eight cells from the content box's left edge,
+    // and a hanging first line's first tab stops at the left indent
+    // (Docs/rich-text.md, "\tab"). The browser measures the lines Core lays
+    // out and then presents them; both have to set a tab on that grid, or the
+    // text after a bullet is drawn away from the carets Core holds for it.
+    import createModule from './ubiquitty.js';
+    import { loadTerminalFonts } from './fonts.js';
+    import { RichTextRenderer } from './rich-text.js';
+    const verdict = document.getElementById('verdict');
+    try {
+        const module = await createModule();
+        module.ubiquittyFontCoverage = await loadTerminalFonts();
+        module.ubiquittyFontFamily = 'JetBrains Mono';
+        const renderer = new RichTextRenderer(document);
+        module.ubiquittyRichText = renderer;
+        const call = (name, result = 'number', types = [], values = []) =>
+            module.ccall('ubiquittyWeb' + name, result, types, values);
+        call('Create', null, ['number', 'number', 'number'], [24, 80, 1]);
+        // 360 twips is an 18-point hang: the bullet's tab stops at 18 points,
+        // and the second paragraph's tab after one letter at eight cells.
+        const rtf =
+            '{\\rtf1\\fs24\\li360\\fi-360\\bullet\\tab Tabbed text after a bullet that wraps onto a second line under it.\\par\\pard x\\tab Zed}';
+        const bytes = '\x1b[?25l\x1b]7404;a=p:i=1:w=40:h=8;' + rtf + '\x1b\\';
+        call('Feed', null, ['string', 'number'], [bytes, new TextEncoder().encode(bytes).length]);
+        call('BuildFrame');
+        const frame = JSON.parse(call('RichTextFrameJSON', 'string'));
+        const block = frame.blocks[0];
+        const model = block?.document;
+        if (!model?.lines.length) throw new Error('the block has no shaped lines');
+        if (!(model.tabWidth > 0)) throw new Error('the frame carries no tab width');
+        const after = (word) => {
+            const scalars = [...word].map((character) => character.codePointAt(0));
+            for (let index = 0; index + scalars.length <= model.text.length; index++)
+                if (scalars.every((scalar, offset) => model.text[index + offset] === scalar)) return index;
+            throw new Error(`no ${word} in the block`);
+        };
+        const clusterAt = (index) => {
+            const cluster = model.clusters.find(([first]) => first === index);
+            if (!cluster) throw new Error(`no cluster at ${index}`);
+            return cluster;
+        };
+        // Core's carets, in points from the block's left: what the browser
+        // measured.
+        const tabbed = clusterAt(after('Tabbed'));
+        const zed = clusterAt(after('Zed'));
+        if (Math.abs(tabbed[2] - 18) > 0.5) throw new Error(`the hanging tab stopped at ${tabbed[2]}, not 18`);
+        if (Math.abs(zed[2] - model.tabWidth) > 0.5)
+            throw new Error(`a tab stopped at ${zed[2]}, not the eight-cell stop at ${model.tabWidth}`);
+
+        // The presented glyphs, where Core's carets put them.
+        document.body.append(renderer.root);
+        renderer.present(frame, { width: 2000, height: 2000, style: { left: '0px', top: '0px' } }, 1);
+        const rootLeft = renderer.root.getBoundingClientRect().left;
+        const drawnAt = (word) => {
+            const layer = renderer.layers.get(block.id)?.element;
+            if (!layer) throw new Error('no presented layer');
+            const walker = document.createTreeWalker(layer, NodeFilter.SHOW_TEXT);
+            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                const at = node.textContent.indexOf(word);
+                if (at < 0) continue;
+                const range = document.createRange();
+                range.setStart(node, at);
+                range.setEnd(node, at + 1);
+                return range.getBoundingClientRect().left - rootLeft;
+            }
+            throw new Error(`${word} was not presented`);
+        };
+        const [scaleX] = block.scale;
+        const expected = (cluster) => block.rect[0] + cluster[2] * scaleX;
+        const drift = {
+            Tabbed: drawnAt('Tabbed') - expected(tabbed),
+            Zed: drawnAt('Zed') - expected(zed),
+        };
+        for (const [word, distance] of Object.entries(drift))
+            if (Math.abs(distance) > 1) throw new Error(`${word} is presented ${distance}px from its caret`);
+        verdict.textContent = JSON.stringify({ verdict: 'PASS', tabWidth: model.tabWidth, drift });
+    } catch (error) {
+        verdict.textContent = 'ERROR ' + error.stack;
+    }
+</script>

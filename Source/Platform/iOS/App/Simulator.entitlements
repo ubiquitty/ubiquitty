@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The simulator's securityd gates the keychain on the
+     application-identifier entitlement: without one, every SecItemAdd answers
+     errSecMissingEntitlement (-34018) and each credential the editor saves is
+     dropped at the door. This file is embedded in the app executable's
+     __TEXT,__entitlements section (with its DER form in __TEXT,__ents_der) at
+     link time - the simulator runtime reads entitlements from there, and the
+     host kernel, which refuses restricted entitlements in an ad-hoc code
+     signature, never sees them. The prefix is not a team: the simulator
+     checks the entitlement's presence and shape, not a certificate chain. -->
+<plist version="1.0">
+<dict>
+    <key>application-identifier</key>
+    <string>UBIQUITTY.org.ubiquitty.Ubiquitty</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>UBIQUITTY.org.ubiquitty.Ubiquitty</string>
+    </array>
+</dict>
+</plist>

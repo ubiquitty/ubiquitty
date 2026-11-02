@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<Workspace
+   version = "1.0">
+   <FileRef
+      location = "group:build/xcode/macos/UbiquittyMacOS.xcodeproj">
+   </FileRef>
+   <FileRef
+      location = "group:build/xcode/host/UbiquittyHost.xcodeproj">
+   </FileRef>
+   <FileRef
+      location = "group:build/xcode/agent/UbiquittyAgent.xcodeproj">
+   </FileRef>
+   <FileRef
+      location = "group:build/xcode/ios/UbiquittyIOS.xcodeproj">
+   </FileRef>
+</Workspace>

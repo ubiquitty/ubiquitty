@@ -1,0 +1,19 @@
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 1024 1024">
+  <!-- Written by Scripts/export-app-icon.py from Resources/Icon/Ubiquitty.icon. -->
+  <defs>
+    <linearGradient id="ground" x1="0.5" y1="0" x2="0.5" y2="0.7">
+      <stop offset="0" stop-color="#2a2a2e"/>
+      <stop offset="1" stop-color="#0a0a0c"/>
+    </linearGradient>
+  </defs>
+  <!-- The document's canvas is the icon's shape; it is inset here by the
+       margin a desktop icon keeps, so the mark keeps its share of the shape. -->
+  <g transform="translate(48 48) scale(0.90625)">
+    <rect width="1024" height="1024" rx="230" fill="url(#ground)"/>
+    <path d="M623.55 665.32H504.41A119.14 119.14 0 0 1 385.27 546.19V242.92Q385.27 221.26 363.61 221.26H244.47Q222.81 221.26 222.81 242.92V546.19A281.6 281.6 0 0 0 504.41 827.79H623.55Z" fill="#9a9aaa"/>
+    <path d="M786.01 242.92Q786.01 221.26 764.35 221.26H645.21Q623.55 221.26 623.55 242.92V827.79L786.01 665.32Z" fill="#ffffff"/>
+  </g>
+</svg>

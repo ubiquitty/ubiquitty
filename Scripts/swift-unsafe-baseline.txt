@@ -1,0 +1,64 @@
+# Scripts/swift-unsafe-baseline.txt — the `Unsafe*` sites Swift still has.
+#
+# One line per file: the count, then the path. Scripts/check-swift-unsafe.py
+# refuses any file that exceeds its count, and any file not listed here at
+# all. Sites are imported APIs, C callback boundaries, or Core declarations
+# still missing interop annotations; the list is meant to shrink.
+#
+# Re-record with: python3 Scripts/check-swift-unsafe.py --write
+3 Source/Platform/Apple/SSH/Sources/UbiquittySSH/SSHCarrier.swift
+# SSHCarrierDelegate borrowed-byte signatures on the probes' recording delegates.
+4 Source/Platform/Apple/SSH/Sources/UbiquittySSH/SSHPipelineProbe.swift
+# SSHCarrierDelegate borrowed-byte signatures on the sign-in tests' silent delegate.
+2 Source/Platform/Apple/SSH/Tests/UbiquittySSHTests/SSHAuthenticationWireTests.swift
+5 Source/Platform/iOS/App/BackgroundRefreshConnection.swift
+5 Source/Platform/iOS/App/QUICBootstrapProbe.swift
+5 Source/Platform/iOS/App/SSHCarrierClient.swift
+# C driver context and SSHCarrierDelegate borrowed-byte signatures. The driver
+# retains/releases its adapter once; bytes are copied before callbacks return.
+4 Source/Platform/iOS/App/SyncSSHCarrier.swift
+1 Source/Platform/iOS/App/TerminalKeyTranslation.swift
+1 Source/Platform/iOS/App/UbiquittyApp.swift
+1 Source/Platform/iOS/UITest/TerminalGestureUITests.swift
+1 Source/Platform/macOS/App/ClipboardReadPrompt.swift
+# The session clipboard's C seam handle: a retained Swift object and a read's
+# C context, opaque to the C++ client that subclasses Core's ClipboardClient.
+# Spelled once, as the SessionClipboardSeamHandle typealias.
+1 Source/Platform/macOS/App/SessionClipboard.swift
+1 Source/Platform/macOS/App/SyncTraceSource.swift
+2 Source/Platform/macOS/App/Windowing/TerminalWindowController+TmuxHosting.swift
+1 Source/Platform/macOS/App/Windowing/TerminalWindowController.swift
+3 Source/Platform/macOS/ClipboardPasteboard.swift
+17 Source/Platform/macOS/TypedPasteboard.swift
+1 Source/Platform/macOS/UITest/Swift/FileDropTestSupport.swift
+2 Source/Platform/macOS/UITest/Swift/SessionPlumbingScenarios.swift
+3 Source/Platform/macOS/UITest/Swift/SymbolFallbackScenarios.swift
+1 Source/UbiquittyKit/Swift/DeliveryBench.swift
+# Synchronous @_cdecl PAL sealing callbacks and their single copying helper.
+# Scope/digest lengths, exact output capacity and integer bounds precede copies.
+12 Source/UbiquittyKit/Swift/SealedStore.swift
+# The @_cdecl protected-file creator's borrowed NUL-terminated leaf name.
+1 Source/UbiquittyKit/Swift/ProtectedFile.swift
+2 Source/UbiquittyKit/Swift/SurfaceRenderer.swift
+5 Source/UbiquittyKit/Swift/SurfaceSelectionModel.swift
+1 Source/UbiquittyKit/Swift/SurfaceSmoke.swift
+5 Source/UbiquittyKit/Swift/SurfaceSnapshot.swift
+1 Source/UbiquittyKit/Swift/TerminalSurface+Input.swift
+7 Source/UbiquittyKit/Swift/TerminalSurface.swift
+1 Source/UbiquittyRenderKit/AtlasUploads.swift
+2 Source/UbiquittyRenderKit/ColorSheet.swift
+6 Source/UbiquittyRenderKit/FontCatalogue.swift
+2 Source/UbiquittyRenderKit/FontRouter.swift
+13 Source/UbiquittyRenderKit/GlyphAtlas.swift
+3 Source/UbiquittyRenderKit/GlyphSource.swift
+1 Source/UbiquittyRenderKit/GrowableBuffer.swift
+# The strip upload's ink-row measure reads CGContext.data, a raw pointer the
+# Apple API hands out, as the InkPlaneSpan the C++ cache takes.
+9 Source/UbiquittyRenderKit/LigatureSheet.swift
+17 Source/UbiquittyRenderKit/RuntimeDrive.swift
+3 Source/UbiquittyRenderKit/StreamDebugRecorder.swift
+3 Source/UbiquittyRenderKit/SurfaceImageStore.swift
+2 Source/UbiquittyRenderKit/TekPass.swift
+# The C symbol the iOS file suite's C++ calls takes its path as a C string.
+1 Tests/Platform/test_ios_protected_file_probe.swift
+1 Tools/classify-bench/Classify.swift

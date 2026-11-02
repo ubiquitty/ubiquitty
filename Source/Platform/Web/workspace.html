@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Ubiquitty</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="workspace.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar" aria-label="Workspace navigation">
+      <header class="workspace-controls">
+        <button id="workspace-switch" class="workspace-switch" aria-label="Choose workspace"><span class="workspace-mark">U</span><span class="workspace-name">Ubiquitty</span><span data-icon="caret-down"></span></button>
+        <button id="people" class="icon-button" title="People and agents" aria-label="People and agents"><span data-icon="users"></span></button>
+      </header>
+      <button id="connection" class="connection"><span class="connection-dot"></span><span id="connection-label">Connect to a host</span><span data-icon="caret-down"></span></button>
+      <button id="beam-open" class="beam-open"><span data-icon="magnifying-glass"></span><span>Search or run a command</span><kbd>⌘⇧P</kbd></button>
+      <nav id="tree" aria-label="Windows, groups and sessions"></nav>
+      <footer><button id="new-tab" class="quiet-button"><span data-icon="plus"></span>New session</button><button id="settings-open" class="icon-button" title="Settings" aria-label="Settings"><span data-icon="gear-six"></span></button></footer>
+    </aside>
+    <main id="main" aria-label="Workspace">
+      <header id="toolbar"><button id="sidebar-toggle" class="icon-button" aria-label="Toggle sidebar" title="Toggle sidebar"><span data-icon="sidebar-simple"></span></button><span id="window-label"></span><span class="spacer"></span><button id="find-open" class="icon-button" title="Find in terminal · ⌘F" aria-label="Find in terminal"><span data-icon="magnifying-glass"></span></button><button id="inspector-open" class="icon-button" title="Inspector" aria-label="Inspector"><span data-icon="info"></span></button></header>
+      <div id="stage"><div id="empty"><span data-icon="terminal-window"></span><h1>Your workspace, here.</h1><p>Connect to a Ubiquitty host to open its windows and sessions.</p><button id="empty-connect" class="primary">Connect to host</button></div></div>
+    </main>
+    <aside id="inspector" aria-label="Inspector" hidden><header><strong>Inspector</strong><button id="inspector-close" class="icon-button" aria-label="Close inspector"><span data-icon="x"></span></button></header><div id="inspector-content"></div></aside>
+  </div>
+  <div id="pane-layer"></div>
+  <div id="notice" role="status" hidden></div>
+  <dialog id="dialog" aria-labelledby="dialog-title"><header><h2 id="dialog-title"></h2><button id="dialog-close" class="icon-button" aria-label="Close dialog"><span data-icon="x"></span></button></header><div id="dialog-content"></div></dialog>
+  <script type="module" src="workspace.js"></script>
+</body>
+</html>

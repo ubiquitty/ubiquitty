@@ -1,0 +1,43 @@
+Greet version=1 viewport=80x24 focused=1 historyCacheLines=0 capabilities=72 resume=0 welcomed=1
+View pane=1 state=0
+Viewport pane=1 viewport=80x24 cellPixels=0x0 textAreaPixels=0x0 drawablePixels=0x0
+Raw pane=1 seq=1 bytes=l
+Ack
+Raw pane=1 seq=2 bytes=s\x0D
+Paste pane=1 seq=3 offset=0 state=0 bytes=8192 first=pppppppp
+Paste pane=1 seq=3 offset=8192 state=0 bytes=8192 first=pppppppp
+Raw pane=1 seq=4 bytes=x
+Ack
+Ack
+Paste pane=1 seq=3 offset=16384 state=1 bytes=3616 first=pppppppp
+Ack
+Paste pane=1 seq=5 offset=0 state=0 bytes=8192 first=qqqqqqqq
+Paste pane=1 seq=5 offset=8192 state=0 bytes=8192 first=qqqqqqqq
+Raw pane=1 seq=6 bytes=y
+Ack
+Ack
+Ack
+Paste pane=1 seq=7 offset=0 state=0 bytes=8192 first=rrrrrrrr
+Paste pane=1 seq=7 offset=8192 state=0 bytes=8192 first=rrrrrrrr
+PasteAbort pane=1 seq=7
+Raw pane=1 seq=8 bytes=\x03
+Ack
+Paste pane=1 seq=9 offset=0 state=0 bytes=8192 first=ssssssss
+Paste pane=1 seq=9 offset=8192 state=0 bytes=8192 first=ssssssss
+Raw pane=1 seq=10 bytes=\x03
+Raw pane=1 seq=11 bytes=\x07x
+PasteAbort pane=1 seq=9
+Raw pane=1 seq=12 bytes=\x07
+Raw pane=1 seq=13 bytes=\x07
+Facts viewport=80x24 pixels=0 refresh=0 link=0 power=0 focused=0 palette=0
+Focus pane=1 focused=0
+Facts viewport=100x30 pixels=0 refresh=0 link=0 power=0 focused=0 palette=0
+Viewport pane=1 viewport=100x30 cellPixels=0x0 textAreaPixels=0x0 drawablePixels=0x0
+Ack
+Ack
+Raw pane=1 seq=14 bytes=4096 first=zzzzzzzz
+Raw pane=1 seq=15 bytes=904 first=zzzzzzzz
+Ack
+Ack
+Ack
+Ack

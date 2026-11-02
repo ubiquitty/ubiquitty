@@ -1,0 +1,8 @@
+# Cases this arm does not compare on a tier, by decision: the identifier, the
+# reason, and the date the decision was recorded. No pixel ceiling, because
+# nothing is measured. See README.md, and run.py's exempt_identifiers.
+case:color_emoji:unifont:swift  colour emoji come from the platform face on this arm, and the bitmap reference has none until Core bundles a colour strike (2026-09-18)
+case:emoji_presentation_forcing:unifont:swift  colour emoji come from the platform face on this arm, and the bitmap reference has none until Core bundles a colour strike (2026-09-18)
+case:linux_color_emoji:unifont:swift  colour emoji come from the platform face on this arm, and the bitmap reference has none until Core bundles a colour strike (2026-09-18)
+case:osc66_sized_emoji:unifont:swift  colour emoji come from the platform face on this arm, and the bitmap reference has none until Core bundles a colour strike (2026-09-18)
+case:zwj_all_emoji:unifont:swift  colour emoji come from the platform face on this arm, and the bitmap reference has none until Core bundles a colour strike (2026-09-18)

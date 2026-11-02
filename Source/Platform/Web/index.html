@@ -1,0 +1,157 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ubiquitty — browser frontend</title>
+<!-- The app icon, exported from Resources/Icon/Ubiquitty.icon by
+     Scripts/export-app-icon.py and staged beside the page by build-web.sh. -->
+<link rel="icon" href="./favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<style>
+  /* The house face, served beside the page. A canvas can only draw a font the
+     browser has; naming one the machine lacks measures as absent and the
+     terminal silently lays out for the fallback. */
+  /* One file per slant, not one per weight: the range is the `wght` axis the
+     file carries, so a weight between the stops interpolates instead of
+     snapping to the nearest served file. It must be declared — an @font-face
+     naming a single weight pins a variable font to that instance, and bold
+     would come back synthesised from the regular. */
+  @font-face { font-family: "JetBrains Mono"; font-weight: 100 800; font-style: normal;
+               src: url("./fonts/JetBrainsMono[wght].ttf") format("truetype"); }
+  @font-face { font-family: "JetBrains Mono"; font-weight: 100 800; font-style: italic;
+               src: url("./fonts/JetBrainsMono-Italic[wght].ttf") format("truetype"); }
+  /* The bundled symbol/Nerd-font fallback, named the way
+     WebTerminal::defaultFontRoutePreferences names it: a route to this family
+     resolves only when the page has served it under the same name. */
+  @font-face { font-family: "Symbols Nerd Font Mono"; font-weight: 400; font-style: normal;
+               src: url("./fonts/SymbolsNerdFontMono-Regular.ttf") format("truetype"); }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #101014; }
+  /* Core renders at the host grid's natural size. The local viewport clips or
+     uniformly fits that complete picture without changing the host grid. */
+  #screen-viewport { position: absolute; inset: 0; overflow: hidden; }
+  #screen { display: block; position: absolute; top: 0; left: 0; image-rendering: pixelated;
+            outline: none; border: none; }
+  #status { position: fixed; right: 8px; bottom: 6px; opacity: .45; color: #c0c0c0;
+            font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; pointer-events: none; }
+  /* ?debug=1 — the protocol is opaque from the page otherwise, and reading it
+     out of the console meant re-navigating for every question. */
+  #debug { position: fixed; left: 8px; bottom: 8px; max-height: 40vh; margin: 0; overflow: auto;
+           padding: 8px 10px; background: #16161c; border: 1px solid #2a2a33; border-radius: 4px;
+           color: #9aa; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #debug[hidden] { display: none; }
+  /* The host's outline: a row per workspace, window, tab and pane as Core
+     decides them, a title that opens, and a Terminate that asks Core's
+     question before it acts. This arm has no
+     window server to put that in, so it is a panel over the canvas — and it
+     borrows #debug's box so the page has one panel style rather than two. */
+  #sessions { position: fixed; left: 8px; top: 8px; z-index: 3; margin: 0; padding: 10px 12px;
+              max-width: min(48em, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto;
+              background: #16161c; border: 1px solid #2a2a33; border-radius: 4px; color: #c8c8d0;
+              font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #sessions[hidden] { display: none; }
+  #sessions h1 { margin: 0 0 8px; font: inherit; font-weight: 600; color: #e4e4ec; }
+  #session-rows { list-style: none; margin: 0; padding: 0; }
+  #session-rows li { display: flex; flex-wrap: wrap; gap: 0 10px; align-items: baseline;
+                     padding: 5px 0; border-top: 1px solid #23232c; }
+  #session-rows li:first-child { border-top: none; }
+  #session-rows li[data-state="restorable"] { color: #8a8a99; }
+  #sessions .fold { padding: 0 5px; }
+  #sessions .title { color: #e4e4ec; }
+  #sessions button.title { background: none; border: none; padding: 0; text-decoration: underline; }
+  #sessions .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  #sessions .label, #sessions .tag { border: 1px solid #3a3a46; border-radius: 4px; padding: 0 4px; }
+  #sessions .tag-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #8a8a99; }
+  #sessions .fact, #sessions .secondary { color: #8a8a99; }
+  #sessions .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+  /* Core's question, in the row it is about: the only red thing on the panel. */
+  #sessions .question { display: block; flex-basis: 100%; margin: 4px 0; padding: 6px 8px; border: 1px solid #7d3b3b;
+                        background: #35232a; border-radius: 4px; }
+  #sessions .question[hidden] { display: none; }
+  #sessions .question p { margin: 0 0 6px; }
+  #sessions .question-title { color: #e4e4ec; }
+  #sessions .question button[data-role="destructive"] { border-color: #7d3b3b; }
+  #sessions button { font: inherit; color: #e4e4ec; background: #23232c; border: 1px solid #3a3a46;
+                     border-radius: 5px; padding: 3px 10px; cursor: pointer; }
+  #sessions button:disabled { color: #6a6a78; cursor: default; }
+  #sessions p { margin: 8px 0 0; }
+  #sessions .quiet { color: #8a8a99; }
+  #sessions .outcome:empty { display: none; }
+  #sessions .footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  #sessions label { display: flex; gap: 5px; align-items: center; color: #8a8a99; }
+  /* The one affordance that brings the panel back. The page has no menu bar, and
+     a list that cannot be reopened is a list nobody dismisses. */
+  #sessions-open { position: fixed; right: 8px; bottom: 22px; z-index: 3; cursor: pointer;
+                   font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+                   color: #c0c0c0; background: #16161c; border: 1px solid #2a2a33;
+                   border-radius: 4px; padding: 4px 8px; }
+  #sessions-open[hidden] { display: none; }
+  /* Core's notice while some of what was typed may not have reached the host:
+     over the bottom of the terminal, in the panel style, never taking focus. */
+  #input-in-doubt { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 3;
+                    width: min(36em, calc(100vw - 16px)); box-sizing: border-box; padding: 10px 12px;
+                    background: #16161c; border: 1px solid #2a2a33; border-radius: 4px; color: #c8c8d0;
+                    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #input-in-doubt[hidden] { display: none; }
+  #input-in-doubt p { margin: 0 0 6px; }
+  #input-in-doubt-message { color: #e4e4ec; font-weight: 600; }
+  #input-in-doubt-detail { color: #8a8a99; }
+  #input-in-doubt .actions { display: flex; gap: 6px; justify-content: flex-end; }
+  #input-in-doubt button { font: inherit; color: #e4e4ec; background: #23232c; border: 1px solid #3a3a46;
+                           border-radius: 5px; padding: 3px 10px; cursor: pointer; }
+  /* Transparent, caret-sized, and positioned at the terminal cursor by the page.
+     Zero opacity rather than visibility:hidden so the composition underline the
+     input method draws still appears where the user is typing. */
+  #ime {
+    position: absolute; z-index: 2; padding: 0; margin: 0; border: 0;
+    outline: none; resize: none; overflow: hidden; opacity: 0;
+    background: transparent; color: transparent; caret-color: transparent;
+    width: 1em; height: 1em; line-height: 1;
+  }
+</style>
+<div id="screen-viewport"><canvas id="screen" tabindex="0"></canvas></div>
+<!-- The IME target. A canvas cannot receive composition: an input method needs a
+     focusable editable element to compose into, so one sits under the canvas,
+     transparent and one cell wide, and the page keeps it focused. Kept on-screen
+     rather than display:none or off-viewport, because a hidden element gets no
+     composition candidates window, or gets one pinned to the corner of the
+     screen instead of the caret. -->
+<textarea id="ime" autocomplete="off" autocorrect="off" autocapitalize="off"
+          spellcheck="false" aria-hidden="true" tabindex="-1"></textarea>
+<div id="status">loading…</div>
+<!-- Core's notice while some of what was typed may not have reached the host.
+     A live region rather than a dialog: the terminal keeps the keyboard, and
+     what is typed waits behind the input in doubt until a button answers. -->
+<section id="input-in-doubt" role="status" aria-live="polite" hidden>
+  <p id="input-in-doubt-message"></p>
+  <p id="input-in-doubt-detail"></p>
+  <div class="actions">
+    <button type="button" id="input-in-doubt-discard"></button>
+    <button type="button" id="input-in-doubt-send-again"></button>
+  </div>
+</section>
+<pre id="debug" hidden></pre>
+<!-- The host's outline. A list of things, so a list element; one action per
+     button, so buttons — which is what makes the panel reachable by Tab and
+     readable by a screen reader without a single ARIA role invented for it. The
+     rows are Core's outline of what the host answered, drawn by outline.js;
+     nothing here is placeholder text. -->
+<section id="sessions" hidden aria-labelledby="sessions-title">
+  <h1 id="sessions-title">Workspaces on this host</h1>
+  <ul id="session-rows"></ul>
+  <p class="quiet" id="sessions-empty" hidden>This host is running no workspaces.</p>
+  <!-- The five terminate answers and every refusal land here, one at a time.
+       role=status so the answer is announced without taking focus off whatever
+       the person is on. -->
+  <p class="outcome" id="sessions-outcome" role="status" aria-live="polite"></p>
+  <div class="footer">
+    <button type="button" id="new-session">New Workspace</button>
+    <button type="button" id="refresh-sessions">Refresh</button>
+    <button type="button" id="hide-sessions">Hide</button>
+    <label><input type="checkbox" id="keep-unnamed"> Keep unnamed workspaces on this host</label>
+  </div>
+</section>
+<button type="button" id="sessions-open" hidden>Workspaces</button>
+<script type="module" src="./terminal.js"></script>

@@ -1,0 +1,8 @@
+{
+  "format": 1,
+  "image": "sha256:d4cd8e4a2a4351a4ee1c34705de28ec0e050dc0c83ea4c1cc7aad4e4a12bf0d1",
+  "recipe": "4044d8a96e63",
+  "compiler": "Ubuntu clang version 22.1.2 (1ubuntu1)",
+  "target": "aarch64-unknown-linux-gnu",
+  "profileSha256": "d8458f1c4b312f3638f961b2943cf0ed39bcd1f6060ac5bf550520086a6005ef"
+}

@@ -1,0 +1,12 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+
+# A texture-healing face at a size whose cell advance is fractional, which is
+# what makes a word's subpixel phase depend on the column it starts at. The
+# case beside this config renders one word at successive indents: the phases
+# differ, so the images differ, but two indents that land on one phase must be
+# the same image — and were not, while a run began at the line's first space
+# and carried the word at an offset the phase never accounted for.
+[font]
+family = "Monaspace Neon"
+size = 14

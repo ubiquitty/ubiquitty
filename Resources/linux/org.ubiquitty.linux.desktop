@@ -1,0 +1,14 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+
+[Desktop Entry]
+Type=Application
+Name=Ubiquitty
+GenericName=Terminal Emulator
+Comment=A fast, modern terminal emulator
+Exec=ubiquitty-linux
+Icon=org.ubiquitty.linux
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;prompt;command;
+StartupNotify=true

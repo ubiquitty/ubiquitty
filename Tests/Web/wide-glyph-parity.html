@@ -1,0 +1,184 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<meta charset="utf-8">
+<title>wide-probe</title>
+<body>
+<canvas id="gpu" width="320" height="64"></canvas>
+<pre id="verdict">running</pre>
+<script type="module">
+// GPU-vs-CPU parity for two-cell glyphs.
+//
+// The CPU raster reads both atlas pages and is independently correct, so it is
+// the oracle. The question is only whether the GPU path — which binds two
+// textures and runs a second pass — agrees with it on the same content.
+//
+// Comparing the GPU against itself before and after would pass against any bug
+// that is stable frame to frame, which is every bug this pass could have.
+import { WebGLRenderer } from './webgl.js';
+import createModule from './ubiquitty.js';
+
+const out = document.getElementById('verdict');
+const say = (t) => { out.textContent = t; };
+
+try {
+  const module = await createModule();
+  const c = (n, r, a) => module.cwrap(n, r, a);
+
+  // A real family, because the shipping page always sets one (terminal.js sets
+  // `module.ubiquittyFontFamily`) and the CPU oracle now follows whatever the
+  // instance path draws. Left unset, both arms take the Unifont fallback and the
+  // comparison covers a path no user runs.
+  module.ubiquittyFontFamily = 'monospace';
+
+  const rows = 4, columns = 20, scale = 1;
+  c('ubiquittyWebCreate', null, ['number', 'number', 'number'])(rows, columns, scale);
+  const feed = c('ubiquittyWebFeed', null, ['string', 'number']);
+  const buildFrame = c('ubiquittyWebBuildFrame', 'number', []);
+  const render = c('ubiquittyWebRender', 'number', []);
+  const imageW = c('ubiquittyWebImageWidth', 'number', []);
+  const imageH = c('ubiquittyWebImageHeight', 'number', []);
+  const cellWidth = c('ubiquittyWebCellWidth', 'number', []);
+  const cellHeight = c('ubiquittyWebCellHeight', 'number', []);
+  const cellInstances = c('ubiquittyWebCellInstances', 'number', []);
+  const cellCount = c('ubiquittyWebCellInstanceCount', 'number', []);
+  const wideInstances = c('ubiquittyWebWideGlyphInstances', 'number', []);
+  const wideCount = c('ubiquittyWebWideGlyphInstanceCount', 'number', []);
+  const atlasPixels = c('ubiquittyWebAtlasPixels', 'number', []);
+  const atlasW = c('ubiquittyWebAtlasWidth', 'number', []);
+  const atlasH = c('ubiquittyWebAtlasHeight', 'number', []);
+  const wideAtlasPixels = c('ubiquittyWebWideAtlasPixels', 'number', []);
+  const wideAtlasW = c('ubiquittyWebWideAtlasWidth', 'number', []);
+  const wideAtlasH = c('ubiquittyWebWideAtlasHeight', 'number', []);
+  const colorInstances = c('ubiquittyWebColorGlyphInstances', 'number', []);
+  const colorCount = c('ubiquittyWebColorGlyphInstanceCount', 'number', []);
+  const colorAtlasPixels = c('ubiquittyWebColorAtlasPixels', 'number', []);
+  const colorAtlasW = c('ubiquittyWebColorAtlasWidth', 'number', []);
+  const colorAtlasH = c('ubiquittyWebColorAtlasHeight', 'number', []);
+
+  // CJK exercises wideGlyphs, the emoji exercises colorGlyphs, and the box
+  // character exercises the builder's procedural decomposition. A stream no
+  // scene produces is untested rather than agreeing, so what the scene contains
+  // is what the verdict is about.
+  const text = '日本語 😀 ┌─┐ ok';
+  const bytes = new TextEncoder().encode(text);
+  feed(text, bytes.length);
+
+  // --- CPU, the oracle -----------------------------------------------------
+  const cpuBase = render();
+  const w = imageW(), h = imageH();
+  const cpu = module.HEAPU8.slice(cpuBase, cpuBase + w * h * 4);
+
+  // --- GPU -----------------------------------------------------------------
+  // Created here rather than taken from the document: Emscripten's runtime
+  // adopts a canvas it finds, and sharing one with it cost a run to diagnose.
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  document.body.appendChild(canvas);
+  const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+  if (!gl) throw new Error('no webgl2 context');
+  const renderer = new WebGLRenderer(canvas);
+
+  if (!buildFrame()) throw new Error('buildFrame failed');
+  const n = cellCount(), wn = wideCount(), cn = colorCount();
+
+  renderer.uploadAtlas(module.HEAPU8.subarray(atlasPixels(), atlasPixels() + atlasW() * atlasH()), atlasW(), atlasH());
+  renderer.uploadWideAtlas(module.HEAPU8.subarray(wideAtlasPixels(), wideAtlasPixels() + wideAtlasW() * wideAtlasH()), wideAtlasW(), wideAtlasH());
+  // Four bytes per pixel where the coverage sheets are one. Sized as if it were
+  // R8 this uploads a quarter of the sheet and stretches it, which draws a
+  // plausible smear rather than nothing.
+  if (colorAtlasPixels() && colorAtlasW() > 0)
+    renderer.uploadColorAtlas(module.HEAPU8.subarray(colorAtlasPixels(), colorAtlasPixels() + colorAtlasW() * colorAtlasH() * 4), colorAtlasW(), colorAtlasH());
+
+  const cb = cellInstances(), wb = wideInstances(), cgb = colorInstances();
+  renderer.drawFrame({
+    cellBytes: module.HEAPU8.subarray(cb, cb + n * 64),
+    cellCount: n,
+    decorationBytes: null, decorationCount: 0,
+    overlayBytes: null, overlayCount: 0,
+    wideGlyphBytes: wn > 0 ? module.HEAPU8.subarray(wb, wb + wn * 64) : null,
+    wideGlyphCount: wn,
+    colorGlyphBytes: cn > 0 ? module.HEAPU8.subarray(cgb, cgb + cn * 64) : null,
+    colorGlyphCount: cn,
+    cellWidth: cellWidth(), cellHeight: cellHeight(),
+    width: w, height: h,
+  });
+
+  const gpu = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, gpu);
+
+  // readPixels is bottom-up; the CPU image is top-down.
+  const flipped = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++)
+    flipped.set(gpu.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+
+  // Compare only the columns the wide glyphs occupy — the first six cells. The
+  // rest of the row is ASCII, which was never in question, and including it
+  // would let a large agreeing area hide a small disagreeing one.
+  // Six cells of CJK, a space, the emoji's two, a space, and three box cells.
+  // The emoji's quad is square at the cell HEIGHT so it reaches past its own two
+  // cells; the span holds the overhang, because a comparison stopping at the
+  // cell boundary would not see an emoji drawn one cell wide.
+  const wideColumns = 13 * cellWidth();
+  let differing = 0, inked = 0;
+  const perColumn = new Array(13).fill(0);
+  // A pixel counts as differing only when no position in its 3x3 neighbourhood
+  // in the other arm matches it. Two rasterizers place a quad whose edges
+  // do not land on the pixel grid a fraction apart, and the emoji's slot is
+  // square at the cell HEIGHT while a cell is narrower, so its every edge is off
+  // grid: an exact comparison reports the same picture drawn a pixel over as a
+  // hundred differing pixels, which is the same order as a wrong glyph and
+  // leaves no margin between them.
+  //
+  // Displacement is what this admits, and only displacement. A wrong atlas page
+  // draws a different picture, which has no neighbour to match at any offset, so
+  // it still differs everywhere — the control below binds the mono page into the
+  // wide pass and this reports it.
+  const near = (x, y) => {
+    const i = (y * w + x) * 4;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const j = (ny * w + nx) * 4;
+        if (Math.abs(cpu[i] - flipped[j]) <= 8
+            && Math.abs(cpu[i + 1] - flipped[j + 1]) <= 8
+            && Math.abs(cpu[i + 2] - flipped[j + 2]) <= 8) return true;
+      }
+    }
+    return false;
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < wideColumns; x++) {
+      const i = (y * w + x) * 4;
+      if (cpu[i] !== cpu[2] || cpu[i + 1] !== cpu[3]) inked++;
+      if (!near(x, y)) { differing++; perColumn[Math.floor(x / cellWidth())]++; }
+    }
+  }
+
+  const total = wideColumns * h;
+  // Reported per population, because the two fail for different reasons and a
+  // single number cannot say which. Columns 0-5 and 10-12 hold glyphs whose
+  // quads are cell-aligned, so their edges land on the pixel grid and the two
+  // rasterizers must agree exactly. The emoji's square reaches past its cells
+  // and its edges do not, so it is where a sampling convention shows.
+  const cellAligned = perColumn.slice(0, 6).concat(perColumn.slice(9)).reduce((a, b) => a + b, 0);
+  const colourSquare = perColumn[7] + perColumn[8];
+  say(JSON.stringify({
+    verdict: differing === 0 ? 'MATCH' : 'DIFFER',
+    cellAlignedDiffering: cellAligned,
+    colourSquareDiffering: colourSquare,
+    wideInstances: wn,
+    colorInstances: cn,
+    perCellColumn: perColumn,
+    wideAtlas: [wideAtlasW(), wideAtlasH()],
+    monoAtlas: [atlasW(), atlasH()],
+    comparedPixels: total,
+    differingPixels: differing,
+  }));
+} catch (e) {
+  say('ERROR ' + (e && e.stack ? e.stack : String(e)));
+}
+</script>
+</body>

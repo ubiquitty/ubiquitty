@@ -1,0 +1,190 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<meta charset="utf-8">
+<title>Doubled mono and proportional GPU parity</title>
+<body>
+<pre id="verdict">running</pre>
+<script type="module">
+import { WebGLRenderer } from './webgl.js';
+import createModule from './ubiquitty.js';
+
+const verdict = document.getElementById('verdict');
+try {
+  const module = await createModule();
+  module.ubiquittyFontFamily = 'monospace';
+  const call = (name, result = 'number', parameters = []) => module.cwrap(`ubiquittyWeb${name}`, result, parameters);
+  const canvas = document.createElement('canvas');
+  document.body.appendChild(canvas);
+  const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+  if (!gl) throw new Error('No WebGL2 context');
+  const renderer = new WebGLRenderer(canvas);
+  const results = [];
+
+  const scenes = [0, 2].flatMap(horizontalAlign => {
+    const run = `\x1b]66;p=1:c=8:h=${horizontalAlign};Wiggle jA\x07`;
+    const control = 'plain \x1b]66;p=1:c=8;Wiggle jA\x07 ok';
+    return [{
+      name: `proportional-double-width-align-${horizontalAlign}`,
+      population: 'proportional',
+      text: '\x1b[?25l\x1b#6\x1b[38;2;237;157;43m' + run + '\x1b[39m\r\n' + control,
+    }, {
+      name: `proportional-double-height-align-${horizontalAlign}`,
+      population: 'proportional',
+      isDoubleHeight: true,
+      text: '\x1b[?25l\x1b#3\x1b[38;2;237;157;43m' + run + '\r\n\x1b#4' + run + '\x1b[39m\r\n' + control,
+    }];
+  });
+  scenes.push({
+    name: 'mono-double-width',
+    population: 'mono',
+    text: '\x1b[?25l\x1b#6\x1b[38;2;237;157;43mWgM8 jA\x1b[39m\r\nplain WgM8 jA',
+  }, {
+    name: 'mono-double-height',
+    population: 'mono',
+    text: '\x1b[?25l\x1b#3\x1b[38;2;237;157;43mWgM8 jA\r\n'
+      + '\x1b#4WgM8 jA\x1b[39m\r\nplain WgM8 jA',
+  });
+  const fontSizes = [16, 20];
+  for (const scene of scenes) {
+    call('Create', null, ['number', 'number', 'number'])(3, 28, 1);
+    call('SetDrawsSizedText', null, ['number'])(1);
+    call('SetDrawsProportionalText', null, ['number'])(1);
+    const text = scene.text;
+    call('Feed', null, ['string', 'number'])(text, new TextEncoder().encode(text).length);
+    for (const fontSize of fontSizes) {
+      call('SetFontSize', null, ['number'])(fontSize);
+      const cpuBase = call('Render')();
+      const width = call('ImageWidth')();
+      const height = call('ImageHeight')();
+      const cpu = module.HEAPU8.slice(cpuBase, cpuBase + width * height * 4);
+      canvas.width = width;
+      canvas.height = height;
+      if (!call('BuildFrame')()) throw new Error('Frame was withheld');
+      const bytes = (pointer, count, stride) => {
+        const base = call(pointer)();
+        return module.HEAPU8.subarray(base, base + count * stride);
+      };
+      const upload = (prefix, method) => {
+        const pointer = call(`${prefix}AtlasPixels`)();
+        const width = call(`${prefix}AtlasWidth`)();
+        const height = call(`${prefix}AtlasHeight`)();
+        if (pointer && width > 0 && height > 0)
+          renderer[method](module.HEAPU8.subarray(pointer, pointer + width * height), width, height);
+      };
+      upload('', 'uploadAtlas');
+      upload('Wide', 'uploadWideAtlas');
+      upload('Proportional', 'uploadProportionalAtlas');
+      upload('ProportionalStrip', 'uploadProportionalStripAtlas');
+      upload('Ligature', 'uploadLigatureAtlas');
+      const cellCount = call('CellInstanceCount')();
+      const proportionalCount = call('ProportionalGlyphInstanceCount')();
+      const stripCount = call('ProportionalStripInstanceCount')();
+      const ligatureCount = call('LigatureGlyphInstanceCount')();
+      if (scene.population === 'proportional' && proportionalCount + stripCount === 0)
+        throw new Error('No proportional ink reached the GPU');
+      const cellBytes = bytes('CellInstances', cellCount, 64);
+      const proportionalGlyphBytes = bytes('ProportionalGlyphInstances', proportionalCount, 64);
+      const proportionalStripBytes = bytes('ProportionalStripInstances', stripCount, 64);
+      const ligatureGlyphBytes = bytes('LigatureGlyphInstances', ligatureCount, 64);
+      // Each population must reach its own GPU pass with the geometry its
+      // route gives it; an empty or rerouted pass cannot satisfy the pixel
+      // comparison alone. A doubled proportional run is drawn at its size:
+      // windows of a doubled master, one atlas texel to a pixel both ways.
+      const isOneToOne = (instances, count, axis) => {
+        const floats = new Float32Array(instances.buffer, instances.byteOffset, count * 16);
+        for (let index = 0; index < count; ++index) {
+          const size = floats[index * 16 + 2 + axis];
+          const atlasSpan = floats[index * 16 + 14 + axis] - floats[index * 16 + 12 + axis];
+          if (atlasSpan > 0 && Math.abs(size - atlasSpan) < 0.01) return true;
+        }
+        return false;
+      };
+      if (scene.population === 'proportional' && !isOneToOne(proportionalGlyphBytes, proportionalCount, 0) && !isOneToOne(proportionalStripBytes, stripCount, 0))
+        throw new Error('No doubled proportional quad samples its atlas rect texel for pixel: the run reached the GPU stretched');
+      if (scene.isDoubleHeight && !isOneToOne(proportionalGlyphBytes, proportionalCount, 1) && !isOneToOne(proportionalStripBytes, stripCount, 1))
+        throw new Error('No double-height proportional quad samples its window texel for pixel');
+      const cellWidth = call('CellWidth')();
+      const cellHeight = call('CellHeight')();
+      const cells = new Float32Array(cellBytes.buffer, cellBytes.byteOffset, cellCount * 16);
+      // A doubled mono glyph is drawn as windows of its doubled master, one
+      // a cell on the doubled row, each sampled texel for pixel; a cell that
+      // stretches its glyph is the 1x glyph magnified. Count the doubled
+      // row's windows, and the stretched cells, which there must be none of.
+      let stretchedCells = 0;
+      let verticallyStretchedCells = 0;
+      let doubledRowWindows = 0;
+      for (let index = 0; index < cellCount; ++index) {
+        const offset = index * 16;
+        const sourceWidth = cells[offset + 14] - cells[offset + 12];
+        const sourceHeight = cells[offset + 15] - cells[offset + 13];
+        if (sourceWidth <= 0 || cells[offset + 1] > 1)
+          continue;
+        const quadWidth = cells[offset + 2] * cellWidth;
+        if (quadWidth > sourceWidth * 1.5) {
+          ++stretchedCells;
+          if (sourceHeight > 0 && cellHeight > sourceHeight * 1.5)
+            ++verticallyStretchedCells;
+        } else if (Math.abs(quadWidth - sourceWidth) < 0.5 && Math.abs(cellHeight - sourceHeight) < 0.5) {
+          ++doubledRowWindows;
+        }
+      }
+      if (scene.population === 'mono' && (doubledRowWindows === 0 || stretchedCells > 0))
+        throw new Error('A doubled mono glyph is not drawn as windows of its doubled master texel for pixel');
+      const frame = {
+        cellBytes, cellCount,
+        proportionalGlyphBytes, proportionalGlyphCount: proportionalCount,
+        proportionalStripBytes, proportionalStripCount: stripCount,
+        ligatureGlyphBytes, ligatureGlyphCount: ligatureCount,
+        wideGlyphBytes: null, wideGlyphCount: 0,
+        colorGlyphBytes: null, colorGlyphCount: 0,
+        decorationBytes: null, decorationCount: 0,
+        overlayBytes: null, overlayCount: 0,
+        cellWidth, cellHeight, width, height,
+      };
+      const differences = () => {
+        renderer.drawFrame(frame);
+        const gpu = new Uint8Array(width * height * 4);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, gpu);
+        let differing = 0;
+        for (let y = 0; y < height; ++y) {
+          for (let x = 0; x < width; ++x) {
+            const source = (y * width + x) * 4;
+            const target = ((height - y - 1) * width + x) * 4;
+            if ([0, 1, 2, 3].some(channel => cpu[source + channel] !== gpu[target + channel]))
+              ++differing;
+          }
+        }
+        return differing;
+      };
+      const differing = differences();
+      let stretchedVerticalDiffering = null;
+      if (scene.isDoubleHeight) {
+        // Sampling every window from half its rows, stretched twice down,
+        // recreates the stretched double-height run the windows replace; the
+        // comparison must see it. Copies leave the authoritative frame bytes
+        // intact.
+        const withVerticalStretch = (instances, count) => {
+          const copy = instances.slice();
+          const floats = new Float32Array(copy.buffer, copy.byteOffset, count * 16);
+          for (let index = 0; index < count; ++index)
+            floats[index * 16 + 15] = floats[index * 16 + 13] + (floats[index * 16 + 15] - floats[index * 16 + 13]) / 2;
+          return copy;
+        };
+        frame.proportionalGlyphBytes = withVerticalStretch(proportionalGlyphBytes, proportionalCount);
+        frame.proportionalStripBytes = withVerticalStretch(proportionalStripBytes, stripCount);
+        stretchedVerticalDiffering = differences();
+        frame.proportionalGlyphBytes = proportionalGlyphBytes;
+        frame.proportionalStripBytes = proportionalStripBytes;
+        if (stretchedVerticalDiffering <= differing)
+          throw new Error('Stretched vertical control did not detect a rendering error');
+      }
+      results.push({ scene: scene.name, fontSize, proportionalCount, stripCount, doubledRowWindows, stretchedCells, verticallyStretchedCells, differing, stretchedVerticalDiffering });
+    }
+  }
+  verdict.textContent = JSON.stringify({ verdict: results.length === scenes.length * fontSizes.length && results.every(result => result.differing === 0) ? 'MATCH' : 'DIFFER', results });
+} catch (error) {
+  verdict.textContent = `ERROR ${String(error).replaceAll('\n', ' ')}`;
+}
+</script>

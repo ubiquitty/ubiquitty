@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8" />
+<title>CPU frame presentation parity</title>
+<style>
+    body {
+        background: #1d1f22;
+        color: #c5c8ce;
+        font: 14px monospace;
+    }
+    canvas {
+        width: 120px;
+        height: 120px;
+        image-rendering: pixelated;
+    }
+    pre {
+        white-space: pre-wrap;
+    }
+</style>
+<pre id="verdict">running</pre>
+<script type="module">
+    import { WebGLRenderer } from './webgl.js';
+    import createModule from './ubiquitty.js';
+    const verdict = document.getElementById('verdict');
+    try {
+        const canvas = document.createElement('canvas');
+        document.body.append(canvas);
+        canvas.width = 2;
+        canvas.height = 2;
+        const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+        const renderer = new WebGLRenderer(canvas);
+        const pixels = new Uint8ClampedArray([
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ]);
+        const results = [];
+        for (const [width, height] of [
+            [2, 2],
+            [1, 2],
+            [2, 2],
+        ]) {
+            canvas.width = width;
+            canvas.height = height;
+            renderer.presentRGBA(pixels.subarray(0, width * height * 4), width, height);
+            const output = new Uint8Array(width * height * 4);
+            gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, output);
+            let differences = 0;
+            for (let y = 0; y < height; y++)
+                for (let x = 0; x < width * 4; x++)
+                    differences += output[(height - y - 1) * width * 4 + x] !== pixels[y * width * 4 + x];
+            results.push({ width, height, differences, error: gl.getError() });
+        }
+        const module = await createModule();
+        const call = (name, result = 'number', types = [], values = []) =>
+            module.ccall('ubiquittyWeb' + name, result, types, values);
+        call('Create', null, ['number', 'number', 'number'], [8, 20, 1]);
+        const text = '\x1b]11;#123456\x07\x1b[?25lKitty image\r\n\x1b_Ga=T,f=24,s=1,v=1,c=4,r=2;/wAA\x1b\\';
+        call('Feed', null, ['string', 'number'], [text, new TextEncoder().encode(text).length]);
+        const base = call('Render');
+        const width = call('ImageWidth'),
+            height = call('ImageHeight');
+        canvas.width = width;
+        canvas.height = height;
+        const cpu = new Uint8ClampedArray(module.HEAPU8.buffer, base, width * height * 4);
+        renderer.presentRGBA(cpu, width, height);
+        const gpu = new Uint8Array(cpu.length);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, gpu);
+        let differences = 0,
+            red = 0;
+        for (let y = 0; y < height; y++)
+            for (let x = 0; x < width; x++) {
+                const source = (y * width + x) * 4,
+                    target = ((height - y - 1) * width + x) * 4;
+                if (cpu[source] === 255 && !cpu[source + 1] && !cpu[source + 2]) red++;
+                for (let channel = 0; channel < 4; channel++)
+                    differences += gpu[target + channel] !== cpu[source + channel];
+            }
+        results.push({ width, height, differences, red, error: gl.getError() });
+        if (!red) throw new Error('Core rendered no red image pixels');
+        verdict.textContent = JSON.stringify({
+            verdict: results.every((row) => !row.differences && !row.error) ? 'MATCH' : 'DIFFER',
+            results,
+        });
+    } catch (error) {
+        verdict.textContent = `ERROR ${error.stack}`;
+    }
+</script>

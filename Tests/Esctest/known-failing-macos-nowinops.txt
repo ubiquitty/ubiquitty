@@ -1,0 +1,28 @@
+# esctest2 cases that fail for profile: macos-nowinops
+#
+# NOT a list of things to ignore. It exists so the suite can still detect
+# change: a permanently-red case that nobody compares against makes a NEW
+# regression invisible, and a red line nobody can act on trains people to
+# stop reading the whole report.
+#
+# Both directions fail. A case failing that is absent here is a regression;
+# a case listed here that passes is a stale entry, and deleting it is the
+# fix. The second rule is what keeps this from becoming an allowlist.
+#
+# suite-commit 664be3c
+# taken-from   498 tests passed, 36 known bugs, 6 TESTS FAILED
+# runs         3
+#
+BSTests.test_BS_InitialReverseWraparound
+DECRQMTests.test_DECRQM_DEC_DECARM
+DECRQMTests.test_DECRQM_DEC_DECNCSM
+DECSETTests.test_DECSET_DECNCSM
+ResetSpecialColorTests.test_ResetSpecialColor_Dynamic
+
+# FLAKY — failed in some runs and not others, on ONE binary. Excluded
+# from the comparison in both directions, because a case that changes
+# answer by itself reports a regression half the time and a fix the
+# other half, and a gate that fires without a cause is one people learn
+# to skip. Listed rather than dropped so the flakiness stays visible:
+# these are the cases to make deterministic, not to forget.
+?DECSTBMTests.test_DECSTBM_TopBelowBottom

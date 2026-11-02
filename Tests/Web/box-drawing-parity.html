@@ -1,0 +1,108 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Shared box geometry GPU parity</title>
+<style>
+body { background: #222; color: white; font: 14px monospace; }
+#verdict { max-height: 8rem; overflow: auto; white-space: pre-wrap; }
+figure { display: inline-block; margin: 8px; vertical-align: top; }
+canvas { image-rendering: pixelated; }
+</style>
+<pre id="verdict">running</pre>
+<script type="module">
+import { WebGLRenderer } from './webgl.js';
+import createModule from './ubiquitty.js';
+
+try {
+  const module = await createModule();
+  const call = (name, result = 'number', parameters = []) => module.cwrap(`ubiquittyWeb${name}`, result, parameters);
+  // Optional only so a binary without the export can run as a negative control.
+  const optional = name => module[`_ubiquittyWeb${name}`]?.() || 0;
+  const patterns = [
+    ['joins', '  ╲   ╱  ╳\r\n   ╲ ╱  ╳\r\n    ╳  ╳\r\n   ╱ ╲'],
+    // Actual Neovim 0.12.5 :intro cells, captured in an owned clean PTY.
+    ['neovim', '  \x1b[96m│ \x1b[92m╲ ││\r\n  \x1b[96m││\x1b[92m╲╲││\r\n  \x1b[96m││ \x1b[92m╲ │'],
+    ['families', ' ░▒▓█ ▀▄▌▐\r\n ▖▗▘▙▚▛▜▝▞▟\r\n ╭─╮ ╔═╗\r\n ╰─╯ ╚═╝\r\n \ue0b0\ue0b1\ue0b2\ue0b3\ue0b4\ue0b5\ue0b6\ue0b7'],
+    ['cursor', '  ╳\x1b[1;3H\x1b[?25h\x1b[2 q'],
+  ];
+  const results = [];
+  for (const family of ['', 'monospace']) {
+    module.ubiquittyFontFamily = family;
+    for (const fontSize of [13, 20]) {
+      for (const [name, text] of patterns) {
+        call('Create', null, ['number', 'number', 'number'])(7, 16, 1);
+        call('SetFontSize', null, ['number'])(fontSize);
+        call('SetFocus', null, ['number'])(1);
+        const feed = '\x1b[?25l\x1b]10;#ffffff\x07\x1b]11;#000000\x07\x1b[37;40m' + text;
+        call('Feed', null, ['string', 'number'])(feed, new TextEncoder().encode(feed).length);
+        const base = call('Render')();
+        const width = call('ImageWidth')(), height = call('ImageHeight')();
+        const cpu = module.HEAPU8.slice(base, base + width * height * 4);
+        if (!call('BuildFrame')()) throw new Error('Frame withheld');
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.title = `${family || 'bitmap'} ${fontSize} ${name}`;
+        const figure = document.createElement('figure');
+        const label = document.createElement('figcaption');
+        label.textContent = canvas.title;
+        figure.append(label, canvas);
+        document.body.appendChild(figure);
+        const renderer = new WebGLRenderer(canvas);
+        const gl = canvas.getContext('webgl2');
+        const upload = (prefix, method) => {
+          const pointer = call(`${prefix}AtlasPixels`)();
+          const width = call(`${prefix}AtlasWidth`)(), height = call(`${prefix}AtlasHeight`)();
+          if (pointer && width && height)
+            renderer[method](module.HEAPU8.subarray(pointer, pointer + width * height), width, height);
+        };
+        upload('', 'uploadAtlas'); upload('Wide', 'uploadWideAtlas');
+        const bytes = (name, count, stride) => {
+          if (!count) return null;
+          const pointer = call(name)();
+          return module.HEAPU8.subarray(pointer, pointer + count * stride);
+        };
+        const cellCount = call('CellInstanceCount')(), wideGlyphCount = call('WideGlyphInstanceCount')();
+        const overlayCount = call('OverlayInstanceCount')(), boxFillCount = optional('BoxFillInstanceCount');
+        renderer.drawFrame({
+          cellBytes: bytes('CellInstances', cellCount, 64), cellCount,
+          wideGlyphBytes: bytes('WideGlyphInstances', wideGlyphCount, 64), wideGlyphCount,
+          overlayBytes: bytes('OverlayInstances', overlayCount, 112), overlayCount,
+          boxFillBytes: bytes('BoxFillInstances', boxFillCount, 112), boxFillCount,
+          isBitmapFace: Boolean(optional('FrameUsesBitmapFace')),
+          decorationCount: 0, colorGlyphCount: 0, proportionalGlyphCount: 0,
+          proportionalStripCount: 0, ligatureGlyphCount: 0,
+          cursorTier: {
+            cellCount: call('CursorTierCellCount')(),
+            boxFillCount: optional('CursorTierBoxFillCount'),
+            wideGlyphCount: call('CursorTierWideGlyphCount')(),
+          },
+          cellWidth: call('CellWidth')(), cellHeight: call('CellHeight')(), width, height,
+        });
+        const gpu = new Uint8Array(cpu.length);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, gpu);
+        let differing = 0, maximumError = 0;
+        for (let y = 0; y < height; ++y) {
+          for (let x = 0; x < width; ++x) {
+            const a = (y * width + x) * 4, b = ((height - y - 1) * width + x) * 4;
+            let error = 0;
+            for (let channel = 0; channel < 4; ++channel)
+              error = Math.max(error, Math.abs(cpu[a + channel] - gpu[b + channel]));
+            maximumError = Math.max(maximumError, error);
+            // Compare exact pixels, including join coverage; no displacement
+            // or antialiasing tolerance can conceal a clipped corner.
+            if (error !== 0) ++differing;
+          }
+        }
+        const error = gl.getError();
+        results.push({ family, fontSize, name, boxFillCount, differing, maximumError, error });
+      }
+    }
+  }
+  document.getElementById('verdict').textContent = JSON.stringify({
+    verdict: results.length === 16 && results.every(result => result.boxFillCount > 0 && result.differing === 0 && result.error === 0) ? 'MATCH' : 'DIFFER', results,
+  });
+} catch (error) {
+  document.getElementById('verdict').textContent = `ERROR ${String(error).replaceAll('\n', ' ')}`;
+}
+</script>

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="Ubiquitty Terminology" xmlns:xi="http://www.w3.org/2001/XInclude">
+
+    <!-- Inherit the Standard Suite: get / set / count / exists, plus the
+         standard application + window classes. Our suite extends these rather
+         than redeclaring them, so every script that targets a Cocoa app's
+         windows keeps working. -->
+    <xi:include href="file:///System/Library/ScriptingDefinitions/CocoaStandard.sdef"
+                xpointer="xpointer(/dictionary/suite)"/>
+
+    <suite name="Ubiquitty Suite" code="UbqT"
+           description="Terminal classes and commands for Ubiquitty.">
+
+        <!-- Bind the application's `window` collection to OUR scriptable window
+             objects (UBScriptableWindow) rather than the raw NSWindows, so the
+             terminal properties + tab element below are reachable. The KVC key
+             `scriptableWindows` is an NSApplication extension in
+             ScriptingBridge.swift, listing both shells' windows. -->
+        <class-extension extends="application" description="The Ubiquitty application.">
+            <cocoa class="NSApplication"/>
+            <element type="window" access="r">
+                <cocoa key="scriptableWindows"/>
+            </element>
+        </class-extension>
+
+        <!-- A terminal window. Inherits the Standard Suite window (bounds,
+             closeable, zoomed, …) and adds terminal properties + the tab
+             element. Bound to UBScriptableWindow (ScriptableWindow in
+             ScriptingBridge.swift), the lightweight scriptable wrapper around
+             either shell's window, found again by its window number. -->
+        <class name="window" code="cwin" inherits="window"
+               description="A terminal window.">
+            <cocoa class="UBScriptableWindow"/>
+            <property name="name" code="pnam" type="text" access="r"
+                      description="The title of the window.">
+                <cocoa key="scriptName"/>
+            </property>
+            <property name="id" code="ID  " type="integer" access="r"
+                      description="The unique identifier of the window.">
+                <cocoa key="scriptID"/>
+            </property>
+            <property name="index" code="pidx" type="integer"
+                      description="The index of the window, ordered front to back.">
+                <cocoa key="scriptIndex"/>
+            </property>
+            <property name="frontmost" code="pisf" type="boolean" access="r"
+                      description="Is the window the frontmost terminal window?">
+                <cocoa key="isScriptFrontmost"/>
+            </property>
+            <property name="contents" code="pcnt" type="text" access="r"
+                      description="The visible text of the window's focused session.">
+                <cocoa key="scriptContents"/>
+            </property>
+            <property name="title" code="ptit" type="text"
+                      description="The custom title of the window's focused session.">
+                <cocoa key="scriptTitle"/>
+            </property>
+            <element type="tab">
+                <cocoa key="scriptTabs"/>
+            </element>
+        </class>
+
+        <!-- One tab of a terminal window. Bound to UBScriptableTab. -->
+        <class name="tab" code="ttab" description="A tab of a terminal window.">
+            <cocoa class="UBScriptableTab"/>
+            <property name="id" code="ID  " type="integer" access="r"
+                      description="The unique identifier of the tab.">
+                <cocoa key="scriptID"/>
+            </property>
+            <property name="index" code="pidx" type="integer" access="r"
+                      description="The index of the tab within its window.">
+                <cocoa key="scriptIndex"/>
+            </property>
+            <property name="selected" code="pSel" type="boolean" access="r"
+                      description="Is the tab the selected tab of its window?">
+                <cocoa key="isScriptSelected"/>
+            </property>
+            <property name="contents" code="pcnt" type="text" access="r"
+                      description="The visible text of the tab's focused session.">
+                <cocoa key="scriptContents"/>
+            </property>
+            <property name="title" code="ptit" type="text"
+                      description="The custom title of the tab's focused session.">
+                <cocoa key="scriptTitle"/>
+            </property>
+        </class>
+
+        <!-- do script — run a command in a terminal session. The direct
+             parameter is the command text; the optional `in` parameter targets
+             a window or tab. With no target the front terminal window is used.
+             Returns the tab the command ran in. -->
+        <command name="do script" code="UbqTDScr"
+                 description="Run a command in a terminal session.">
+            <cocoa class="UBDoScriptCommand"/>
+            <direct-parameter type="text" optional="yes"
+                              description="The command to run."/>
+            <parameter name="in" code="kfil" optional="yes"
+                       description="The window or tab to run the command in.">
+                <cocoa key="targetSession"/>
+                <type type="tab"/>
+                <type type="window"/>
+            </parameter>
+            <result type="specifier"
+                    description="The tab the command was run in."/>
+        </command>
+
+    </suite>
+</dictionary>

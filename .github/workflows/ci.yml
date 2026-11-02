@@ -1,0 +1,386 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+
+# A newer push supersedes the same ref. Scheduled sweeps have an independent
+# group, so a busy landing queue cannot continually cancel the tip's verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'sweep' || github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "13,43 * * * *"
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+
+# Jobs use GitHub-hosted runners. Repository settings must keep self-hosted
+# runners unregistered: pull requests can supply their own workflow files.
+env:
+  UBQ_CI_ANNOTATE: "1"
+
+# Every job reads the checkout and nothing else. The repository's default token
+# is read-only too, but a job's grant is stated here rather than left to a
+# setting this file cannot show. Preflight adds the two reads ci_reach.py needs.
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    # Draft events still enter workflow concurrency to cancel prior ready runs.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    name: CI preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    outputs:
+      builds: ${{ steps.reach.outputs.builds }}
+      linux: ${{ steps.reach.outputs.linux }}
+      apple: ${{ steps.reach.outputs.apple }}
+      cmake: ${{ steps.reach.outputs.cmake }}
+      code: ${{ steps.reach.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Determine change reach and completed checkpoints
+        id: reach
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 Scripts/ci_reach.py
+      # A sweep that stands down runs no gate, so it concludes as the run that
+      # judged this tip did: a failed tip stays red, and the next sweep reads
+      # this run's failure as the same verdict rather than its skips as a pass.
+      - name: Keep this tip's failed verdict
+        if: steps.reach.outputs.standing == 'failure'
+        run: |
+          echo "::error title=CI reach::An earlier run of this commit failed a gate; this sweep did not run it again"
+          exit 1
+      # A hosted runner starts with no images, and this one takes minutes to
+      # build. It is kept in the Actions cache under its recipe's digest, so a
+      # run builds it only when the recipe changed, and a sweep that stands down
+      # for this tip (preflight=false) neither restores nor builds it.
+      - name: Name the CI image
+        id: image
+        if: runner.environment == 'github-hosted' && steps.reach.outputs.preflight != 'false'
+        run: echo "digest=$(./Scripts/ci-linux-image.sh --recipe-digest)" >> "$GITHUB_OUTPUT"
+      - name: Restore the CI image
+        id: restore-image
+        if: steps.image.outputs.digest != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          key: ci-linux-image-${{ steps.image.outputs.digest }}
+      - name: Run the fail-fast preflight
+        if: steps.reach.outputs.preflight != 'false'
+        env:
+          UBQ_CI_IMAGE_ARCHIVE: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          UBQ_CI_LINUX_IMAGE: ${{ runner.environment == 'github-hosted' }}
+        run: ./Scripts/ci-linux-image.sh python3 Scripts/ci_batteries.py run preflight
+      # Saved whether or not a gate failed: the image was built either way. A
+      # run that stopped before building it has no archive, and the save
+      # reports that without failing the job.
+      - name: Save the CI image
+        if: always() && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          key: ci-linux-image-${{ steps.image.outputs.digest }}
+      - name: Report completed, failed, and unexecuted preflight stages
+        if: always() && steps.reach.outputs.preflight != 'false'
+        run: python3 Scripts/ci_batteries.py report preflight
+      # A failed stage's log, in full, in the job log. CI uploads no artifacts: the
+      # job log is where a failure is read.
+      - name: Print the failed stage logs
+        if: failure()
+        run: |
+          for log in "$RUNNER_TEMP/ubiquitty-ci/preflight"/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::${log##*/}"
+            cat "$log"
+            echo "::endgroup::"
+          done
+  linux:
+    name: Linux battery
+    needs: preflight
+    if: needs.preflight.outputs.linux == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      UBQ_CI_CODE: ${{ needs.preflight.outputs.code }}
+      UBQ_CI_CMAKE: ${{ needs.preflight.outputs.cmake }}
+      UBQ_CI_PREFLIGHT_COMPLETE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # The Docker image, compiler cache, and test executables share the
+      # hosted runner's disk. These preinstalled SDKs are not dependencies of
+      # any battery; free their space before restoring the build caches.
+      - name: Free unused hosted SDK space
+        if: runner.environment == 'github-hosted' && runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup
+          df -h /
+      - name: Cache QUIC dependencies
+        if: needs.preflight.outputs.code == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ runner.workspace }}/build-gcc/quic-deps/lib
+            ${{ runner.workspace }}/build-gcc/quic-deps/include
+          key: quic-deps-${{ runner.os }}-${{ hashFiles('Scripts/fetch-quic-deps.sh') }}
+      # A hosted runner starts with an empty compiler cache, and the host test
+      # build then runs close to ubq_build's 900 s budget. The cache sits beside
+      # the checkout, where Scripts/ci-linux-image.sh points CCACHE_DIR, and is
+      # saved even when the battery fails, so the next run starts warm.
+      - name: Restore the compiler cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/ccache
+          key: ccache-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ccache-linux-
+      # The image preflight restored or built, under the same key.
+      - name: Name the CI image
+        id: image
+        if: runner.environment == 'github-hosted'
+        run: echo "digest=$(./Scripts/ci-linux-image.sh --recipe-digest)" >> "$GITHUB_OUTPUT"
+      - name: Restore the CI image
+        id: restore-image
+        if: steps.image.outputs.digest != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          key: ci-linux-image-${{ steps.image.outputs.digest }}
+      - name: Run the fail-fast Linux battery
+        id: battery
+        env:
+          UBQ_CI_IMAGE_ARCHIVE: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          UBQ_CI_LINUX_IMAGE: ${{ runner.environment == 'github-hosted' }}
+        run: ./Scripts/ci-linux-image.sh python3 Scripts/ci_batteries.py run linux
+      - name: Save the CI image
+        if: always() && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.temp }}/ubq-ci-linux-image.tar
+          key: ci-linux-image-${{ steps.image.outputs.digest }}
+      # The history reader requires both platform markers. A goldens-only
+      # battery, or a failed/cancelled partial run, is not a full checkpoint.
+      - name: Full Linux battery completed
+        if: steps.battery.outputs.full_code == 'true'
+        run: echo "Every enabled Linux code stage reached its verdict"
+      - name: Report completed, failed, and unexecuted Linux stages
+        if: always()
+        run: python3 Scripts/ci_batteries.py report linux
+      # A failed stage's log, in full, in the job log. CI uploads no artifacts: the
+      # job log is where a failure is read.
+      - name: Print the failed stage logs
+        if: failure()
+        run: |
+          for log in "$RUNNER_TEMP/ubiquitty-ci/linux"/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::${log##*/}"
+            cat "$log"
+            echo "::endgroup::"
+          done
+      - name: Save the compiler cache
+        if: always() && runner.environment == 'github-hosted'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/ccache
+          key: ccache-linux-${{ github.run_id }}-${{ github.run_attempt }}
+  apple:
+    name: Apple battery
+    needs: preflight
+    if: needs.preflight.outputs.apple == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      UBQ_CI_CODE: ${{ needs.preflight.outputs.code }}
+      UBQ_CI_CMAKE: ${{ needs.preflight.outputs.cmake }}
+      UBQ_CI_PREFLIGHT_COMPLETE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Selected Apple toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+      - name: Run the fail-fast Apple battery
+        id: battery
+        run: python3 Scripts/ci_batteries.py run apple
+      - name: Full Apple battery completed
+        if: steps.battery.outputs.full_code == 'true'
+        run: echo "Every enabled Apple code stage reached its verdict"
+      - name: Report completed, failed, and unexecuted Apple stages
+        if: always()
+        run: python3 Scripts/ci_batteries.py report apple
+      # A failed stage's log, in full, in the job log. CI uploads no artifacts: the
+      # job log is where a failure is read.
+      - name: Print the failed stage logs
+        if: failure()
+        run: |
+          for log in "$RUNNER_TEMP/ubiquitty-ci/apple"/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::${log##*/}"
+            cat "$log"
+            echo "::endgroup::"
+          done
+      - name: Tools the Apple battery ran with
+        if: always()
+        run: |
+          sw_vers
+          xcodebuild -version
+          tmux -V || echo "tmux: not installed"
+          chafa --version | head -1 || echo "chafa: not installed"
+          go version || echo "go: not installed"
+          ninja --version || echo "ninja: not installed"
+  host-linux-arm64:
+    name: Linux host build (glibc-arm64)
+    needs: preflight
+    if: needs.preflight.outputs.linux == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build (glibc)
+        # This image's `g++` is GCC 13, below the floor CMakeLists.txt refuses,
+        # so GCC 14 is installed and named.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++-14 pkg-config
+          CC=gcc-14 CXX=g++-14 ./Scripts/build-host.sh --release
+
+  coverage:
+    name: Coverage floor
+    needs: preflight
+    # A coverage job that fails independently of the pull request cannot decide
+    # whether that change lands. Re-enable this job once its instrumentation and
+    # floor are reliable; the coverage tooling remains available outside CI.
+    if: ${{ false }}
+    runs-on: ubuntu-24.04
+    # The build root sits beside the checkout rather than under the home
+    # directory's DerivedData. What ccache hashes is the path from the build
+    # directory to each source, which the base_dir setting rewrites relative:
+    # beside the checkout that path is the same in every job, so a compiler
+    # cache restored from another run can hit, and under DerivedData it runs
+    # through the runner's own directory name and cannot. Measured: with the
+    # DerivedData root, the same file compiled from two runner-shaped paths
+    # missed both times; beside the checkout it hit.
+    #
+    # CCACHE_STATSLOG is this job's own tally, printed by the last step, so a
+    # reader of one log knows what the cache did for that job.
+    timeout-minutes: 90
+    # Blocking. Runs the instrumented suite and enforces the per-file floors on
+    # every PR; the floors themselves live in Scripts/check-coverage-floor.sh,
+    # which is the only place they are worth reading. A job of its own:
+    # coverage instrumentation perturbs timing far beyond the noise floor, so
+    # it must never share a runner with benchmark measurements.
+    steps:
+      # A job's env cannot read the runner context, so the first step sets
+      # the two from the runner's own variables; every later step reads them.
+      - name: Build beside the checkout
+        run: |
+          echo "UBQ_BUILD_ROOT=$RUNNER_WORKSPACE/build" >> "$GITHUB_ENV"
+          echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this workflow reaches the repository over the network
+          # after checkout, so the token does not belong in .git/config.
+          persist-credentials: false
+          # Full history so the changed-line gate can diff against the PR base.
+          fetch-depth: 0
+      # A fresh clone has no hooks, and run-tests.sh reports on them before it
+      # runs anything, so without this the suite opens with a failed verdict
+      # about the clone rather than about the change.
+      - name: Install hooks
+        run: ./Scripts/install-hooks.sh
+      - name: Install clang + llvm
+        # ci-toolchain.sh skips the install when the resolved version of each
+        # tool and the digest of every workflow file match the stamp the last
+        # install recorded on this runner. A GitHub-hosted image starts every
+        # job without a stamp, so here the check costs one version probe and
+        # the install runs; a compiler that changed under the job, and a
+        # package list edited here, reach the install either way.
+        #
+        # On ubuntu-24.04 the distribution's clang and llvm are 18, below the
+        # floor in Scripts/cmake/ToolchainFloor.cmake, so that image needs
+        # clang-19 and llvm-19, with /usr/lib/llvm-19/bin first on PATH so the
+        # llvm-profdata and llvm-cov run-coverage.sh calls match the compiler.
+        run: |
+          if ./Scripts/ci-toolchain.sh check clang-llvm clang llvm-profdata llvm-cov; then
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y clang llvm
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y clang llvm
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm clang llvm
+          fi
+          ./Scripts/ci-toolchain.sh record clang-llvm clang llvm-profdata llvm-cov
+      # The instrumented suite runs the shell stanzas, and each configures a host
+      # build that wants the QUIC stack. Without it every one of them reports
+      # BUILD-BROKEN at CMakeLists.txt's fetch-quic-deps guard — the tests job
+      # builds these and this one did not.
+      - name: Cache QUIC deps (ngtcp2 + AWS-LC)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ env.UBQ_BUILD_ROOT }}/quic-deps/lib
+            ${{ env.UBQ_BUILD_ROOT }}/quic-deps/include
+          key: quic-deps-${{ runner.os }}-${{ hashFiles('Scripts/fetch-quic-deps.sh') }}
+      - name: Build QUIC deps (cache miss builds ngtcp2 + AWS-LC; cache hit skips)
+        run: ./Scripts/ensure-quic-deps.sh
+      - name: Coverage-gate tool self-test
+        run: bash ./Scripts/test-coverage-changed-lines.sh
+      - name: Instrumented suite + coverage floor
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          HTML=1 ./Scripts/run-coverage.sh
+          ./Scripts/check-coverage-floor.sh
+      - name: Changed-line coverage gate
+        # Needs a base to diff against, so pull-request only. The lcov lives
+        # under the build root, outside the checkout, where run-coverage.sh
+        # writes it.
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 ./Scripts/coverage-changed-lines.py \
+            --lcov "$UBQ_BUILD_ROOT/BuildHostTests/coverage/coverage.lcov" \
+            --base ${{ github.event.pull_request.base.sha }} \
+            --head ${{ github.event.pull_request.head.sha }} \
+            --json coverage-changed-lines.json
+      - name: "ccache: this job's hit rate"
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1 && [ -f "$CCACHE_STATSLOG" ]; then
+            ccache --show-log-stats
+          else
+            echo "no ccache tally for this job"
+          fi

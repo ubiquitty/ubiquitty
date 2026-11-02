@@ -1,0 +1,166 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+<meta charset="utf-8">
+<title>Grid ligature fusion and GPU parity</title>
+<body>
+<pre id="verdict">running</pre>
+<script type="module">
+// Grid ligatures on the browser arm, held to the browser's own shaping.
+//
+// The bundled JetBrains Mono fuses `=>`, `!=`, `>=`, `->` and `|>` under
+// `calt`. The same row is drawn three ways:
+//   - fused: the default configuration, the face's features applying;
+//   - descriptor off: ligatures on in the configuration, the face registered
+//     with `liga`, `clig` and `calt` off, so the browser's shaping changes
+//     nothing and the run comparison must find no substitution in it;
+//   - configuration off: `font.ligatures = false` over the plain face, which
+//     the rasterizer refuses to shape before drawing anything.
+// The fused raster must differ from the unfused ones on every operator pair and
+// on nothing else, the two unfused rasters must be one picture, and the GPU's
+// draw of the fused frame must be its CPU raster: the ligature pass binds a
+// sheet of its own, and only a fused run puts anything on it.
+//
+// Two sizes: at 20px the face advances exactly a cell, and at 13px it advances
+// a fraction short of one, so a strip that followed the face's pen instead of
+// the grid's would drift off its cells.
+import { WebGLRenderer } from './webgl.js';
+import { loadTerminalFonts, prepareFont } from './fonts.js';
+import createModule from './ubiquitty.js';
+
+const verdict = document.getElementById('verdict');
+try {
+  const coverage = await loadTerminalFonts();
+  const module = await createModule();
+  module.ubiquittyFontCoverage = coverage;
+  const call = (name, result = 'number', parameters = []) => module.cwrap(`ubiquittyWeb${name}`, result, parameters);
+  const configure = text => call('SetPreferenceBlob', null, ['string', 'string', 'number'])(
+    'config', text, new TextEncoder().encode(text).length);
+  const canvas = document.createElement('canvas');
+  document.body.appendChild(canvas);
+  const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+  if (!gl) throw new Error('No WebGL2 context');
+  const renderer = new WebGLRenderer(canvas);
+
+  // Every letter stands between spaces, so its cell holds its own ink and
+  // nothing a ligature beside it drew.
+  const row = 'x => y != z >= w -> v |> u';
+  const pairColumns = [2, 7, 12, 17, 22];
+  const letterColumns = [0, 5, 10, 15, 20, 25];
+  const suppressedFamily = await prepareFont('JetBrains Mono', '"liga" 0, "clig" 0, "calt" 0', '', coverage);
+  if (suppressedFamily === 'JetBrains Mono') throw new Error('The face carrying the suppression did not load');
+
+  const render = (family, configuration, fontSize) => {
+    module.ubiquittyFontFamily = family;
+    configure(`[font]\nsize = ${fontSize}\n${configuration}`);
+    call('Create', null, ['number', 'number', 'number'])(1, 32, 1);
+    const text = '\x1b[?25l' + row;
+    call('Feed', null, ['string', 'number'])(text, new TextEncoder().encode(text).length);
+    const base = call('Render')();
+    const width = call('ImageWidth')();
+    const height = call('ImageHeight')();
+    const cpu = module.HEAPU8.slice(base, base + width * height * 4);
+    if (!call('BuildFrame')()) throw new Error('The frame was withheld');
+    return {
+      cpu, width, height,
+      cellWidth: call('CellWidth')(),
+      cellHeight: call('CellHeight')(),
+      ligatureCount: call('LigatureGlyphInstanceCount')(),
+    };
+  };
+
+  // The frame just built, drawn by the GPU passes and compared exactly.
+  const gpuDiffering = frame => {
+    canvas.width = frame.width;
+    canvas.height = frame.height;
+    const bytes = (name, count) => {
+      const base = call(name)();
+      return module.HEAPU8.subarray(base, base + count * 64);
+    };
+    const upload = (prefix, method) => {
+      const pointer = call(`${prefix}AtlasPixels`)();
+      const width = call(`${prefix}AtlasWidth`)();
+      const height = call(`${prefix}AtlasHeight`)();
+      if (pointer && width > 0 && height > 0)
+        renderer[method](module.HEAPU8.subarray(pointer, pointer + width * height), width, height);
+    };
+    upload('', 'uploadAtlas');
+    upload('Wide', 'uploadWideAtlas');
+    upload('Ligature', 'uploadLigatureAtlas');
+    const cellCount = call('CellInstanceCount')();
+    renderer.drawFrame({
+      cellBytes: bytes('CellInstances', cellCount), cellCount,
+      ligatureGlyphBytes: bytes('LigatureGlyphInstances', frame.ligatureCount), ligatureGlyphCount: frame.ligatureCount,
+      wideGlyphBytes: null, wideGlyphCount: 0,
+      proportionalGlyphBytes: null, proportionalGlyphCount: 0,
+      proportionalStripBytes: null, proportionalStripCount: 0,
+      colorGlyphBytes: null, colorGlyphCount: 0,
+      decorationBytes: null, decorationCount: 0,
+      overlayBytes: null, overlayCount: 0,
+      cellWidth: frame.cellWidth, cellHeight: frame.cellHeight, width: frame.width, height: frame.height,
+    });
+    const gpu = new Uint8Array(frame.width * frame.height * 4);
+    gl.readPixels(0, 0, frame.width, frame.height, gl.RGBA, gl.UNSIGNED_BYTE, gpu);
+    let differing = 0;
+    for (let y = 0; y < frame.height; ++y) {
+      for (let x = 0; x < frame.width; ++x) {
+        const source = (y * frame.width + x) * 4;
+        const target = ((frame.height - y - 1) * frame.width + x) * 4;
+        if ([0, 1, 2, 3].some(channel => frame.cpu[source + channel] !== gpu[target + channel]))
+          ++differing;
+      }
+    }
+    return differing;
+  };
+
+  // Pixels that differ between two rasters of one geometry, over `cells`
+  // columns from `firstColumn`.
+  const differingIn = (one, other, firstColumn, cells) => {
+    let differing = 0;
+    const right = Math.min(one.width, (firstColumn + cells) * one.cellWidth);
+    for (let y = 0; y < one.height; ++y) {
+      for (let x = firstColumn * one.cellWidth; x < right; ++x) {
+        const at = (y * one.width + x) * 4;
+        if (one.cpu[at] !== other.cpu[at] || one.cpu[at + 1] !== other.cpu[at + 1] || one.cpu[at + 2] !== other.cpu[at + 2])
+          ++differing;
+      }
+    }
+    return differing;
+  };
+
+  const results = [];
+  for (const fontSize of [20, 13]) {
+    const fused = render('JetBrains Mono', '', fontSize);
+    const gpu = gpuDiffering(fused);
+    const descriptorOff = render(suppressedFamily, '', fontSize);
+    const configurationOff = render('JetBrains Mono', 'ligatures = false\n', fontSize);
+    for (const unfused of [descriptorOff, configurationOff]) {
+      if (unfused.width !== fused.width || unfused.height !== fused.height || unfused.cellWidth !== fused.cellWidth)
+        throw new Error(`${fontSize}px: the unfused frames have another geometry`);
+    }
+    const result = {
+      fontSize,
+      cellWidth: fused.cellWidth,
+      fusedLigatureInstances: fused.ligatureCount,
+      descriptorOffLigatureInstances: descriptorOff.ligatureCount,
+      configurationOffLigatureInstances: configurationOff.ligatureCount,
+      gpuDiffering: gpu,
+      unfusedDiffering: differingIn(descriptorOff, configurationOff, 0, 32),
+      pairDiffering: pairColumns.map(column => differingIn(fused, configurationOff, column, 2)),
+      letterDiffering: letterColumns.map(column => differingIn(fused, configurationOff, column, 1)),
+    };
+    result.isMatch = result.fusedLigatureInstances > 0
+      && result.descriptorOffLigatureInstances === 0
+      && result.configurationOffLigatureInstances === 0
+      && result.gpuDiffering === 0
+      && result.unfusedDiffering === 0
+      && result.pairDiffering.every(count => count > 0)
+      && result.letterDiffering.every(count => count === 0);
+    results.push(result);
+  }
+  verdict.textContent = JSON.stringify({ verdict: results.every(result => result.isMatch) ? 'MATCH' : 'DIFFER', results });
+} catch (error) {
+  verdict.textContent = `ERROR ${String(error).replaceAll('\n', ' ')}`;
+}
+</script>

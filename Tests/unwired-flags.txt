@@ -1,0 +1,55 @@
+# Flags whose only occurrence in the tree is their own read.
+#
+# Scripts/check-unwired-flags.py compares the measured set against this one:
+#
+#   a flag is unwired that is not listed  -> FAIL, a capability just went dark
+#   a listed flag gains a caller          -> FAIL, delete its line
+#   the sets match                        -> pass, and say so
+#
+# The second rule is what stops this rotting into an allowlist. Wiring a flag
+# cannot quietly leave a stale entry behind, because the stale entry is itself a
+# failure.
+#
+# Listing a flag is NOT a judgement that its absence is fine. It records that
+# the absence is known, and the note beside each says which of two things it is.
+#
+# --------------------------------------------------------------------------
+# NO ROUTE AT ALL. The setting is reachable only by typing the flag, so nothing
+# in any run reaches the code behind it.
+# --------------------------------------------------------------------------
+#
+# Six entries left together when the capability cases landed: `--text-gamma`,
+# `--bg-opacity`, `--dark-bg-gamma`, `--tek-glow`, `--tek-bg` and
+# `--tek-color-mode`. Two of them needed a scene before they could be reached at
+# all, which is worth keeping: `--dark-bg-gamma` acts on a dark CELL background,
+# which SGR sets and a dark window theme does not, and `--tek-glow` acts only
+# after DECSET 38 enters Tektronix mode. Probed against a light theme with no
+# Tek mode, both render identically to the baseline — the flag was not dead, the
+# scene could not express its condition.
+#
+# `--tek-bg` needed a companion rather than a scene: it is read only inside the
+# `tekColorMode == 1` branch, so passing it alone stores a value nothing
+# consumes and renders identically. Its case carries both flags.
+#
+# `--walk-arm` was the entry with a measured consequence. The flag, the inline
+# walk it selected and the render-parity gate that passed it are all deleted
+# with the second cell builder; the consequence stays recorded because the
+# shape is durable: unpassed, that gate compared Core's glyph streams against
+# an empty capture in every scene, printed `0/N glyphs` — no mismatches — and
+# reported a whole seam.
+#
+# `--no-ligatures` is read by `SurfaceRenderProfile.swift` and passed by
+# nothing. It kept the deleted parity gate's second pass deterministic; what
+# remains is a hand A/B knob for profiling ligature cost, the same class as
+# `--grid-cache`, and a lane for it belongs to whoever next measures ligatures
+# rather than to a placeholder invocation added to satisfy this file.
+--no-ligatures  Source/UbiquittyKit/Swift/SurfaceRenderProfile.swift
+
+# --------------------------------------------------------------------------
+# SECOND ROUTE. A configs/*.toml key sets the same thing and cases use it, so
+# the capability is exercised and only this spelling of it is dead. Removing
+# the flag would cost nothing; wiring it would prove nothing the config does
+# not already prove.
+# --------------------------------------------------------------------------
+--beam  Source/Core/App/SnapshotRequest.h
+--bg  Source/Core/App/SnapshotRequest.h

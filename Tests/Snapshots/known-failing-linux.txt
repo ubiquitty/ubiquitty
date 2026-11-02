@@ -1,0 +1,9 @@
+# One line per gap: the identifier, two spaces, why, and the date it was recorded.
+# The Linux driver (Source/Platform/Linux/main.cpp) parses every flag a case passes;
+# an entry here is a renderer gap, named in its reason.
+#
+# A line may carry a pixel ceiling — `identifier  [max Npx] why (date)` — which
+# reds when the difference grows past it; see known-failing-macos.txt for the
+# rule. A case the driver refuses before drawing has no distance to bound and
+# carries none.
+case:swift_cursor_bar:unifont:linux  [max 80px] the unifont golden is shared by every arm and shows Core's capsule bar; Linux draws GTK's own insertion caret by decision, a 1-logical-px square stem whose GPU bar matches GTK pixel for pixel, so the caret columns differ by design (2026-10-18)

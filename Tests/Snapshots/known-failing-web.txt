@@ -1,0 +1,21 @@
+# Cases the web backend has never rendered to match its golden.
+#
+# The runner compares the failing SET against this file, not the count:
+#
+#   a case fails that is not listed  -> FAIL, a new regression
+#   a listed case passes            -> FAIL, delete its line
+#   a listed case is worse than its
+#   ceiling                         -> FAIL, under its own name
+#   the sets match                  -> pass, and say so
+#
+# A line may carry a pixel ceiling: `identifier  [max Npx] why (YYYY-MM-DD)`.
+# The set rules above cannot see a waived case getting WORSE — the identifier is
+# listed either way, so nothing reports the difference growing. The number a
+# case measured when it was excused rides the entry, exceeding it reds, and
+# `run.py --update-budgets` records it for whichever arms a run rendered.
+# `--require-ceilings`, which the push gate passes for every arm but linux,
+# refuses a run in which a waived case measured a distance and named no ceiling.
+#
+# An entry has none when there is no distance to bound: a case the arm refused
+# before it drew anything, or a pair whose frames differ in SIZE and so share no
+# pixel to count. The run says which of those each one is.

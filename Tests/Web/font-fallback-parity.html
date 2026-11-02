@@ -1,0 +1,89 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Browser font fallback routing</title>
+<pre id="verdict">running</pre>
+<script type="module">
+import createModule from './ubiquitty.js';
+
+const verdict = document.getElementById('verdict');
+try {
+  const page = new DOMParser().parseFromString(await (await fetch('./index.html')).text(), 'text/html');
+  const style = document.createElement('style');
+  style.textContent = page.querySelector('style').textContent;
+  document.head.appendChild(style);
+  await Promise.all(Array.from(document.fonts, face => face.load()));
+  for (const family of ['Range Symbols', 'Second Symbols']) {
+    const face = new FontFace(family, 'url("./fonts/SymbolsNerdFontMono-Regular.ttf")');
+    document.fonts.add(await face.load());
+  }
+  const module = await createModule();
+  module.ubiquittyFontFamily = 'JetBrains Mono';
+  const call = (name, result = 'number', parameters = []) => module.cwrap(`ubiquittyWeb${name}`, result, parameters);
+  const configure = text => call('SetPreferenceBlob', null, ['string', 'string', 'number'])(
+    'config', text, new TextEncoder().encode(text).length);
+  const feed = text => call('Feed', null, ['string', 'number'])(text, new TextEncoder().encode(text).length);
+  const draws = [];
+  const originalFillText = CanvasRenderingContext2D.prototype.fillText;
+  CanvasRenderingContext2D.prototype.fillText = function(text, ...arguments_) {
+    if (this === module.ubiquittyFontContext) draws.push({ text, font: this.font });
+    return originalFillText.call(this, text, ...arguments_);
+  };
+  const results = [];
+  const draw = (name, text, expectedFamily, configuration = '', recreate = true) => {
+    configure('[font]\nsize = 20\n' + configuration);
+    if (recreate) call('Create', null, ['number', 'number', 'number'])(2, 16, 1);
+    feed('\x1b[2J\x1b[H\x1b[?25l' + text);
+    draws.length = 0;
+    const pointer = call('Render')();
+    const width = call('ImageWidth')();
+    const height = call('ImageHeight')();
+    const pixels = module.HEAPU8.slice(pointer, pointer + width * height * 4);
+    const actual = draws.findLast(entry => entry.text === text);
+    if (!actual || !actual.font.includes(expectedFamily))
+      throw new Error(`${name}: expected ${expectedFamily}, got ${JSON.stringify(draws)}`);
+    const background = pixels.slice(0, 3);
+    let ink = 0;
+    for (let offset = 0; offset < pixels.length; offset += 4)
+      if ([0, 1, 2].some(channel => pixels[offset + channel] !== background[channel])) ++ink;
+    if (!ink) throw new Error(`${name}: the routed glyph drew no pixels`);
+    results.push({ name, font: actual.font, ink });
+    return pixels;
+  };
+  draw('primary', 'A', 'JetBrains Mono');
+  for (const codePoint of [0xe5fa, 0xe700, 0xea60, 0xf013, 0xf101, 0xf0001])
+    draw(`bundled-${codePoint.toString(16)}`, String.fromCodePoint(codePoint), 'Symbols Nerd Font Mono');
+  const icon = String.fromCodePoint(0xf013);
+  const bundled = draw('bundled-control', icon, 'Symbols Nerd Font Mono');
+  const mapped = draw('configured-symbols', icon, 'Range Symbols', 'symbol_fallback = "Range Symbols"\n');
+  if (mapped.length !== bundled.length || mapped.some((value, index) => value !== bundled[index]))
+    throw new Error('The same shipped font under an explicit family renders differently');
+  const range = family => `\n[[font.range_map]]\nrange = "U+F013-U+F013"\nmode = "custom"\nfamily = "${family}"\n`;
+  draw('range-override', icon, 'Range Symbols', range('Range Symbols'));
+  draw('range-array-order', icon, 'Range Symbols', range('Range Symbols') + range('Second Symbols'));
+  draw('missing-range-falls-through', icon, 'Symbols Nerd Font Mono', range('ubiquitty missing font'));
+  draw('missing-first-range-falls-through', icon, 'Symbols Nerd Font Mono', range('ubiquitty missing font') + range('Second Symbols'));
+  const inclusiveRange = '\n[[font.range_map]]\nrange = "U+F013-U+F014"\nmode = "custom"\nfamily = "Range Symbols"\n';
+  draw('range-first-boundary', '\uF013', 'Range Symbols', inclusiveRange);
+  draw('range-last-boundary', '\uF014', 'Range Symbols', inclusiveRange);
+  draw('range-before-boundary', '\uF012', 'Symbols Nerd Font Mono', inclusiveRange);
+  draw('range-after-boundary', '\uF015', 'Symbols Nerd Font Mono', inclusiveRange);
+  draw('primary-precedence', 'A', 'JetBrains Mono', '\n[[font.range_map]]\nrange = "U+0041"\nmode = "custom"\nfamily = "Range Symbols"\n');
+  draw('reload-before', icon, 'Range Symbols', range('Range Symbols'));
+  const generation = call('FontResourceGeneration')();
+  draw('reload-after', icon, 'Second Symbols', range('Second Symbols'), false);
+  if (call('FontResourceGeneration')() <= generation)
+    throw new Error('Changing a range did not invalidate the font resources');
+  draw('reload-default', icon, 'Symbols Nerd Font Mono', '', false);
+  for (const [name, text] of [['emoji-default', '😀'], ['emoji-heart', '❤️'], ['emoji-keycap', '1️⃣'], ['emoji-joined', '👩‍🚀'], ['emoji-grayscale', '⚪']]) {
+    const pixels = draw(name, text, 'Noto Color Emoji');
+    if (!pixels.some((value, index) => index % 4 === 0 && value !== pixels[index + 1])) {
+      if (name !== 'emoji-grayscale') throw new Error(`${name}: no colored pixels were drawn`);
+    }
+  }
+  verdict.textContent = JSON.stringify({ verdict: 'MATCH', results });
+} catch (error) {
+  verdict.textContent = `ERROR ${error.message || error}`;
+}
+</script>

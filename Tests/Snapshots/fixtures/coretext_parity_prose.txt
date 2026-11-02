@@ -1,0 +1,13 @@
+A fresh build is ready; it checks out.
+The quick brown fox jumps over the dog.
+Kerning: AV AW Ta Te To Tr Ty Va Wa Yo
+Ligatures and pairs: fi fl ff ffi f) f?
+Wide and narrow: WWWW mmmm iiii llll ....
+Install updates? Remind me later. Cancel.
+Figures: (1,234.56) [x] {y} 50% $9.99 #42
+Diacritics: café naïve résumé Zürich Åse
+THE QUICK BROWN FOX, the quick brown fox
+internationalization, characteristically
+a b c d e f g h i j k l m n o p q r s t
+Symbols: + - * / = ~ ^ | \ & % $ # @ ! ?
+Numbers: 1 fox, 12 dogs, 123 cats, 1234.

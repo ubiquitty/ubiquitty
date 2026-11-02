@@ -1,0 +1,227 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8" />
+<title>Workspace rich text regression</title>
+<style>
+    body {
+        background: #1d1f22;
+        color: #c5c8ce;
+        font: 14px system-ui;
+    }
+    pre {
+        white-space: pre-wrap;
+    }
+</style>
+<pre id="verdict">running</pre>
+<script type="module">
+    import createModule from './ubiquitty.js';
+    import { loadTerminalFonts } from './fonts.js';
+    import { RichTextRenderer } from './rich-text.js';
+    const verdict = document.getElementById('verdict');
+    try {
+        const module = await createModule();
+        module.ubiquittyFontCoverage = await loadTerminalFonts();
+        module.ubiquittyFontFamily = 'JetBrains Mono';
+        const calls = new Map();
+        const adapter = (id) => {
+            const renderer = new RichTextRenderer(document);
+            const shape = renderer.shape.bind(renderer);
+            renderer.shape = (model) => {
+                calls.set(id, (calls.get(id) || 0) + 1);
+                return shape(model);
+            };
+            return renderer;
+        };
+        const root = adapter(0),
+            first = adapter(1),
+            second = adapter(2);
+        const call = (name, result = 'number', types = [], values = []) =>
+            module.ccall('ubiquittyWeb' + name, result, types, values);
+        const feed = (bytes) => call('Feed', null, ['string', 'number'], [bytes, new TextEncoder().encode(bytes).length]);
+        const replies = () => {
+            const buffer = module._malloc(65536);
+            try {
+                const count = call('TakeReplies', 'number', ['number', 'number'], [buffer, 65536]);
+                return new TextDecoder().decode(module.HEAPU8.subarray(buffer, buffer + count));
+            } finally {
+                module._free(buffer);
+            }
+        };
+        const fontPage = (offset = 0, epoch = null) => {
+            feed(`\x1b]7404;a=f:i=17:b=${offset}:n=1${epoch === null ? '' : `:E=${epoch}`};\x1b\\`);
+            const reply = replies();
+            const field = (name) => Number(reply.match(new RegExp(`:${name}=(\\d+)`))?.[1]);
+            if (!reply.includes(':s=ok;') || field('F') !== 1) throw new Error(`expected exposed font inventory: ${reply}`);
+            const payload = reply.slice(reply.lastIndexOf(';') + 1, -2);
+            const families = payload ? payload.split(',').map((name) => new TextDecoder('utf-8', { fatal: true }).decode(
+                Uint8Array.from(name.match(/../g), (byte) => Number.parseInt(byte, 16)),
+            )) : [];
+            if (families.length !== field('n')) throw new Error('font catalog count differs from payload');
+            return { epoch: field('E'), offset: field('b'), total: field('t'), families };
+        };
+        const probe = (id) => {
+            call('SelectWorkspacePane', 'number', ['number'], [id]);
+            feed('\x1b]7404;a=q:i=7:w=0:h=0;\x1b\\');
+            const buffer = module._malloc(4096);
+            try {
+                const count = call('TakeReplies', 'number', ['number', 'number'], [buffer, 4096]);
+                const reply = new TextDecoder().decode(module.HEAPU8.subarray(buffer, buffer + count));
+                const field = (name) => Number(reply.match(new RegExp(`:${name}=(\\d+)`))?.[1]);
+                if (field('K') !== 1 || field('Q') !== 1) throw new Error(`pane ${id} has no native renderer: ${reply}`);
+                return { epoch: field('E'), width: field('W'), height: field('H') };
+            } finally {
+                module._free(buffer);
+            }
+        };
+        module.ubiquittyRichText = root;
+        call('CreateWorkspace', null, ['number', 'number', 'number'], [24, 80, 1]);
+        for (const [id, renderer] of [
+            [1, first],
+            [2, second],
+        ]) {
+            module.ubiquittyRichText = renderer;
+            if (
+                !call(
+                    'CreateWorkspacePane',
+                    'number',
+                    ['number', 'number', 'number', 'number'],
+                    [id, 24, 80, 1],
+                )
+            )
+                throw new Error('pane creation failed');
+        }
+        const rtf =
+            '{\\rtf1\\fs28 Browser shaping belongs to the pane, even while Sync runs on the carrier. \\b Bold\\b0  and Unicode אבג}';
+        // Model an inbound Sync callback: the carrier owns Module's current adapter,
+        // while Core invokes another pane's retained shaper.
+        module.ubiquittyRichText = root;
+        for (const id of [1, 2]) {
+            call('SelectWorkspacePane', 'number', ['number'], [id]);
+            call('SetFontSize', null, ['number'], [id === 1 ? 12 : 24]);
+            const bytes = '\x1b]7404;a=p:i=1:w=32:h=8;' + rtf + '\x1b\\';
+            feed(bytes);
+            call('BuildFrame');
+            const frame = JSON.parse(call('RichTextFrameJSON', 'string'));
+            if (!frame.blocks[0]?.document?.lines.length) throw new Error(`pane ${id} has no shaped lines`);
+        }
+        if (calls.has(0) || !calls.get(1) || !calls.get(2))
+            throw new Error('measurement leaked into the carrier or sibling');
+        const before = [probe(1), probe(2)];
+        if (before[0].width === before[1].width || before[0].height === before[1].height)
+            throw new Error('two panes lost their independent font metrics');
+        document.fonts.dispatchEvent(new Event('loadingdone'));
+        const after = [probe(1), probe(2)];
+        for (let index = 0; index < 2; ++index) {
+            if (before[index].epoch === after[index].epoch)
+                throw new Error('equal dense metrics hid a native renderer revision');
+            if (before[index].width !== after[index].width || before[index].height !== after[index].height)
+                throw new Error('font invalidation changed unchanged font geometry');
+        }
+        call('SelectWorkspacePane', 'number', ['number'], [1]);
+        const originalCatalog = fontPage();
+        const namedFamily = '標本 "字体" \\20 🦉';
+        for (const [file, style] of [
+            ['JetBrainsMono[wght].ttf', 'normal'],
+            ['JetBrainsMono-Italic[wght].ttf', 'italic'],
+        ]) {
+            const response = await fetch(`./fonts/${file}`);
+            const face = await new FontFace(namedFamily, await response.arrayBuffer(), { weight: '100 800', style }).load();
+            document.fonts.add(face);
+        }
+        const catalog = fontPage();
+        if (catalog.epoch === originalCatalog.epoch) throw new Error('new named family did not invalidate catalog pagination');
+        const catalogNames = [...catalog.families];
+        while (catalogNames.length < catalog.total) {
+            const page = fontPage(catalogNames.length, catalog.epoch);
+            if (!page.families.length || page.total !== catalog.total || page.epoch !== catalog.epoch)
+                throw new Error('font catalog pagination is not one stable snapshot');
+            catalogNames.push(...page.families);
+        }
+        if (!catalogNames.includes(namedFamily) || !catalogNames.includes('JetBrains Mono') || catalogNames.includes('Imaginary Installed Font'))
+            throw new Error('font inventory is not the loaded FontFaceSet');
+        feed(`\x1b]7404;a=f:i=18:b=1:n=1:e=1:E=${originalCatalog.epoch};\x1b\\`);
+        if (!replies().includes('stale')) throw new Error('retired font catalog continuation was accepted');
+        if (!call('SetRenderingPreferences', 'number', ['string'], ['{"font.proportional_size":18}']))
+            throw new Error('proportional size setup failed');
+        const paintingFrame = document.createElement('iframe');
+        const paintingReady = new Promise((resolve) => paintingFrame.addEventListener('load', resolve, { once: true }));
+        paintingFrame.srcdoc = '<!doctype html><body></body>';
+        document.body.append(paintingFrame);
+        await paintingReady;
+        first.fontCatalog.addFontSet(paintingFrame.contentDocument.fonts);
+        const escapedFamily = namedFamily.replace(/[\\{};]/g, '\\$&');
+        for (const [controls, bits] of [['', 0], ['\\b ', 1], ['\\i ', 2], ['\\b\\i ', 3]]) {
+            feed(`\x1b[H\x1b]7404;a=p:i=1:w=32:h=4:g=1;{\\rtf1{\\fonttbl{\\f0\\fnil ${escapedFamily};}}\\f0\\fs24 ${controls}iiiiWWWW}\x1b\\`);
+            call('BuildFrame');
+            const frame = JSON.parse(call('RichTextFrameJSON', 'string'));
+            const model = frame.blocks[0]?.document;
+            if (!model || model.styles[0].name !== namedFamily || model.styles[0].bits !== bits || model.styles[0].family !== 0 || model.styles[0].size !== 18)
+                throw new Error('RTF Unicode family or fallback class was lost before painting');
+            const line = first.textElement({ ...model, families: frame.families }, 0, 8);
+            document.body.append(line.element);
+            const namedWidth = line.element.getBoundingClientRect().width;
+            line.element.remove();
+            const painted = paintingFrame.contentDocument.createElement('span');
+            painted.textContent = 'iiiiWWWW';
+            painted.style.display = 'inline-block';
+            first.applyStyle(painted, model.styles[0], frame.families);
+            paintingFrame.contentDocument.body.append(painted);
+            if (Math.abs(painted.getBoundingClientRect().width - namedWidth) > 0.1)
+                throw new Error('measurement font was unavailable in the painting document');
+            painted.remove();
+            const sans = first.textElement({ ...model, styles: model.styles.map((style) => ({ ...style, name: '' })), families: frame.families }, 0, 8);
+            document.body.append(sans.element);
+            const fallbackWidth = sans.element.getBoundingClientRect().width;
+            sans.element.remove();
+            if (Math.abs(namedWidth - fallbackWidth) < 1)
+                throw new Error(`named font rendered as the generic fallback: style=${bits}, named=${namedWidth}, fallback=${fallbackWidth}, families=${JSON.stringify(frame.families)}, resolved=${first.fontCatalog.family(namedFamily)}`);
+            const measured = first.shape({ ...model, families: frame.families, paragraphs: [[0, 8, 200, 0]], tabWidth: 32 });
+            if (!measured || measured[0] !== 1 || Math.abs(measured[6] / 4096 - namedWidth) > 0.1)
+                throw new Error('named family measurement and retained drawing disagree');
+        }
+        first.fontCatalog.removeFontSet(paintingFrame.contentDocument.fonts);
+        paintingFrame.remove();
+        // Native widths are checked before conversion to Wasm int32 cells.
+        // A legal RTF run can still exceed the geometry representation when
+        // a clip paragraph contains thousands of maximum-size glyphs.
+        const oversizedText = Array(4096).fill('W'.codePointAt(0));
+        const oversized = first.shape({
+            text: oversizedText,
+            styles: [{ first: 0, end: oversizedText.length, family: 0, size: 500, bits: 0 }],
+            families: ['sans-serif', 'serif', 'monospace'],
+            paragraphs: [[0, oversizedText.length, 100, 0]],
+            clip: true,
+        });
+        if (oversized !== null) throw new Error('unrepresentable browser geometry was silently narrowed');
+        const hidden = document.createElement('div');
+        hidden.hidden = true;
+        hidden.append(first.root);
+        document.body.append(hidden);
+        const text = [...'Hidden tabs still answer measurement requests.'].map((c) => c.codePointAt(0));
+        const measured = first.shape({
+            text,
+            styles: [{ first: 0, end: text.length, family: 0, size: 14, bits: 0 }],
+            families: ['sans-serif', 'serif', 'monospace'],
+            paragraphs: [[0, text.length, 100, 0]],
+            tabWidth: 32,
+        });
+        if (!measured || measured[0] < 2 || measured[4] <= 0)
+            throw new Error('hidden tab measurement lost its layout');
+        call('DestroyWorkspacePane', null, ['number'], [1]);
+        if (module.ubiquittyRichTextAdapters.size !== 2 || first.measureRoot.isConnected)
+            throw new Error('destroyed pane retained its adapter');
+        call('CreateWorkspace', null, ['number', 'number', 'number'], [24, 80, 1]);
+        if (second.measureRoot.isConnected) throw new Error('workspace reset retained child measurements');
+        verdict.textContent = JSON.stringify({
+            verdict: 'PASS',
+            measuredPanes: [...calls.keys()],
+            hiddenTabLines: measured[0],
+            releasedAdapters: true,
+            paneTypography: after,
+            fontCatalog: { scope: 'exposed', families: catalogNames.length, unicodeFamily: true },
+        });
+    } catch (error) {
+        verdict.textContent = 'ERROR ' + error.stack;
+    }
+</script>

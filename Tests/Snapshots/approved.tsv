@@ -1,0 +1,13 @@
+# Approved goldens: one line per golden that has been checked by eye.
+#
+# golden	sha256	approved_on	note
+#
+# A listed golden cannot be re-minted. run.py refuses --update, --update-missing
+# and --remint-passing on it, whatever the render shows: a render that differs
+# from an approved golden is a failure of the renderer, and the message says so.
+# check-approved-goldens.py fails a push when a listed golden's bytes differ
+# from the hash here, when the file is gone, or when a line is rewritten in
+# place against origin/main. To change an approved picture, delete its line in
+# one change and land that; approve the new picture with Tools/approve-golden.py
+# in another. Both steps are visible in a diff, which is the point.
+Tests/Snapshots/golden/native/freetype/osc66_fraction_alignment.png	f948eb73f97797d8b45076e4de08095c2c0fb1dc4b34d13687da2b18c1fb0060	2026-10-27	approved by the maintainer on the review page, 2026-10-27: the fractional superscript and the s=3 n=1:d=2 A on their fractional rows

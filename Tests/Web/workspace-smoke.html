@@ -1,0 +1,84 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Workspace browser contracts</title>
+<pre id="verdict">running</pre>
+<iframe src="./workspace.html" style="width:1000px;height:700px"></iframe>
+<script type="module">
+const verdict = document.querySelector('#verdict');
+const frame = document.querySelector('iframe');
+const waitFor = async (read) => {
+    const end = performance.now() + 15000;
+    while (performance.now() < end) {
+        const value = read();
+        if (value) return value;
+        await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('Workspace fixture timed out');
+};
+try {
+    await waitFor(() => frame.contentDocument.querySelector('#connection')?.onclick);
+    const win = frame.contentWindow, doc = frame.contentDocument;
+    const carrierFrame = doc.querySelector('#carrier');
+    const carrier = await carrierFrame.contentWindow.ubiquitty.ready;
+    const pendingAmounts = [];
+    const createModule = win.ubiquittyWorkspace.createModule;
+    win.ubiquittyWorkspace.createModule = async (id) => {
+        const module = await createModule(id);
+        return new Proxy(module, { get(target, property) {
+            if (property !== 'cwrap') return target[property];
+            return (name, ...arguments_) => {
+                const call = target.cwrap(name, ...arguments_);
+                return (...values) => {
+                    if (name === 'ubiquittyWebTakePendingHostFrame') pendingAmounts.push(values[0]);
+                    return call(...values);
+                };
+            };
+        }, set(target, property, value) { target[property] = value; return true; } });
+    };
+    let attached = false;
+    Object.defineProperty(carrier, 'connectionState', { get: () => attached ? 'attached' : 'detached' });
+    Object.defineProperty(carrier, 'bufferedAmount', { get: () => 2097152 });
+    carrier.connect = () => { attached = true; };
+    carrier.sendTransport = () => true;
+    const pane = { id: 4, sessionID: 42, title: 'Fixture', label: '', directory: '', homeDirectory: '', rows: 24, columns: 80, attendees: [] };
+    carrier.workspaceTree = () => ({ complete: true, workspaces: [{ id: 1, name: 'Fixture', revision: '1', activeWindow: 0,
+        windows: [{ id: 2, activeTab: 0, tabs: [{ id: 3, focusedPane: 0, panes: [pane], split: { sessionID: 42 } }] }] }] });
+    doc.querySelector('#connection').click();
+    doc.querySelector('[data-add]').click();
+    doc.querySelector('[data-manual]').click();
+    doc.querySelector('[name=url]').value = 'ws://127.0.0.1:1/fixture';
+    doc.querySelector('form').requestSubmit();
+    carrierFrame.contentWindow.dispatchEvent(new Event('ubiquitty-workspace-frame'));
+    const workspaceButton = await waitFor(() => doc.querySelector('[data-workspace="1"]'));
+    workspaceButton.click();
+    const paneFrame = await waitFor(() => doc.querySelector('iframe[data-workspace-view="42"]'));
+    const paneAPI = await waitFor(() => paneFrame.contentWindow.ubiquitty);
+    const api = await paneAPI.ready;
+    await waitFor(() => pendingAmounts.length);
+    if (pendingAmounts.at(-1) !== 2097152) throw new Error('Pane ignored the carrier backlog');
+
+    const queries = [];
+    api.search = (query) => { queries.push(query); return { foundCount: 0, isComplete: false }; };
+    doc.querySelector('#find-open').click();
+    const input = doc.querySelector('#dialog input');
+    input.value = 'needle';
+    input.dispatchEvent(new Event('input'));
+    paneFrame.contentWindow.dispatchEvent(new CustomEvent('ubiquitty-search', { detail: { foundCount: 3, isComplete: true } }));
+    if (doc.querySelector('[data-results]').textContent !== '3 matches') throw new Error('Find ignored its publication');
+    doc.querySelector('#dialog').dispatchEvent(new Event('cancel', { cancelable: true }));
+    if (doc.querySelector('#dialog').open || queries.at(-1) !== '') throw new Error('Closing Find did not cancel its search');
+
+    const hostilePID = '<img src=x data-host-injection>';
+    Object.defineProperty(api, 'metadata', { get: () => ({ records: [], host: { paneHandle: 1 } }) });
+    carrier.hostCall = async () => ({ available: true, complete: true, processes: [{ pid: hostilePID, parentPID: 0, name: 'test', executable: 'test', command: 'test' }] });
+    doc.querySelector('#inspector-open').click();
+    await waitFor(() => doc.querySelector('.process-row'));
+    if (doc.querySelector('[data-host-injection]') || !doc.querySelector('.pid').textContent.includes(hostilePID))
+        throw new Error('Process metadata was interpreted as HTML');
+    verdict.textContent = JSON.stringify({ verdict: 'PASS', backpressure: true, findPublication: true, findCancel: true, processText: true });
+} catch (error) {
+    verdict.textContent = 'ERROR ' + error.stack;
+}
+</script>
