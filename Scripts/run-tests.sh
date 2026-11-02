@@ -2086,7 +2086,8 @@ fi
 # strips baking a CoreText LastResort ?-box tofu into a cached image (where the
 # grid cache freezes it). Plain `xcrun swiftc` with LastResort.swift alone, as
 # test_macos_settings_search is built: it detects a LastResort-attributed run,
-# ignores a covered (Menlo) run, and reports nothing for an empty line.
+# ignores a covered (Menlo) run, reports nothing for an empty line, and keeps
+# the characters outside LastResort runs.
 if [ "$(uname -s)" = "Darwin" ] && wanted test_macos_lastresort_guard; then
     NAME=test_macos_lastresort_guard
     OUT_BIN="$OUT/$NAME"

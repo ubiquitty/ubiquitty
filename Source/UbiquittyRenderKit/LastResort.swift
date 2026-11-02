@@ -46,3 +46,46 @@ func ctLineHasLastResortRun(_ line: CTLine) -> Bool {
     }
     return false
 }
+
+/// The characters of a shaped string that a face other than LastResort draws.
+///
+/// A run carries the range of the string it was shaped from, so the characters
+/// a LastResort run covers are left out and every other one is kept in order.
+///
+/// - Parameters:
+///   - string: The string `line` was shaped from.
+///   - line: The shaped line.
+/// - Returns: `string` without the characters of its LastResort runs.
+func stringOutsideLastResort(_ string: String, shapedAs line: CTLine) -> String {
+    let length = string.utf16.count
+    var isDropped = [Bool](repeating: false, count: length)
+    var didDropAny = false
+    for run in CTLineGetGlyphRuns(line) as! [CTRun] {
+        let attributes = CTRunGetAttributes(run) as! [CFString: Any]
+        guard let runFont = attributes[kCTFontAttributeName], ctFontIsLastResort(runFont as! CTFont) else {
+            continue
+        }
+        let range = CTRunGetStringRange(run)
+        let lower = max(range.location, 0)
+        let upper = min(range.location + range.length, length)
+        guard lower < upper else {
+            continue
+        }
+        for index in lower..<upper {
+            isDropped[index] = true
+        }
+        didDropAny = true
+    }
+    guard didDropAny else {
+        return string
+    }
+    var kept = String.UnicodeScalarView()
+    var offset = 0
+    for scalar in string.unicodeScalars {
+        if !isDropped[offset] {
+            kept.append(scalar)
+        }
+        offset += scalar.utf16.count
+    }
+    return String(kept)
+}

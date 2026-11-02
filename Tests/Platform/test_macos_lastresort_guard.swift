@@ -8,7 +8,8 @@
 // sheet and the ligature strips baking a CoreText LastResort ?-in-a-box tofu
 // into a cached image, where the grid cache then freezes it. The guard walks a
 // shaped line's runs and reports whether any resolved to the LastResort font,
-// so the caller can leave the slot blank instead.
+// so the caller can leave the slot blank instead, and stringOutsideLastResort
+// keeps the characters another face draws.
 //
 // Compiled by plain `xcrun swiftc` with LastResort.swift alone. A failure
 // prints FAIL file:line, and any failure exits nonzero.
@@ -62,12 +63,41 @@ func emptyLine() {
     check(!ctLineHasLastResortRun(makeLine("", menlo)), "an empty line has no LastResort run")
 }
 
+/// A line over `pieces`, each piece explicitly attributed with its own font.
+func makeLine(_ pieces: [(String, CTFont)]) -> (String, CTLine) {
+    let attributed = NSMutableAttributedString()
+    for (text, font) in pieces {
+        attributed.append(NSAttributedString(string: text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]))
+    }
+    return (attributed.string, CTLineCreateWithAttributedString(attributed))
+}
+
+/// Only the characters of a LastResort run are left out, including one
+/// outside the Basic Multilingual Plane, and the rest keep their order.
+func keepsCharactersOutsideLastResort() {
+    let lastResort = CTFontCreateWithName("LastResort" as CFString, 14.0, nil)
+    let menlo = CTFontCreateWithName("Menlo" as CFString, 14.0, nil)
+    guard ctFontIsLastResort(lastResort) else {
+        check(false, "CoreText resolves the LastResort face by name")
+        return
+    }
+    let (mixed, mixedLine) = makeLine([("A", menlo), ("\u{0605}", lastResort), ("b", menlo)])
+    check(stringOutsideLastResort(mixed, shapedAs: mixedLine) == "Ab", "a LastResort character between covered ones is left out")
+    let (wide, wideLine) = makeLine([("\u{1D400}", lastResort), ("c", menlo)])
+    check(stringOutsideLastResort(wide, shapedAs: wideLine) == "c", "a LastResort character beyond the BMP is left out whole")
+    let (all, allLine) = makeLine([("\u{0605}", lastResort)])
+    check(stringOutsideLastResort(all, shapedAs: allLine).isEmpty, "a line all in LastResort keeps nothing")
+    let (covered, coveredLine) = makeLine([("Ab1", menlo)])
+    check(stringOutsideLastResort(covered, shapedAs: coveredLine) == "Ab1", "a covered line keeps every character")
+}
+
 @main
 struct LastResortGuardTest {
     static func main() {
         detectsLastResortRun()
         ignoresCoveredRun()
         emptyLine()
+        keepsCharactersOutsideLastResort()
 
         if failures == 0 {
             print("test_macos_lastresort_guard: all checks passed")
