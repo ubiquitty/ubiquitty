@@ -4,7 +4,7 @@
 // test_remote_session_resume — a remote session continues one attachment
 // across its carriers (Docs/sync.md §6.9): every reconnect is a resume, a
 // QUIC redial presents a resume proof and runs no bootstrap, a proof the host
-// refuses or never answers falls back to the bootstrap, a carrier the
+// refuses bootstraps over QUIC and an unanswered path bootstraps over SSH, a carrier the
 // attachment declared dead is redialled at once, a suspension tells the host
 // and waits, and the client is one instance to the host for as long as its
 // frontend keeps the instance.
@@ -201,11 +201,22 @@ public:
     /// - Parameter reason: Why.
     void close(const std::string& reason) { m_observer->onClose(reason); }
 
+    /// Reports a QUIC application close carrying the host's generic proof
+    /// refusal, independently of the stream's diagnostic text.
+    void refuseProof()
+    {
+        m_applicationCloseCode = quicCloseCodeOf(ByeReason::Malformed);
+        close("the host refused the proof");
+    }
+
+    [[nodiscard]] std::optional<std::uint64_t> peerApplicationCloseCode() const override { return m_applicationCloseCode; }
+
 private:
     FrameLog* m_sent;
     StubChannel** m_live;
     Transport::ChannelObserver* m_observer = nullptr;
     std::size_t m_datagramsOffered = 0;
+    std::optional<std::uint64_t> m_applicationCloseCode;
 };
 
 /// Builds stub carriers and counts how each was asked for: through the
@@ -648,7 +659,7 @@ TEST(aRefusedProofFallsBackToTheBootstrapAtOnce)
     REQUIRE(remote.factory.last() != nullptr);
     CHECK(!remote.daemon.acceptProof(remote.factory, remote.dispatcher.now()));
     const std::size_t delaysBefore = remote.dispatcher.delaysRequested().size();
-    remote.factory.last()->close("the host closed the connection");
+    remote.factory.last()->refuseProof();
     remote.dispatcher.pump();
     CHECK_EQ(remote.factory.bootstrapCount(), 2u);
     CHECK_EQ(remote.factory.resumeCount(), resumes);
@@ -662,17 +673,17 @@ TEST(aRefusedProofFallsBackToTheBootstrapAtOnce)
     CHECK_EQ(remote.daemon.host.connection->counters().checkpointsSent, 1u);
     CHECK(remote.disagreement().empty());
 
-    // The fresh attachment's secret proves the next redial.
+    // A host refusal preserves QUIC for a later proof redial.
     remote.factory.last()->close("idle timeout");
     remote.dispatcher.pump();
     remote.dispatcher.advance(2 * second);
     CHECK_EQ(remote.factory.bootstrapCount(), 2u);
-    CHECK(remote.daemon.acceptProof(remote.factory, remote.dispatcher.now()));
+    CHECK_EQ(remote.factory.resumeCount(), resumes + 1);
+    CHECK(remote.core->isUsingQUIC());
 }
 
-// The path the proof is dialled over carries nothing, and nothing says so:
-// a host that refuses a proof is as silent. Two seconds on, the session is
-// through the bootstrap instead.
+// The path the proof is dialled over carries nothing, and nothing says so.
+// Two seconds on, the session is through the SSH bootstrap instead.
 TEST(aBlackholedStubPathRedialsWithinTwoSeconds)
 {
     Remote remote(Bootstrap::QUIC);
@@ -697,21 +708,24 @@ TEST(aBlackholedStubPathRedialsWithinTwoSeconds)
     REQUIRE(bootstrappedAt != 0);
     CHECK_MSG(bootstrappedAt - dialledAt <= 2 * second, ("the bootstrap began " + std::to_string(bootstrappedAt - dialledAt) + " us after the proof was dialled").c_str());
     CHECK_EQ(remote.factory.resumeCount(), 1u);
+    CHECK(!remote.core->isUsingQUIC());
 
-    // A proof dial that reaches its admitted Welcome in time is left alone.
+    // The SSH carrier that reaches its admitted Welcome is left alone.
     remote.daemon.acceptBootstrapped(remote.factory, remote.dispatcher.now());
     remote.handshake();
     REQUIRE(remote.core->state() == State::Connected);
     remote.factory.last()->close("idle timeout");
     remote.dispatcher.pump();
     remote.dispatcher.advance(1'500'000);
-    REQUIRE(remote.factory.resumeCount() == 2);
-    REQUIRE(remote.daemon.acceptProof(remote.factory, remote.dispatcher.now()));
+    REQUIRE(remote.factory.resumeCount() == 1);
+    REQUIRE(remote.factory.bootstrapCount() == 3);
+    REQUIRE(!remote.core->isUsingQUIC());
+    remote.daemon.acceptBootstrapped(remote.factory, remote.dispatcher.now());
     remote.handshake();
     StubChannel* kept = remote.factory.last();
     remote.settle(3 * second);
     CHECK(remote.factory.last() == kept);
-    CHECK_EQ(remote.factory.bootstrapCount(), 2u);
+    CHECK_EQ(remote.factory.bootstrapCount(), 3u);
     CHECK(remote.core->state() == State::Connected);
 }
 
@@ -742,10 +756,11 @@ TEST(lifecycleChurnCannotKeepRenewingAnUnansweredResumeDial)
         CHECK(remote.core->state() == State::Connected);
         CHECK(remote.disagreement().empty());
 
-        // A successful Welcome permits a later outage to try its new proof.
+        // A successful Welcome keeps a prior QUIC failure on SSH.
         remote.core->suspend();
         remote.core->resumeAfterSuspension(120);
-        CHECK_EQ(remote.factory.resumeCount(), 2u);
+        CHECK_EQ(remote.factory.resumeCount(), 1u);
+        CHECK_EQ(remote.factory.bootstrapCount(), 3u);
     }
 }
 

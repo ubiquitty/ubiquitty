@@ -1374,11 +1374,13 @@ std::optional<ResumeKey> RemoteSessionCore::resumeKey() const
     };
 }
 
-void RemoteSessionCore::abandonResumeDial()
+void RemoteSessionCore::abandonResumeDial(ResumeDialFailure failure)
 {
     teardownChannel();
     m_isResumeDialRefused = true;
     m_hasRetriedAfterLifecycleChange = true;
+    if (failure == ResumeDialFailure::Unanswered)
+        latchQUICHandshakeFailure();
     if (m_stopped || m_hostExited || m_deployPending)
         return;
     connect();
@@ -1732,10 +1734,6 @@ void RemoteSessionCore::replaceChannel(const std::string& reason)
     teardownChannel();
     ++m_reconnectEpoch;
     m_reconnectScheduled = false;
-    // The device may be on another network now, where a QUIC attempt that
-    // failed before the suspension says nothing about the next one.
-    m_quicFailed = false;
-    m_quicHandshakeFailure.clear();
     transition(State::Reconnecting, reason);
     connect();
 }
@@ -1794,9 +1792,6 @@ void RemoteSessionCore::reresolveGoneInstance()
     m_hasDroppedGonePin = true;
     m_factory->clearHandoverReach();
     m_daemonSocketName.clear();
-    // What was learnt about QUIC was learnt from the daemon that is gone.
-    m_quicFailed = false;
-    m_quicHandshakeFailure.clear();
     m_channelCreationFailures = 0;
     m_initialSetupFailures = 0;
     m_initialSetupBudgetExhausted = false;
@@ -1850,7 +1845,7 @@ CarrierFact RemoteSessionCore::carrierFact() const
 void RemoteSessionCore::latchQUICHandshakeFailure()
 {
     m_quicFailed = true;
-    m_quicHandshakeFailure = "the QUIC connection closed before the host answered, so the session uses SSH";
+    m_quicHandshakeFailure = "QUIC could not connect, so this session uses SSH";
 }
 
 void RemoteSessionCore::deployFinished(DeployResult result, const std::string& error)
@@ -2192,9 +2187,12 @@ void RemoteSessionCore::handleClose(std::uint64_t generation, std::string reason
     }
     // A carrier whose close carries the host's reason (a QUIC application
     // CONNECTION_CLOSE) says what a Bye on its stream would have.
+    ResumeDialFailure resumeFailure = ResumeDialFailure::Unanswered;
     if (!reconnectDelaySeconds) {
         if (const auto code = m_channel->peerApplicationCloseCode()) {
             if (const auto closeReason = Protocol::Sync::byeReasonOfQUICClose(*code)) {
+                if (m_isResumeDial && *closeReason == Protocol::Sync::ByeReason::Malformed)
+                    resumeFailure = ResumeDialFailure::HostRefused;
                 reason = Protocol::Sync::byeNotice(*closeReason);
                 reconnectDelaySeconds = reconnectDelayAfterHostClose(*closeReason);
                 // The host refused this client, whatever carried the words:
@@ -2209,10 +2207,10 @@ void RemoteSessionCore::handleClose(std::uint64_t generation, std::string reason
             }
         }
     }
-    // A proof the host refused, or a path that would not carry it: the
-    // bootstrap is the way in, and nothing is learnt about QUIC itself.
+    // A refused proof and an unanswered path both need a bootstrap. Only
+    // the host's coded refusal proves that QUIC itself still reaches it.
     if (m_isResumeDial && !m_ackSeen && !m_stopped && !m_hostExited && !m_hasPermanentAuthDenial) {
-        abandonResumeDial();
+        abandonResumeDial(resumeFailure);
         return;
     }
     if (m_transportIsQUIC && !m_ackSeen)

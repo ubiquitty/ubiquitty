@@ -1988,19 +1988,22 @@ void Daemon::dropClient(std::size_t index)
     // leaves the attachment free to be resumed again.
     m_attachments->abandonProof(m_clients[index].clientID);
     if (m_clients[index].syncConnection) {
-        m_clients[index].syncConnection->releaseDriverFocus();
+        auto& connection = *m_clients[index].syncConnection;
+        const Protocol::Sync::AttachmentRecord* attachment = connection.attachment();
+        const std::optional<Protocol::Sync::ID128> attachmentID = attachment ? std::optional { attachment->attachmentID } : std::nullopt;
+        const bool isLeaving = attachment && m_clients[index].didDetachCleanly && attachment->servingConnection == m_clients[index].clientID;
+        // The table may retire the record now or before this client's reap.
+        // Release its record and pane borrows before either can be freed.
+        connection.withdrawAuthority();
         for (const PaneSubscription& subscription : m_clients[index].paneSubscriptions) {
             if (Session* session = findSession(subscription.sessionID))
                 notePaneFocus(*session);
         }
-        if (const Protocol::Sync::AttachmentRecord* attachment = m_clients[index].syncConnection->attachment()) {
-            // Either note may free the record: nothing reads it after.
-            const Protocol::Sync::ID128 attachmentID = attachment->attachmentID;
-            const bool isLeaving = m_clients[index].didDetachCleanly && attachment->servingConnection == m_clients[index].clientID;
+        if (attachmentID) {
             if (isLeaving)
-                m_attachments->noteDetached(attachmentID);
+                m_attachments->noteDetached(*attachmentID);
             else
-                m_attachments->noteTransportLost(attachmentID, m_clients[index].clientID, nowMicroseconds());
+                m_attachments->noteTransportLost(*attachmentID, m_clients[index].clientID, nowMicroseconds());
         }
     }
     // It shows nobody the questions it was asked any more, so each is left to
@@ -5814,6 +5817,9 @@ void Daemon::onQUICStreamData(QUICConnection* connection, std::span<const std::u
             const Protocol::Sync::ResumeProof& proof = std::get<Protocol::Sync::ResumeProof>(*preamble);
             const std::optional<std::array<std::uint8_t, 32>> exporter = m_quic ? m_quic->exportKeyingMaterial(connection, Protocol::Sync::resumeExporterLabel) : std::nullopt;
             if (!exporter || !admitAttachmentProof(index, proof, *exporter)) {
+                // Every refused proof gets the same close reason: the peer
+                // learns no attachment or MAC validation detail.
+                m_clients[index].quicCloseReason = Protocol::Sync::ByeReason::Malformed;
                 dropClient(index);
                 return;
             }

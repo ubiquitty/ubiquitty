@@ -13,7 +13,8 @@
 // effects from the batch the client acknowledged. The same preamble bytes on
 // another connection are refused, since that handshake exports other
 // material. A proof for an attachment whose client left on purpose is
-// refused. A refused connection is answered nothing.
+// refused. A refused connection carries a generic application close but no
+// stream data.
 //
 // Usage: quic_resume_proof <path-to-ubiquitty-host>. Exit 0 on success.
 //
@@ -298,10 +299,12 @@ int main(int argc, char** argv)
         Dial replay(otherReplicas, resumeOf(otherReplicas, paneID, *held));
         const Transport::QUICCredential replayedCredential = Transport::ExportedPreamble { .exporterLabel = std::string(Sync::resumeExporterLabel), .build = [replayed](std::span<const std::uint8_t, 32>) { return replayed; } };
         CHECK_MSG(replay.start(port, replayedCredential, pin, resumeTarget), "premise: the replaying dial did not start");
-        // A refused connection is answered nothing: no handshake reply, no
-        // Welcome, not a byte, for as long as an admitted one takes many times over.
-        (void)replay.pumpUntil(2'000, [&](const UbiquittyTest::ScreenClient&) { return replay.bytesReceived.load() > 0; });
+        // A refused proof carries no Sync frames and names no reason that
+        // distinguishes an expired attachment from a wrong MAC.
+        (void)replay.pumpUntil(2'000, [&](const UbiquittyTest::ScreenClient&) { return replay.hasClosed.load(); });
         CHECK_MSG(replay.hasConnected.load(), "premise: the replaying dial never completed its handshake");
+        CHECK_MSG(replay.hasClosed.load(), "the host did not close a refused proof");
+        CHECK_MSG(replay.carrier.peerApplicationCloseCode() == Sync::quicCloseCodeOf(Sync::ByeReason::Malformed), "a refused proof carried no generic application close");
         CHECK_MSG(replay.bytesReceived.load() == 0, "a connection replaying another connection's proof was answered");
         CHECK_MSG(!replay.welcome().has_value(), "a replayed proof was welcomed");
         replay.carrier.stop();
@@ -327,8 +330,10 @@ int main(int argc, char** argv)
         std::vector<std::uint8_t> lateSent;
         Dial late(lateReplicas, resumeOf(lateReplicas, paneID, *last));
         CHECK_MSG(late.start(port, proofFor(*last, lateSent, sentLock), pin, resumeTarget), "premise: the late dial did not start");
-        (void)late.pumpUntil(2'000, [&](const UbiquittyTest::ScreenClient&) { return late.bytesReceived.load() > 0; });
+        (void)late.pumpUntil(2'000, [&](const UbiquittyTest::ScreenClient&) { return late.hasClosed.load(); });
         CHECK_MSG(late.hasConnected.load(), "premise: the late dial never completed its handshake");
+        CHECK_MSG(late.hasClosed.load(), "the host did not close a proof for a detached attachment");
+        CHECK_MSG(late.carrier.peerApplicationCloseCode() == Sync::quicCloseCodeOf(Sync::ByeReason::Malformed), "a detached attachment's refused proof carried no generic application close");
         CHECK_MSG(late.bytesReceived.load() == 0, "a proof for an attachment whose client left was answered");
         CHECK_MSG(!late.welcome().has_value(), "a proof for a detached attachment was welcomed");
         late.carrier.stop();

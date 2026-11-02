@@ -39,8 +39,8 @@ namespace Ubiquitty::Protocol::Sync {
 /// a peer at any other is refused. Every wire change increments this version.
 inline constexpr std::uint16_t wireVersion = 2;
 
-/// The wire version published in v0.3.2, paired with its frozen fingerprint.
-inline constexpr std::uint16_t lastPublishedWireVersion = 1;
+/// The wire version published in v0.3.3, paired with its frozen fingerprint.
+inline constexpr std::uint16_t lastPublishedWireVersion = 2;
 
 /// The digest of every body layout this build's wire defines: the SHA-256 of
 /// the corpus `Tests/Core/Protocol/Sync/test_sync_wire_fingerprint.cpp`
@@ -86,41 +86,41 @@ inline constexpr std::array<std::uint8_t, 32> wireFingerprint {
     0x11,
 };
 
-/// The fingerprint published in v0.3.2. This release pin is independent of
+/// The fingerprint published in v0.3.3. This release pin is independent of
 /// the active grammar; it is never a second accepted handshake identity.
 inline constexpr std::array<std::uint8_t, 32> lastPublishedWireFingerprint {
-    0x79,
-    0xc6,
-    0x3f,
-    0x3e,
-    0x37,
-    0x4c,
-    0x55,
-    0xcc,
+    0x6a,
+    0x3d,
+    0xd7,
+    0x16,
+    0x63,
+    0x3a,
+    0xf4,
+    0xc7,
+    0x00,
+    0x2e,
+    0x77,
+    0xbf,
+    0x39,
+    0x0a,
+    0xe0,
+    0xd9,
+    0xc5,
+    0xe8,
+    0xe9,
+    0x8d,
+    0x70,
+    0x36,
     0x56,
-    0xd3,
-    0xba,
-    0x7a,
-    0x2f,
-    0x35,
-    0x19,
-    0xc8,
-    0x35,
-    0xac,
-    0x9e,
-    0xd3,
-    0xfa,
-    0x45,
-    0xd4,
-    0x54,
-    0x24,
-    0x53,
-    0x7b,
-    0x84,
-    0xe6,
-    0x84,
-    0x3b,
-    0x8a,
+    0xa9,
+    0xcb,
+    0x17,
+    0x85,
+    0x6a,
+    0xda,
+    0x25,
+    0x80,
+    0x11,
 };
 
 /// The sentence a wire says when two builds speak different versions or

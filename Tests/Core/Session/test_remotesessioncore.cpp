@@ -1747,7 +1747,8 @@ TEST(aQUICHandshakeThatFailsAfterTheBootstrapFallsBackToSSHAndSaysQUIC)
     check(fact.quicFallbackReason.find("SSH") != std::string::npos, "the fallback names the SSH carrier it uses");
     check(fact.quicFallbackReason.find("reach") == std::string::npos, "the fallback never blames reaching the host");
     core.networkPathChanged();
-    check(core.carrierFact().quicFallbackReason.empty() || factory.lastPreferQUIC(), "a new path forgets the failure and asks for QUIC again");
+    check(!factory.lastPreferQUIC(), "a path report keeps the session on SSH after QUIC failed");
+    check(core.carrierFact().quicFallbackReason.find("QUIC") != std::string::npos, "the fallback remains visible");
     core.stop();
 }
 
@@ -1766,12 +1767,8 @@ TEST(aPathChangeTellsAConnectedQUICCarrierToMove)
     }
 }
 
-/// A network change gives QUIC another try after a fallback.
-///
-/// The fallback was measured on a path that is gone: a captive portal or a
-/// hand-off that blocked UDP for a moment says nothing about the next network,
-/// and a session latched onto the stream carrier loses migration for good.
-TEST(aNetworkChangeGivesQUICAnotherTryAfterAFallback)
+/// A path report cannot revive a QUIC carrier that failed before Welcome.
+TEST(aNetworkChangeKeepsTheStreamFallbackAfterQUICFailed)
 {
     auto term = makeTerm();
     FakeDispatcher dispatcher;
@@ -1786,11 +1783,11 @@ TEST(aNetworkChangeGivesQUICAnotherTryAfterAFallback)
     check(!factory.lastPreferQUIC(), "a QUIC drop before its handshake falls back");
 
     core.networkPathChanged();
-    check(factory.lastPreferQUIC(), "the redial on a new path asks for QUIC again");
+    check(!factory.lastPreferQUIC(), "the redial on a new path still asks for SSH");
 }
 
-/// A resume gives QUIC another try after a fallback.
-TEST(aResumeGivesQUICAnotherTryAfterAFallback)
+/// A wake cannot revive a QUIC carrier that failed before Welcome.
+TEST(aResumeKeepsTheStreamFallbackAfterQUICFailed)
 {
     auto term = makeTerm();
     FakeDispatcher dispatcher;
@@ -1808,9 +1805,9 @@ TEST(aResumeGivesQUICAnotherTryAfterAFallback)
 
     core.resumeAfterSuspension(5.0);
     // The stream connection is asked to answer first; one that stays silent
-    // is replaced, and the replacement asks for QUIC again.
+    // is replaced with another stream carrier.
     dispatcher.fireDelayed();
-    check(factory.lastPreferQUIC(), "the redial after a resume asks for QUIC again");
+    check(!factory.lastPreferQUIC(), "the redial after a resume still asks for SSH");
 }
 
 /// A person who asks to reconnect is not made to wait out the backoff.

@@ -10,6 +10,7 @@
 
 #include "Core/Session/QUICBootstrapRun.h"
 #include "Core/Session/RemoteBootstrap.h"
+#include "Core/Transport/SSHHost.h"
 #include "PAL/Poll.h"
 
 #include <csignal>
@@ -151,7 +152,7 @@ TEST(aSharedConnectionIsProbedForItsAddress)
     // No shared connection, no prompt, and nothing run on the host.
     CHECK(probe.find("-o BatchMode=yes") != std::string::npos);
     CHECK(probe.find("-o ControlMaster=no -o ControlPath=none ") != std::string::npos);
-    CHECK(probe.ends_with(" alice@build.example.org true"));
+    CHECK(probe.ends_with(" alice@build.example.org " + Ubiquitty::Transport::remoteShellCommand("true")));
     CHECK(probe.find("quic-bootstrap") == std::string::npos);
     // It knows no host key and requires one, so it could not get past the key
     // exchange to a login even if it were left running.

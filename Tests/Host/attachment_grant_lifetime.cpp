@@ -220,7 +220,7 @@ void withdrawalReleasesADeferredLostBorrower()
     REQUIRE(first.connection().welcome());
     const Sync::Welcome welcome = *first.connection().welcome();
     Screen::drop(d, firstIndex);
-    REQUIRE(Screen::connection(d, firstIndex)->attachment());
+    REQUIRE(Screen::connection(d, firstIndex)->attachment() == nullptr);
     const Sync::AttachmentRecord* lost = Screen::attachments(d).find(welcome.attachmentID);
     REQUIRE(lost);
     REQUIRE(lost->state == Sync::AttachmentState::Lost);
@@ -899,6 +899,63 @@ void inheritedOuterPinReachesOnlyItsExistingSession()
     }
 }
 
+void droppingAnUnboundClientReleasesItsRecordBeforeReaping()
+{
+    Daemon daemon;
+    for (unsigned index = 0; index < 3; ++index)
+        (void)Screen::makeSession(daemon, 24, 80);
+    const auto index = Screen::attachControlOnly(daemon);
+    Screen::grantScope(daemon, index, { Sync::Scope::Observe, Sync::Scope::Control });
+    Screen::setTokenID(daemon, index, "directory-reader");
+    Screen::markInteractiveUser(daemon, index);
+    UbiquittyTest::ScreenClient client { 24, 80 };
+    Screen::greet(daemon, index, client);
+    REQUIRE(client.connection().welcome());
+    const auto attachmentID = client.connection().welcome()->attachmentID;
+    const auto* connection = Screen::connection(daemon, index);
+    REQUIRE(connection && connection->attachment());
+    REQUIRE(!connection->attachment()->isResumable);
+    REQUIRE(connection->boundPanes().empty());
+
+    Screen::drop(daemon, index);
+    CHECK_MSG(connection->attachment() == nullptr, "a dropped directory client still borrows its retired record");
+    CHECK(connection->state() == Sync::ConnectionState::Closed);
+    CHECK(Screen::attachments(daemon).find(attachmentID) == nullptr);
+    Screen::reap(daemon, index);
+    CHECK(Screen::sessionCount(daemon) == 3);
+}
+
+void droppingAScreenClientReleasesItsRecordBeforeExpiryAndReaping()
+{
+    for (Carrier carrierKind : { Carrier::Socket, Carrier::QUIC }) {
+        Daemon daemon;
+        auto& session = Screen::makeSession(daemon, 24, 80);
+        Sync::ReplicaSet replicas;
+        UbiquittyTest::ScreenClient client { 24, 80, replicas, std::nullopt };
+        Ubiquitty::HostTest::FullCarrier carrier;
+        REQUIRE(carrier.isReady());
+        const auto index = attachAndGreet(daemon, session, "screen-reader", { Sync::Scope::Observe, Sync::Scope::Drive },
+            carrierKind, client, carrier.takeDaemonEnd());
+        REQUIRE(client.connection().welcome());
+        const auto attachmentID = client.connection().welcome()->attachmentID;
+        const auto* connection = Screen::connection(daemon, index);
+        REQUIRE(connection && connection->attachment());
+        REQUIRE(connection->attachment()->isResumable);
+
+        Screen::drop(daemon, index);
+        CHECK_MSG(connection->attachment() == nullptr, "a dropped screen client still borrows the table's record");
+        CHECK(connection->state() == Sync::ConnectionState::Closed);
+        CHECK(connection->boundPanes().empty());
+        const auto* retained = Screen::attachments(daemon).find(attachmentID);
+        REQUIRE(retained);
+        CHECK(retained->state == Sync::AttachmentState::Lost);
+        Screen::reapAttachments(daemon, Screen::now() + Sync::measuredResumePolicy().lostGraceMicroseconds + 1);
+        CHECK(Screen::attachments(daemon).find(attachmentID) == nullptr);
+        Screen::reap(daemon, index);
+        CHECK(Screen::sessionCount(daemon) == 1);
+    }
+}
+
 void run()
 {
     Daemon d;
@@ -1044,6 +1101,8 @@ int main()
     // As the daemon's own process does: a write to a carrier whose reader has
     // gone is an error to handle, not a signal that ends the fixture.
     ::signal(SIGPIPE, SIG_IGN);
+    droppingAnUnboundClientReleasesItsRecordBeforeReaping();
+    droppingAScreenClientReleasesItsRecordBeforeExpiryAndReaping();
     run();
     withdrawalRetiresOnlyItsServingAttachment();
     staleWithdrawalLeavesTheResumedAttachment();

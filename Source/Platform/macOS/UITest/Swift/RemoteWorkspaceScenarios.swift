@@ -1455,6 +1455,17 @@ enum RemoteWorkspaceScenarios {
                 t.expect(false, desc: "the named foreground fixture is copied (\(error))")
                 return
             }
+            // macOS kills a copied platform binary at exec; an ad hoc
+            // signature makes the copy an ordinary program under its own name.
+            let sign = Process()
+            sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            sign.arguments = ["--force", "--sign", "-", executable]
+            try? sign.run()
+            sign.waitUntilExit()
+            guard sign.terminationStatus == 0 else {
+                t.expect(false, desc: "the named foreground fixture is signed (status \(sign.terminationStatus))")
+                return
+            }
             pane.send("'\(executable)' -c 'printf \"\\033]0;\(markers[index])\\007\(markers[index])\\n\"; read -r line'\n")
             guard
                 t.wait(

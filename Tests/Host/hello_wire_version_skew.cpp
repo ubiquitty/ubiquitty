@@ -184,11 +184,13 @@ int main()
     // A refused peer's socket is closed under it; a write that races the close
     // is the refusal, not a crash.
     ::signal(SIGPIPE, SIG_IGN);
-    // A client at version 2, and one far ahead, meet this host at 1.
-    checkRefused(2);
+    // Clients one version behind, one version ahead and far ahead meet this
+    // host.
+    checkRefused(static_cast<std::uint16_t>(Sync::wireVersion - 1));
+    checkRefused(static_cast<std::uint16_t>(Sync::wireVersion + 1));
     checkRefused(28);
-    // A host at version 2 meets this build's client at 1 and names its own.
-    checkRefused(Sync::wireVersion, 2);
+    // A host one version ahead meets this build's client and names its own.
+    checkRefused(Sync::wireVersion, static_cast<std::uint16_t>(Sync::wireVersion + 1));
     aPeerAtThisVersionIsAdmitted();
     theVersionPrefixDoesNotBypassTheCompleteSchema();
     return UBIQUITTY_TEST_SUMMARY();

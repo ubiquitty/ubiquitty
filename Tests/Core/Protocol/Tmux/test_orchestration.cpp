@@ -16,6 +16,7 @@
 #include "Core/Protocol/Tmux/ContextActions.h"
 #include "Core/Protocol/Tmux/StateRecovery.h"
 #include "Core/Protocol/Tmux/WindowRegistry.h"
+#include "Core/Transport/SSHHost.h"
 
 #include <cstdio>
 #include <string>
@@ -174,10 +175,13 @@ TEST(testLaunchLocal)
 TEST(testLaunchRemote)
 {
     // ssh -t -e none <host> tmux <control args>: the pty + escape-char-drop
-    // flags, then the host, the literal tmux, then the control tokens.
-    CHECK_STR_EQ(joinArgs(buildRemoteLaunchArguments("/usr/bin/ssh", "build.example", "")), "/usr/bin/ssh|-t|-e|none|build.example|'tmux' '-CC' 'new-session' '-A' '-s' 'main'");
+    // flags, then the host, then the literal tmux and the control tokens,
+    // handed to /bin/sh whatever the account's login shell is.
+    CHECK_STR_EQ(joinArgs(buildRemoteLaunchArguments("/usr/bin/ssh", "build.example", "")),
+        "/usr/bin/ssh|-t|-e|none|build.example|" + Transport::remoteShellCommand("'tmux' '-CC' 'new-session' '-A' '-s' 'main'"));
     // [user@]host passes through verbatim.
-    CHECK_STR_EQ(joinArgs(buildRemoteLaunchArguments("/usr/bin/ssh", "user@host", "-CC attach")), "/usr/bin/ssh|-t|-e|none|user@host|'tmux' '-CC' 'attach'");
+    CHECK_STR_EQ(joinArgs(buildRemoteLaunchArguments("/usr/bin/ssh", "user@host", "-CC attach")),
+        "/usr/bin/ssh|-t|-e|none|user@host|" + Transport::remoteShellCommand("'tmux' '-CC' 'attach'"));
     // Leading-dash host (ssh argv injection) is rejected → empty argv.
     CHECK(buildRemoteLaunchArguments("/usr/bin/ssh", "-oProxyCommand=evil", "").empty());
     CHECK(!isSafeSSHHost("-x"));
@@ -190,7 +194,7 @@ TEST(testLaunchRemote)
     CHECK(buildRemoteLaunchArguments("/usr/bin/ssh", "user@-host", "").empty());
     const auto quoted = buildSSHControlArguments("/usr/bin/ssh", "host", { "tmux", "-S", "/tmp/a b'c", "$0", "$(exit 7)" });
     CHECK(quoted.size() == 6);
-    CHECK_STR_EQ(quoted.back(), "'tmux' '-S' '/tmp/a b'\\''c' '$0' '$(exit 7)'");
+    CHECK_STR_EQ(quoted.back(), Transport::remoteShellCommand("'tmux' '-S' '/tmp/a b'\\''c' '$0' '$(exit 7)'"));
 }
 
 // ===== window/pane registry =================================================

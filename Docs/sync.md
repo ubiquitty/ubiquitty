@@ -1165,14 +1165,16 @@ shown pane takes its checkpoint, and a hidden one costs nothing.
     authenticated the `Greet` carries the secret. A QUIC redial presents the
     proof at the address, port and pin its factory kept from the bootstrap,
     and runs no bootstrap; it has 2 s (provisional) to reach its handshake,
-    because a host that refuses a proof drops the connection without a word
-    and a dead path says as little. A proof dial that closes, runs out of
-    time, or is interrupted by a wake or path change goes through the
-    bootstrap at once, with no backoff, and the
-    carrier the login's token admitted attaches fresh. A proof is dialled
-    only by a session whose last handshake rode QUIC. Bootstrap fallback
-    remains latched until a Welcome, and lifecycle notifications cannot
-    interrupt that bootstrap or reset the backoff of its retries. A carrier the
+    because a dead path may say nothing. The host sends a generic application
+    close for a refused proof, disclosing no attachment detail. When that
+    reason arrives, the client bootstraps at once and may use QUIC again. A proof dial
+    that closes without that reason, runs out of time, or is interrupted by
+    a wake or path change bootstraps over SSH at once, with no backoff.
+    A proof is dialled only by a
+    session whose last handshake rode QUIC. Once a QUIC carrier fails before
+    `Welcome`, this session stays on SSH, including through later path and
+    wake reports. Lifecycle notifications cannot interrupt that bootstrap
+    or reset the backoff of its retries. A carrier the
     attachment declared dead is replaced at once: the backoff spaces
     attempts at a host that refused one.
   - A frontend's own terminal is lent to the attachment
@@ -2880,7 +2882,7 @@ version. Equal versions with different fingerprints are different builds,
 not an older and a newer protocol.
 
 `lastPublishedWireVersion` and `lastPublishedWireFingerprint` in Envelope.h
-freeze the identity shipped in v0.3.2. The fingerprint suite refuses a changed
+freeze the identity shipped in v0.3.3. The fingerprint suite refuses a changed
 identity without a version increment. At publication, update both release
 pins from the release tree; they are evidence, not an additional admitted
 protocol. The current and released wire identities are independent of the

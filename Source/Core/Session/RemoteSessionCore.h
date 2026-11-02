@@ -1391,12 +1391,16 @@ private:
     /// What a carrier presents to continue this core's attachment, or
     /// `nullopt` when it holds none.
     [[nodiscard]] std::optional<ResumeKey> resumeKey() const;
-    /// Gives up the dial that presented a resume proof and dials through the
-    /// bootstrap at once: the proof was refused, or its carrier never
-    /// answered.
-    void abandonResumeDial();
-    /// Latches the stream carrier after a QUIC carrier closed before the
-    /// host's HELLO_ACK, and keeps why for ``carrierFact``.
+    /// Whether the host answered a resume dial before it was abandoned.
+    enum class ResumeDialFailure : std::uint8_t {
+        Unanswered,
+        HostRefused,
+    };
+    /// Gives up a proof dial and bootstraps. A host refusal leaves QUIC
+    /// available; a carrier that never answered keeps this session on SSH.
+    void abandonResumeDial(ResumeDialFailure = ResumeDialFailure::Unanswered);
+    /// Latches the stream carrier after an unanswered QUIC handshake, and
+    /// keeps why for ``carrierFact``.
     void latchQUICHandshakeFailure();
     /// Ends a proof of life that was answered, and sends the input held
     /// through it.
@@ -1726,13 +1730,11 @@ private:
     std::uint32_t m_failedPaneSession = 0;
     HostRefusal m_lastRefusal;
     std::string m_authToken;
-    // A QUIC attempt that never reached HELLO_ACK on the current path; the next
-    // dials ask for the stream carrier. The bounded lifecycle retry may try
-    // QUIC on a new path; repeated notifications cannot clear this latch.
+    // A QUIC attempt that never reached HELLO_ACK; later dials in this session
+    // ask for the stream carrier, including after lifecycle notifications.
     bool m_quicFailed = false;
-    // Why the latch above was set by the carrier rather than by the factory:
-    // the bootstrap answered and the QUIC connection it pointed at closed
-    // before the host's HELLO_ACK. Empty while the latch is clear.
+    // Why the latch above was set by a carrier rather than by the factory:
+    // the QUIC carrier did not reach HELLO_ACK. Empty while the latch is clear.
     std::string m_quicHandshakeFailure;
     // Whether a kept connection has yet to prove it still carries frames:
     // the screen plane's probe is out and its Echo has not come. Only that
