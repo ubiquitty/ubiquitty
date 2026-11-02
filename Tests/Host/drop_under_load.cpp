@@ -21,6 +21,7 @@
 #include "Core/Protocol/Sync/Attachment.h"
 #include "Core/Protocol/Sync/Connection.h"
 #include "Core/Protocol/Sync/Messages.h"
+#include "Core/Runtime/FrameCoherence.h"
 #include "Core/Screen/Addressing.h"
 #include "Core/Terminal.h"
 #include "Core/TerminalOperations.h"
@@ -91,8 +92,14 @@ enum class WhileAway : std::uint8_t {
     Resized,
 };
 
+/// Whether the dead physical client is freed before its replacement arrives.
+enum class Reap : std::uint8_t {
+    Deferred,
+    Immediate,
+};
+
 /// Cases 1 and 2: the link drops with the host's frames unread.
-void floodThenDrop(WhileAway whileAway)
+void floodThenDrop(WhileAway whileAway, Reap reap)
 {
     Daemon d;
     auto& session = Screen::makeSession(d, 24, 80);
@@ -116,6 +123,8 @@ void floodThenDrop(WhileAway whileAway)
     for (int line = 0; line < 400; ++line)
         write(d, session, "flood line " + std::to_string(line) + " with enough text to fill a good part of the row\r\n");
     Screen::drop(d, heldIndex);
+    if (reap == Reap::Immediate)
+        Screen::reap(d, heldIndex);
     if (whileAway == WhileAway::Resized)
         Ubiquitty::resize(*session.term, 30, 100);
     for (int line = 0; line < 50; ++line)
@@ -124,6 +133,14 @@ void floodThenDrop(WhileAway whileAway)
     const std::size_t resumedIndex = attachPerson(d, session, "alice");
     UbiquittyTest::ScreenClient resumed(24, 80, replicas, resumeOf(replicas, paneID, welcome));
     Screen::greet(d, resumedIndex, resumed);
+    REQUIRE(session.isFrameDue);
+    // The real loop publishes an owed frame before serving the connection.
+    // Advance admission past the last frame's pacing interval without sleeping.
+    const auto frameClass = Screen::mayPublish(d, session, Screen::now() + Ubiquitty::Runtime::refreshIntervalMicroseconds + 1);
+    REQUIRE(frameClass.has_value());
+    Screen::publish(d, session, *frameClass);
+    CHECK(!session.isFrameDue);
+    CHECK(session.screenSource->isFrameHeld());
     Screen::deliver(d, resumedIndex, resumed);
     REQUIRE(resumed.connection().welcome().has_value());
     CHECK_MSG(resumed.connection().welcome()->attachmentID == welcome.attachmentID, "the resume did not continue the attachment");
@@ -214,8 +231,10 @@ void questionThenDrop()
 
 int main()
 {
-    floodThenDrop(WhileAway::Unchanged);
-    floodThenDrop(WhileAway::Resized);
+    for (Reap reap : { Reap::Deferred, Reap::Immediate }) {
+        floodThenDrop(WhileAway::Unchanged, reap);
+        floodThenDrop(WhileAway::Resized, reap);
+    }
     questionThenDrop();
     if (failures == 0)
         std::printf("drop_under_load: a client dropped mid-flood resumes into the host's picture, resized or not, and a person dropped "
