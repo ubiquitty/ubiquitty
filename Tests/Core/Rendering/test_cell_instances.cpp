@@ -2760,6 +2760,66 @@ TEST(testABackendWithoutClusterEntriesDrawsTheBaseCodePoint)
     CHECK(cells[0].atlasBottomRight.x > cells[0].atlasTopLeft.x);
 }
 
+namespace {
+// A cluster led by a Prepend: MALAYALAM LETTER DOT REPH before the consonant it
+// joins, MALAYALAM LETTER KA.
+struct PrependClusterScene {
+    static constexpr std::uint32_t prepend = 0x0D4Eu;
+    static constexpr std::uint32_t base = 0x0D15u;
+    static inline std::uint32_t drawnCodePoint = 0;
+
+    static int resolve(const Ubiquitty::Cell*, std::span<std::uint32_t> out, void*)
+    {
+        out[0] = prepend;
+        out[1] = base;
+        return 2;
+    }
+};
+} // namespace
+
+// The base a backend without cluster entries draws alone is the cluster's
+// base, not the Prepend standing before it.
+TEST(testABackendWithoutClusterEntriesDrawsTheBaseAfterAPrepend)
+{
+    TermPalette pal;
+    pal.seedDefaults();
+    Ubiquitty::Cell cell {};
+    cell.pen.foregroundIndex = colorDefault;
+    cell.pen.backgroundIndex = colorDefault;
+    cell.pen.underlineIndex = colorDefault;
+    cell.codePoint = PrependClusterScene::prepend;
+    cell.setClusterID(7);
+    std::vector<Ubiquitty::Cell> row(1, cell);
+
+    BuildInputs in;
+    in.cells = row.data();
+    in.rows = 1;
+    in.columns = 1;
+    in.palette = &pal;
+    in.clusterResolver = &PrependClusterScene::resolve;
+    in.metrics.cellWidth = 8.0f;
+    in.metrics.cellHeight = 16.0f;
+    in.metrics.baselineFromTop = 13.0f;
+
+    CacheBackend backend;
+    GlyphBackend table = backend.backend();
+    table.rasteriseClusterGlyph = nullptr;
+    table.clusterGlyph = nullptr;
+    table.wideClusterGlyph = nullptr;
+    table.monoGlyph = [](void*, std::uint32_t codePoint, FontFace, std::uint32_t, std::uint32_t) {
+        PrependClusterScene::drawnCodePoint = codePoint;
+        return AtlasGlyph { { 0.1f, 0.1f }, { 0.2f, 0.2f }, true };
+    };
+
+    std::vector<CellInstance> cells(1);
+    std::vector<DecorationInstance> decorations(8);
+    InstanceBuffers buffers { cells.data(), cells.size(), decorations.data(), decorations.size() };
+    PrependClusterScene::drawnCodePoint = 0;
+    const InstanceCounts counts = buildCellInstances(in, table, buffers);
+    CHECK(counts.cells == 1);
+    CHECK(PrependClusterScene::drawnCodePoint == PrependClusterScene::base);
+}
+
 // A dashed box-drawing character the box rasterizer cannot supply falls back
 // to the text lane rather than drawing nothing: a dash the font carries is
 // better than a gap in a table border.

@@ -3247,8 +3247,11 @@ InstanceCounts buildCellInstances(const BuildInputs& in, const GlyphBackend& atl
                                         // `e` where the text said `é`, with the cell inked
                                         // and every count right. The documented
                                         // substitution, reported by
-                                        // `optionalDefaultsAreLossy()`.
-                                        glyph = atlas.monoGlyph(atlas.context, clusterCodePoints[0], clusterFace, weight, clusterVariant);
+                                        // `optionalDefaultsAreLossy()`. The base is the
+                                        // first code point that is not a Prepend.
+                                        const std::size_t base = Ubiquitty::Unicode::clusterBaseIndex(
+                                            std::span(clusterCodePoints.data(), static_cast<std::size_t>(clusterCount)));
+                                        glyph = atlas.monoGlyph(atlas.context, clusterCodePoints[base], clusterFace, weight, clusterVariant);
                                     }
                                 }();
                             } else if (isWide) {
