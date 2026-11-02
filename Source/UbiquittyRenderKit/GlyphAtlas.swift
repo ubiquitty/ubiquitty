@@ -1656,15 +1656,14 @@ extension GlyphAtlas: WideClusterGlyphSource {
         if fresh && unifontScale > 0 {
             wide.rasteriseUnifontCluster(Ubiquitty.Rendering.ClusterSpan(codePoints), scale: unifontScale, slot: slot)
         } else if fresh {
-            if let line = drawableClusterLine(codePoints, face: face) {
-                let baseCodePoint = codePoints[0]
-                let baseFont = faceCarrying(baseCodePoint, face: face)
+            if let shaped = drawableClusterLine(codePoints, face: face) {
+                let baseFont = faceCarrying(shaped.base, face: face)
                 wide.rasterise(
-                    cluster: line,
-                    baseGlyph: GlyphAtlas.glyphIdentifier(for: baseCodePoint, in: baseFont) ?? 0,
+                    cluster: shaped.line,
+                    baseGlyph: GlyphAtlas.glyphIdentifier(for: shaped.base, in: baseFont) ?? 0,
                     in: baseFont,
                     style: rasterStyle(for: variant),
-                    subpixel: wideSubpixel(of: variant, for: baseCodePoint, face: face),
+                    subpixel: wideSubpixel(of: variant, for: shaped.base, face: face),
                     slot: slot
                 )
             } else {
@@ -2363,24 +2362,33 @@ extension GlyphAtlas: ClusterGlyphSource {
     /// a drawn box. Those code points are left out and the rest shaped again, so
     /// one of them costs only its own glyph and not the whole cluster's.
     ///
+    /// The base is the first code point that is not a Prepend, which a cluster
+    /// led by one carries ahead of it.
+    ///
     /// - Parameters:
     ///   - codePoints: The cluster, in order.
     ///   - face: The requested face.
-    /// - Returns: The shaped line, or `nil` when LastResort is the only face for
-    ///   every code point in it.
-    private func drawableClusterLine(_ codePoints: UnsafeBufferPointer<UInt32>, face: Ubiquitty.Rendering.FontFace) -> CTLine? {
-        let font = codePoints.first.map { faceCarrying($0, face: face) } ?? faces[face]
+    /// - Returns: The shaped line and the base it was shaped for, or `nil` when
+    ///   LastResort is the only face for every code point in it.
+    private func drawableClusterLine(
+        _ codePoints: UnsafeBufferPointer<UInt32>,
+        face: Ubiquitty.Rendering.FontFace
+    ) -> (line: CTLine, base: UInt32)? {
+        let base =
+            codePoints.isEmpty
+            ? 0 : codePoints[Int(Ubiquitty.Unicode.clusterBaseIndex(Ubiquitty.Rendering.ClusterSpan(codePoints)))]
+        let font = codePoints.isEmpty ? faces[face] : faceCarrying(base, face: face)
         let string = clusterString(codePoints)
         let line = clusterLine(string, font: font)
         guard ctLineHasLastResortRun(line) else {
-            return line
+            return (line, base)
         }
         let kept = stringOutsideLastResort(string, shapedAs: line)
         guard !kept.isEmpty else {
             return nil
         }
         let reshaped = clusterLine(kept, font: font)
-        return ctLineHasLastResortRun(reshaped) ? nil : reshaped
+        return ctLineHasLastResortRun(reshaped) ? nil : (reshaped, base)
     }
 
     /// A cluster's code points as a string, up to the pool's longest cluster.
@@ -2447,7 +2455,7 @@ extension GlyphAtlas: ClusterGlyphSource {
         let codePoints = UnsafeBufferPointer(start: codePoints.__dataUnsafe(), count: Int(codePoints.size()))
         if unifontScale > 0 {
             rasterizer.rasteriseUnifontCluster(Ubiquitty.Rendering.ClusterSpan(codePoints), scale: unifontScale)
-        } else if let line = drawableClusterLine(codePoints, face: face) {
+        } else if let shaped = drawableClusterLine(codePoints, face: face) {
             // The phase rides the pen here as it does on the mono path: a cluster
             // keyed per phase and drawn at phase zero is the same eight-copies
             // shape, one cache over.
@@ -2456,7 +2464,7 @@ extension GlyphAtlas: ClusterGlyphSource {
                     / CGFloat(subpixelPhaseCount),
                 y: CGFloat(baselinePenInPixels)
             )
-            rasterizer.rasterise(line: line, at: pen, style: rasterStyle(for: phase))
+            rasterizer.rasterise(line: shaped.line, at: pen, style: rasterStyle(for: phase))
         } else {
             rasterizer.rasteriseBlank()
         }
