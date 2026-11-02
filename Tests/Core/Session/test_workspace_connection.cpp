@@ -726,6 +726,47 @@ TEST(aSuspendedPreparedWorkspaceWritesItsRecordBeforeTheByeLeaves)
     CHECK(bye->reason == Sync::ByeReason::Suspending);
 }
 
+TEST(aGoneWorkspaceRetiresItsPreparedResumeRecord)
+{
+    auto store = std::make_shared<Sync::MemoryResumeRecordStore>();
+    auto prepared = std::make_unique<Sync::SyncClientCore>(nullptr, nullptr);
+    REQUIRE(prepared->prepareResumeStore(store, { 30, 31 }, {}));
+    Fixture fixture(std::make_unique<Queue>(), std::make_unique<Factory>(), std::move(prepared));
+    REQUIRE(fixture.first.acknowledged());
+    REQUIRE(store->read().has_value());
+    const auto original = fixture.factory->wires.back();
+    original->observer->onClose("carrier lost");
+    fixture.queue->drain();
+    fixture.queue->advance();
+    REQUIRE(fixture.factory->wires.size() == 2);
+    const auto pinned = fixture.factory->wires.back();
+    const std::string gone = "\nUBIQUITTY-INSTANCE-GONE workspace-test.sock\n";
+    for (unsigned char byte : gone) {
+        REQUIRE(pinned->observer);
+        pinned->observer->onData({ &byte, 1 });
+        fixture.queue->drain();
+    }
+    REQUIRE(fixture.factory->wires.size() == 3);
+    CHECK(fixture.factory->pinnedSocket.empty());
+    CHECK_EQ(fixture.factory->handoverClears, 1);
+    std::vector<std::uint8_t> body;
+    Sync::encode(body, Sync::Bye { .reason = Sync::ByeReason::SessionGone, .detail = "The requested host instance is no longer serving this connection." });
+    std::vector<std::uint8_t> frame;
+    REQUIRE(Sync::appendFrame(frame, Sync::FrameKind::Bye, 0, body));
+    fixture.feed(frame);
+    CHECK(fixture.first.state() == Session::State::Failed);
+    CHECK_STR_EQ(fixture.firstObserver.lastDetail, "Ubiquitty restarted on the host, and the saved workspace is no longer available.");
+    CHECK(!store->read().has_value());
+    for (unsigned attempt = 0; attempt < 4; ++attempt) {
+        fixture.first.networkPathChanged();
+        fixture.first.resumeAfterSuspension(60);
+        fixture.queue->advance();
+    }
+    CHECK_EQ(fixture.factory->wires.size(), 3u);
+    CHECK(fixture.factory->pinnedSocket.empty());
+    CHECK(!store->read().has_value());
+}
+
 TEST(workspaceConnectionSharesCarrierAcrossPaneDetachment)
 {
     Fixture fixture;

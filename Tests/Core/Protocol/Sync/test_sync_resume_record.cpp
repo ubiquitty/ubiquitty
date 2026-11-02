@@ -207,6 +207,63 @@ TEST(anSSHAttachmentWithoutACertificatePinStillBecomesLive)
     CHECK(host.pane.writer.bytes() == "ssh input");
 }
 
+TEST(aSessionGoneRefusalRetiresResumeAuthorityButHostFullKeepsIt)
+{
+    for (const auto reason : { ByeReason::SessionGone, ByeReason::HostFull }) {
+        Host host({ 41, 42 });
+        ObservedStore store;
+        ClientAttachment client(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), nullptr, &store);
+        std::uint64_t now = 1;
+        attachFresh(host, client, now);
+        REQUIRE(store.record);
+        drop(host, client, now);
+        REQUIRE(client.send(paneID, raw("unsent"), now));
+        (void)client.connect(now);
+        std::vector<std::uint8_t> body;
+        encode(body, Bye { .reason = reason, .detail = {} });
+        std::vector<std::uint8_t> frame;
+        REQUIRE(appendFrame(frame, FrameKind::Bye, 0, body));
+        client.receiveStream(frame, ++now);
+        const bool hasEnded = reason == ByeReason::SessionGone;
+        CHECK(client.isEnded(paneID) == hasEnded);
+        CHECK(client.held().has_value() != hasEnded);
+        CHECK(store.record.has_value() != hasEnded);
+        if (hasEnded) {
+            CHECK(!client.send(paneID, raw("later"), now));
+            REQUIRE(client.endedPanes().size() == 1);
+            CHECK_EQ(client.endedPanes().front().discardedInputEvents, 1u);
+        }
+        client.transportLost(++now);
+        client.persist();
+        CHECK(store.record.has_value() != hasEnded);
+    }
+}
+
+TEST(aGoneAttachmentsFailedRecordRetirementBlocksRestoration)
+{
+    Host host({ 41, 42 });
+    ObservedStore store;
+    ClientAttachment client(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), nullptr, &store);
+    std::uint64_t now = 1;
+    attachFresh(host, client, now);
+    REQUIRE(store.record);
+    drop(host, client, now);
+    (void)client.connect(now);
+    store.isRefusingPurges = true;
+    std::vector<std::uint8_t> body;
+    encode(body, Bye { .reason = ByeReason::SessionGone, .detail = {} });
+    std::vector<std::uint8_t> frame;
+    REQUIRE(appendFrame(frame, FrameKind::Bye, 0, body));
+    client.receiveStream(frame, ++now);
+    CHECK(!client.held());
+    client.transportLost(++now);
+    CHECK(!client.restoreFromStore());
+    store.isRefusingPurges = false;
+    client.persist();
+    CHECK(!store.record);
+    CHECK(!client.restoreFromStore());
+}
+
 TEST(aPinnedAttachmentFallsBackToMemoryAndCanPersistAgain)
 {
     Host host({ 41, 42 });

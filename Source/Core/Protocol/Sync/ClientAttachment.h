@@ -489,9 +489,9 @@ public:
     /// - Parameter paneID: The pane.
     [[nodiscard]] bool isEnded(ID128 paneID) const;
 
-    /// Freezes the held host's panes after its authenticated replacement
-    /// failed continuity admission. Pending input is discarded, pictures
-    /// remain available read-only, and the stored resume authority is retired.
+    /// Freezes panes the host reports gone or whose authenticated replacement
+    /// fails continuity admission. Pending input is discarded, pictures remain
+    /// available read-only, and the stored resume authority is retired.
     void endHost();
 
     [[nodiscard]] ClientAttachmentState state() const { return m_state; }

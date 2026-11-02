@@ -1035,6 +1035,10 @@ shown pane takes its checkpoint, and a hidden one costs nothing.
   panes its attachment held; any other pane it names is `Gone`. A clean `Bye`
   detaches the attachment; a dropped transport leaves it `Lost`, and the
   daemon's loop forgets it past the grace.
+  `Bye{SessionGone}` ends the held panes and retires their resume record before
+  the client reports the refusal. Pending input cannot be sent to a replacement
+  workspace, and a later carrier drop or record write cannot restore the retired
+  authority. Temporary refusals such as `HostFull` keep the record for a retry.
 - **The secret is single-use.** A resume consumes `resumeSecret`, and every
   `Welcome` issues a fresh one. The client rewrites its resume record with the
   fresh secret before it sends any input on the new connection.

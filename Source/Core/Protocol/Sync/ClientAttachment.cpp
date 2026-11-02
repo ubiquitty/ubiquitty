@@ -751,6 +751,10 @@ void ClientAttachment::settle(std::uint64_t now)
 {
     if (!m_connection)
         return;
+    if (m_connection->state() == ConnectionState::Closed && m_connection->byeReason() == ByeReason::SessionGone && m_held) {
+        endHost();
+        return;
+    }
     if (m_connection->state() == ConnectionState::Closed && m_connection->byeReason() == ByeReason::HandingOver) {
         transportLost(now);
         m_wantsRedial = true;
