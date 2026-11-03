@@ -428,6 +428,30 @@ enum DrawEntrySmoke {
             )
         }
 
+        #if canImport(AppKit)
+        // A host asking the surface's own layer for a drawable while the
+        // display link delivers them. Core Animation raises from that call,
+        // and the exception unwinding out of a host's main-actor task leaves
+        // the concurrency runtime faulting at its next isolation check. The
+        // layer answers nil instead, and vends drawables again once the link
+        // stops.
+        guard !surface.metalLayer.presentsWithTransaction else {
+            return failed("the layer presents with a transaction, so no display link can deliver its drawables")
+        }
+        guard startsAndStopsUnderWaitingAcquire(surface) else { return false }
+        surface.ensureFrameLink().start(framesPerSecond: 60)
+        guard surface.frameLink?.ownsDrawableDelivery == true else {
+            return failed("the display link did not take over the layer's drawables")
+        }
+        guard surface.metalLayer.nextDrawable() == nil else {
+            return failed("the layer vended a drawable its display link delivers")
+        }
+        surface.frameLink?.stop()
+        guard surface.metalLayer.nextDrawable() != nil else {
+            return failed("the layer vended no drawable once its display link stopped")
+        }
+        #endif
+
         surface.setSurfaceFocused(false)
         surface.drawSurfaceFrame()
         #if canImport(AppKit)
@@ -878,6 +902,104 @@ enum DrawEntrySmoke {
         return draw(at: 4.04, programShowsCursor: true, row: 2, alpha: 1, named: "explicit show after suppression")
     }
 
+    #if canImport(AppKit)
+    /// How long an acquire takes once it has found the pool dry; the layer's
+    /// own timeout is a second, and a drawable from a pool with one free comes
+    /// within a display frame.
+    private static let drainedPoolWaitInSeconds = 0.5
+
+    /// The longest the display link may take to start or to stop, or the
+    /// layer to answer whether an acquire waits, while an acquire on another
+    /// thread waits out the layer's one-second timeout.
+    private static let linkEdgeLimitInSeconds = 0.25
+
+    /// Starts and stops the surface's display link while a thread's
+    /// `nextDrawable()` on the surface's layer waits for a drawable.
+    ///
+    /// No link attaches while an acquire waits, since attaching would not stop
+    /// it: the view's display link ticks in its place. The layer's lock covers
+    /// whether an acquire waits, never the wait, a second or without end, so
+    /// neither the start nor the stop waits on it.
+    ///
+    /// - Parameter surface: A surface in a window, its link stopped, that has
+    ///   presented a frame.
+    /// - Returns: Whether, under an acquire that waited out the pool's
+    ///   timeout, the start and the stop each returned well inside the wait,
+    ///   with the view's display link installed in place of one that delivers
+    ///   the layer's drawables.
+    private static func startsAndStopsUnderWaitingAcquire(_ surface: TerminalSurface) -> Bool {
+        let layer = surface.surfaceLayer
+        // An acquire waits only on a pool run dry. Each acquire that comes back
+        // at once holds its drawable here, and the next is asked, until one
+        // finds the pool dry and waits out the timeout. Only that one is
+        // judged: a lock held across a wait that short would pass unseen.
+        var heldAcquires: [AcquireOnThread] = []
+        for _ in 0...layer.maximumDrawableCount + 1 {
+            let acquire = AcquireOnThread(asking: layer)
+            // Polled without turning the run loop: a display pass would ask the
+            // drained pool from this thread and wait out its timeout.
+            let pollDeadline = Date().addingTimeInterval(deadlineInSeconds)
+            var isAcquireWaiting = false
+            var longestReadSeconds: TimeInterval = 0
+            while !isAcquireWaiting, !acquire.hasReturned, Date() < pollDeadline {
+                let read = Date()
+                isAcquireWaiting = layer.hasWaitingAcquireForTesting
+                longestReadSeconds = max(longestReadSeconds, Date().timeIntervalSince(read))
+                if !isAcquireWaiting {
+                    Thread.sleep(forTimeInterval: 0.001)
+                }
+            }
+            var startSeconds: TimeInterval = 0
+            var stopSeconds: TimeInterval = 0
+            var isViewLinkInPlace = false
+            var waitedThroughout = false
+            if isAcquireWaiting {
+                let started = Date()
+                surface.ensureFrameLink().start(framesPerSecond: 60)
+                startSeconds = Date().timeIntervalSince(started)
+                isViewLinkInPlace = surface.frameLink?.isRunning == true && surface.frameLink?.ownsDrawableDelivery == false
+                let stopped = Date()
+                surface.frameLink?.stop()
+                stopSeconds = Date().timeIntervalSince(stopped)
+                waitedThroughout = !acquire.hasReturned
+            }
+            guard acquire.waitForReturn(seconds: deadlineInSeconds) else {
+                return failed("an acquire on another thread was still waiting for a drawable after \(deadlineInSeconds) s")
+            }
+            guard longestReadSeconds < linkEdgeLimitInSeconds else {
+                return failed(
+                    "reading whether an acquire waited took \(longestReadSeconds) s: the layer's lock covered "
+                        + "an acquire's wait for a drawable"
+                )
+            }
+            guard acquire.waitSeconds >= drainedPoolWaitInSeconds else {
+                heldAcquires.append(acquire)
+                continue
+            }
+            guard isAcquireWaiting else {
+                return failed("an acquire on another thread waited \(acquire.waitSeconds) s, and the layer never saw it wait")
+            }
+            guard startSeconds < linkEdgeLimitInSeconds, stopSeconds < linkEdgeLimitInSeconds else {
+                return failed(
+                    "the display link took \(startSeconds) s to start and \(stopSeconds) s to stop while an "
+                        + "acquire on another thread waited for a drawable"
+                )
+            }
+            guard waitedThroughout else {
+                return failed("the acquire on another thread returned before the display link started and stopped")
+            }
+            guard isViewLinkInPlace else {
+                return failed("a display link took the layer's drawables under a waiting acquire, or none was installed in its place")
+            }
+            return true
+        }
+        return failed(
+            "no acquire on another thread waited for a drawable with \(heldAcquires.count) of the layer's "
+                + "\(layer.maximumDrawableCount) held"
+        )
+    }
+    #endif
+
     /// Runs the main runloop until the condition holds or the deadline passes.
     ///
     /// - Returns: Whether the condition held.
@@ -990,3 +1112,54 @@ enum DrawEntrySmoke {
         return true
     }
 }
+
+#if canImport(AppKit)
+/// A `nextDrawable()` call on a thread of its own, as a host's render thread
+/// makes one.
+///
+/// What the call answered is written on the thread before it leaves
+/// `returned`, and read only once a wait on `returned` has succeeded.
+private final class AcquireOnThread: @unchecked Sendable {
+    /// Touched on the thread for `nextDrawable()` alone, which a layer answers
+    /// on any thread.
+    private let layer: CAMetalLayer
+    private let returned = DispatchGroup()
+    /// The drawable the call was handed, kept out of the pool while this
+    /// object lives.
+    private var drawable: (any CAMetalDrawable)?
+    private var elapsedSeconds: TimeInterval = 0
+
+    /// Starts the thread, which asks `layer` for a drawable once and holds
+    /// the one it is handed for as long as this object lives.
+    ///
+    /// - Parameter layer: The layer to ask.
+    init(asking layer: CAMetalLayer) {
+        self.layer = layer
+        returned.enter()
+        Thread { [self] in
+            let asked = Date()
+            drawable = self.layer.nextDrawable()
+            elapsedSeconds = Date().timeIntervalSince(asked)
+            returned.leave()
+        }
+        .start()
+    }
+
+    /// Whether the call has returned.
+    var hasReturned: Bool { returned.wait(timeout: .now()) == .success }
+
+    /// How long the call took; read once it has returned.
+    var waitSeconds: TimeInterval {
+        returned.wait()
+        return elapsedSeconds
+    }
+
+    /// Waits for the call to return.
+    ///
+    /// - Parameter seconds: The longest to wait.
+    /// - Returns: Whether the call returned in that time.
+    func waitForReturn(seconds: Double) -> Bool {
+        returned.wait(timeout: .now() + seconds) == .success
+    }
+}
+#endif

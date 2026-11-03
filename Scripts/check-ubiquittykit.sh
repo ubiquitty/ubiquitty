@@ -25,6 +25,14 @@
 # module imports the machinery and every Core interop module internally, so
 # one interop-typed public declaration anywhere in its interface fails this
 # compile.
+#
+# A second consumer, compiled the same way, shows a surface from the
+# font-taking initializer in a window. The surface must submit a frame of its
+# own. Then, while a shell floods it, a main-actor task and a thread of the
+# host's own ask the surface's layer for drawables: each must be answered nil,
+# never a raise, while the display link delivers them, and handed a drawable
+# again once the link stands down. Last, a thread asks on its own schedule
+# through a second flood, while the surface starts and stops its link under it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
@@ -402,6 +410,18 @@ xcrun swiftc "$HOST_DIR/main.swift" \
     -Xlinker -rpath -Xlinker @executable_path/../Frameworks
 ditto "$FRAMEWORK" "$APP/Contents/Frameworks/UbiquittyKit.framework"
 
+# The consumers run in an empty home under an environment of nothing else,
+# with /bin/sh as the shell the window consumer floods. A run reads none of the
+# configuration or startup files of whoever ran it, which could change what it
+# draws, answer the commands it types or replace the shell, and it writes
+# nothing to their shell history.
+TEMPORARY_ROOT="${TMPDIR:-/tmp}"
+CONSUMER_HOME="$(mktemp -d "${TEMPORARY_ROOT%/}/ubiquittykit-consumer.XXXXXX")"
+trap 'rm -rf "$CONSUMER_HOME"' EXIT
+run_consumer() {
+    env -i HOME="$CONSUMER_HOME" TMPDIR="$CONSUMER_HOME" SHELL=/bin/sh PATH=/usr/bin:/bin:/usr/sbin:/sbin "$@"
+}
+
 # Signing seals the embedded framework too, and codesign refuses an app around
 # a framework with anything unsealed in it; the strict verification then reads
 # every seal back.
@@ -428,20 +448,246 @@ EOF
 }
 
 consumer="$APP/Contents/MacOS/consumer"
-"$consumer" preferred ${preferred[@]+"${preferred[@]}"}
+run_consumer "$consumer" preferred ${preferred[@]+"${preferred[@]}"}
 echo "check-ubiquittykit: ok (the preferred family is the first this system has or the framework ships, and choosing it registers every shipped font)"
-"$consumer" lookup
+run_consumer "$consumer" lookup
 echo "check-ubiquittykit: ok (a family is looked up by name after the shipped fonts are registered)"
-"$consumer" renderer
+run_consumer "$consumer" renderer
 echo "check-ubiquittykit: ok (a renderer built before any surface registers the shipped fonts)"
-"$consumer" faces
+run_consumer "$consumer" faces
 echo "check-ubiquittykit: ok (every shipped style and the symbol face are opened from the framework's files)"
-"$consumer" icons
+run_consumer "$consumer" icons
 echo "check-ubiquittykit: ok (the Phosphor and program icons are drawn from the framework's files)"
-"$consumer" family
+run_consumer "$consumer" family
 echo "check-ubiquittykit: ok (a surface reports a family that is drawn as configured, under any of its names, and one that is not by the family drawn in its place)"
-"$consumer" draw
+run_consumer "$consumer" draw
 echo "check-ubiquittykit: ok (the signed app drew a frame in a shipped family through its embedded framework)"
+
+cat > "$HOST_DIR/window.swift" <<'EOF'
+import AppKit
+import Foundation
+import QuartzCore
+import UbiquittyKit
+
+/// What a host's requests for the surface layer's drawables came to.
+final class DrawableRequests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var askedCount = 0
+    private var answeredNilUnderLinkCount = 0
+    private var vendedAfterLinkCount = 0
+    private var isStopRequested = false
+
+    var asked: Int { lock.withLock { askedCount } }
+    var answeredNilUnderLink: Int { lock.withLock { answeredNilUnderLinkCount } }
+    var vendedAfterLink: Int { lock.withLock { vendedAfterLinkCount } }
+    var shouldStop: Bool {
+        get { lock.withLock { isStopRequested } }
+        set { lock.withLock { isStopRequested = newValue } }
+    }
+
+    /// Asks `layer`, which holds a device, for a drawable and files the answer.
+    ///
+    /// Such a layer answers nil at once only while a display link delivers
+    /// its drawables; with none attached it hands one out, or answers nil
+    /// after waiting up to a second for one.
+    ///
+    /// - Returns: Whether the layer answered nil at once.
+    @discardableResult
+    func ask(_ layer: CAMetalLayer) -> Bool {
+        let asked = Date()
+        let drawable = layer.nextDrawable()
+        let isAnsweredNilAtOnce = drawable == nil && Date().timeIntervalSince(asked) < 0.5
+        lock.withLock {
+            askedCount += 1
+            if isAnsweredNilAtOnce {
+                answeredNilUnderLinkCount += 1
+            } else if drawable != nil, answeredNilUnderLinkCount > 0 {
+                vendedAfterLinkCount += 1
+            }
+        }
+        return isAnsweredNilAtOnce
+    }
+}
+
+/// The surface's layer, handed to a thread of the host's own.
+final class LayerReference: @unchecked Sendable {
+    let layer: CAMetalLayer
+
+    init(_ layer: CAMetalLayer) { self.layer = layer }
+}
+
+@MainActor
+func refuse(_ message: String) -> Bool {
+    FileHandle.standardError.write(Data("window-consumer: \(message)\n".utf8))
+    return false
+}
+
+/// Turns the main run loop until `isDone` answers true or the time runs out.
+@MainActor
+func spin(seconds: Double, until isDone: () -> Bool) -> Bool {
+    let deadline = Date(timeIntervalSinceNow: seconds)
+    while !isDone(), Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+    }
+    return isDone()
+}
+
+/// Turns the run loop until `isDone` answers true or the time runs out,
+/// hiding and showing the surface each half second that passes without.
+///
+/// The surface's window is off every screen, so the window system reports it
+/// covered, and a covered surface drives its display link only for a second
+/// after an edge that shows it. The edge is made here, so the link attaches
+/// when this host asks rather than whenever that report lands.
+@MainActor
+func spinRevealing(_ surface: TerminalSurface, seconds: Double, until isDone: () -> Bool) -> Bool {
+    let deadline = Date(timeIntervalSinceNow: seconds)
+    while !spin(seconds: 0.5, until: isDone), Date() < deadline {
+        surface.isHidden = true
+        surface.isHidden = false
+    }
+    return isDone()
+}
+
+/// Has a thread of the host's own ask `reference`'s layer for a drawable,
+/// and waits for the answer.
+///
+/// The surface attaches and detaches its display link on the main thread,
+/// so the link stays as it was for as long as this waits.
+@MainActor
+func askFromThread(_ requests: DrawableRequests, _ reference: LayerReference) {
+    let answered = DispatchSemaphore(value: 0)
+    Thread {
+        requests.ask(reference.layer)
+        answered.signal()
+    }.start()
+    answered.wait()
+}
+
+let passed = MainActor.assumeIsolated { () -> Bool in
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    application.finishLaunching()
+    guard let surface = TerminalSurface(rows: 24, columns: 80, fontFamily: "Menlo", pointSize: 13),
+        let renderer = surface.renderer
+    else {
+        return refuse("no surface with a renderer from the font-taking initializer")
+    }
+    let window = NSWindow(
+        contentRect: CGRect(x: -4000, y: -4000, width: 640, height: 384),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = surface
+    window.orderFrontRegardless()
+    defer { window.orderOut(nil) }
+
+    // The host draws nothing itself, so a frame the renderer submitted for
+    // the surface is one the surface drew into its own layer.
+    surface.feed(Data("ubiquittykit-window\r\n".utf8))
+    guard spin(seconds: 5, until: { renderer.presentedGeometry(for: surface) != nil }) else {
+        let device = surface.metalLayer.device == nil ? "no device" : "a device"
+        return refuse("a surface in a window submitted no frame in 5 s; its layer has \(device)")
+    }
+    guard surface.launchShell() else {
+        return refuse("no shell")
+    }
+
+    // A flood, so the surface's display link takes over the layer's
+    // drawables, and a host asking that layer for one from a main-actor task
+    // meanwhile. A raise ends the process.
+    let mainActorRequests = DrawableRequests()
+    surface.send("yes\r")
+    Task { @MainActor in
+        while !mainActorRequests.shouldStop {
+            try? await Task.sleep(for: .milliseconds(10))
+            mainActorRequests.ask(surface.metalLayer)
+        }
+    }
+    guard spinRevealing(surface, seconds: 10, until: { mainActorRequests.answeredNilUnderLink >= 3 }) else {
+        mainActorRequests.shouldStop = true
+        return refuse(
+            "\(mainActorRequests.answeredNilUnderLink) of \(mainActorRequests.asked) drawable requests from a "
+                + "main-actor task met the display link delivering the layer's drawables in 10 s, not 3"
+        )
+    }
+
+    // A thread of the host's own, asked each time the main thread has just
+    // been answered nil at once, so while the link certainly delivers.
+    let threadRequests = DrawableRequests()
+    let reference = LayerReference(surface.metalLayer)
+    let mainThreadProbe = DrawableRequests()
+    let threadMetLink = spinRevealing(surface, seconds: 10) {
+        if mainThreadProbe.ask(surface.metalLayer) {
+            askFromThread(threadRequests, reference)
+        }
+        return threadRequests.asked >= 3
+    }
+    guard threadMetLink, threadRequests.answeredNilUnderLink == threadRequests.asked else {
+        mainActorRequests.shouldStop = true
+        return refuse(
+            "\(threadRequests.answeredNilUnderLink) of \(threadRequests.asked) drawable requests from a thread, "
+                + "each made while the display link delivered the layer's drawables, were answered nil at once"
+        )
+    }
+
+    // Interrupted, the flood stops, the link stands down, and the layer hands
+    // drawables again, to the task and then to the thread.
+    surface.send("\u{3}")
+    let vendedAgain = spin(seconds: 5) { mainActorRequests.vendedAfterLink > 0 }
+    mainActorRequests.shouldStop = true
+    guard vendedAgain else {
+        return refuse("the layer handed a main-actor task no drawable in 5 s once its display link stood down")
+    }
+    guard spin(seconds: 5, until: {
+        askFromThread(threadRequests, reference)
+        return threadRequests.vendedAfterLink > 0
+    }) else {
+        return refuse("the layer handed a thread no drawable in 5 s once its display link stood down")
+    }
+    print(
+        "window-consumer: \(mainActorRequests.answeredNilUnderLink) of \(mainActorRequests.asked) drawable "
+            + "requests from a main-actor task and \(threadRequests.answeredNilUnderLink) of "
+            + "\(threadRequests.asked) from a thread answered nil under the display link, then each vended"
+    )
+
+    // A thread asking on its own schedule through a second flood, while the
+    // surface hides and shows and starts and stops its link under it. A link
+    // attaches only while no acquire waits, so a thread that keeps one
+    // waiting keeps the surface on its view's display link instead.
+    let freeRequests = DrawableRequests()
+    let finished = DispatchSemaphore(value: 0)
+    Thread {
+        while !freeRequests.shouldStop {
+            freeRequests.ask(reference.layer)
+            Thread.sleep(forTimeInterval: 0.025)
+        }
+        finished.signal()
+    }.start()
+    surface.send("yes\r")
+    _ = spinRevealing(surface, seconds: 2) { false }
+    surface.send("\u{3}")
+    freeRequests.shouldStop = true
+    finished.wait()
+    print(
+        "window-consumer: a thread asking through a second flood was answered \(freeRequests.asked) times, "
+            + "\(freeRequests.answeredNilUnderLink) of them nil under the display link"
+    )
+    return true
+}
+exit(passed ? 0 : 1)
+EOF
+
+xcrun swiftc "$HOST_DIR/window.swift" \
+    -o "$HOST_DIR/window-consumer" \
+    -F "$FRAMEWORK_DIR" \
+    -framework UbiquittyKit \
+    -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
+
+run_consumer "$HOST_DIR/window-consumer"
+echo "check-ubiquittykit: ok (a surface in a window drew its own frame, and its layer answered a host's task and thread nil under the display link, never a raise)"
 
 # The generated header and archive this build just produced are the only place a
 # Swift export naming a C++ interop type can silently vanish -- swiftc prints no

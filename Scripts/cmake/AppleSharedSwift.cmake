@@ -120,6 +120,7 @@ set(UBIQUITTY_APPLE_SHARED_KIT_SOURCES
     Source/UbiquittyKit/Swift/TerminalSurface+Composition.swift
     Source/UbiquittyKit/Swift/TerminalSurface+DisplayPower.swift
     Source/UbiquittyKit/Swift/SurfaceFrameLink.swift
+    Source/UbiquittyKit/Swift/SurfaceMetalLayer.swift
     Source/UbiquittyKit/Swift/TerminalSurface+ContextMenu.swift
     Source/UbiquittyKit/Swift/TerminalSurface+WindowDrag.swift
     Source/UbiquittyKit/Swift/TerminalSurface+EditCommands.swift

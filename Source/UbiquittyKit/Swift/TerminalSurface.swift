@@ -1262,18 +1262,26 @@ public final class TerminalSurface: PlatformView {
     /// the surface then drew every frame through a nil renderer: a black
     /// terminal with a correct grid behind it.
     public var renderer: TerminalSurfaceRenderer? {
-        didSet {
-            // The layer takes its device from whichever renderer draws it, so
-            // it is readied on every assignment rather than once at build: a
-            // surface adopted by a second renderer would otherwise keep the
-            // first one's device and hand out drawables it cannot draw into.
-            renderer?.prepare(metalLayer)
-            installTextMeasurer()
-            if let actualRenderer = renderer as? SurfaceRenderer {
-                drive.publishActualFont(family: actualRenderer.familyName, sizePoints: actualRenderer.pointSize)
-            }
-            needsDisplay = true
+        didSet { rendererDidChange() }
+    }
+
+    /// Readies the surface for whatever ``renderer`` now holds.
+    ///
+    /// Every assignment of ``renderer`` ends here. Swift runs no property
+    /// observer for an assignment made inside one of this class's own
+    /// initializers, so an initializer that assigns ``renderer`` calls this
+    /// itself; skipped, the layer keeps no device and no frame ever presents.
+    internal func rendererDidChange() {
+        // The layer takes its device from whichever renderer draws it, so
+        // it is readied on every assignment rather than once at build: a
+        // surface adopted by a second renderer would otherwise keep the
+        // first one's device and hand out drawables it cannot draw into.
+        renderer?.prepare(metalLayer)
+        installTextMeasurer()
+        if let actualRenderer = renderer as? SurfaceRenderer {
+            drive.publishActualFont(family: actualRenderer.familyName, sizePoints: actualRenderer.pointSize)
         }
+        needsDisplay = true
     }
 
     /// Points the model's proportional-text measurement at this surface's
@@ -1355,7 +1363,24 @@ public final class TerminalSurface: PlatformView {
     ///
     /// Owned here rather than by the renderer: a layer belongs to a view, and a
     /// renderer shared by several panes would otherwise hold one of them.
-    public let metalLayer = CAMetalLayer()
+    ///
+    /// Read on the main actor. `nextDrawable()` on the layer may be called on
+    /// any thread, a host's own render thread among them.
+    ///
+    /// Its drawables are the surface's, so a host attaches no display link to
+    /// it: the surface's own frames raise under one. On macOS the surface's
+    /// display link delivers them while output flows, and `nextDrawable()` on
+    /// the layer then answers nil rather than raising, on whichever thread it
+    /// is called.
+    public var metalLayer: CAMetalLayer { surfaceLayer }
+
+    #if canImport(AppKit)
+    /// ``metalLayer`` as the type the surface's display link attaches to.
+    internal let surfaceLayer = SurfaceMetalLayer()
+    #else
+    /// ``metalLayer``, whose drawables no display link delivers on this shell.
+    internal let surfaceLayer = CAMetalLayer()
+    #endif
     #if canImport(AppKit)
     private var dragDropStorage: TerminalDragDrop?
     internal var dragDrop: TerminalDragDrop {
@@ -1831,7 +1856,7 @@ public final class TerminalSurface: PlatformView {
         if let frameLink {
             return frameLink
         }
-        let link = SurfaceFrameLink(layer: metalLayer, view: self) { [weak self] in
+        let link = SurfaceFrameLink(layer: surfaceLayer, view: self) { [weak self] in
             self?.driveOneFrame()
         }
         link.diagnosticSnapshot = { [weak self] in
