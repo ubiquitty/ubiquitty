@@ -2081,6 +2081,25 @@ if [ "$(uname -s)" = "Darwin" ] && wanted test_rich_text_native_geometry; then
     RAN=$((RAN + 1))
 fi
 
+# ideographicCharacterFaceCentre (Source/UbiquittyRenderKit/IdeographicFace.swift) —
+# where a CJK face sets its ideographs, read from its BASE table's icfb and icft
+# baselines, which the wide sheet aligns with the primary face's cap height.
+# Plain `xcrun swiftc` with IdeographicFace.swift alone: the system CJK faces
+# name the box and their ideographs centre on it, a Latin face names none, and
+# truncated or garbage tables read as absent.
+if [ "$(uname -s)" = "Darwin" ] && wanted test_macos_ideographic_face; then
+    NAME=test_macos_ideographic_face
+    OUT_BIN="$OUT/$NAME"
+    mkdir -p "$OUT"
+    echo "=== $NAME ==="
+    xcrun swiftc -parse-as-library -warnings-as-errors \
+        "$ROOT/Tests/Platform/test_macos_ideographic_face.swift" \
+        "$ROOT/Source/UbiquittyRenderKit/IdeographicFace.swift" \
+        -o "$OUT_BIN" || exit 1
+    "$OUT_BIN" || exit 1
+    RAN=$((RAN + 1))
+fi
+
 # LastResort guard: ctLineHasLastResortRun (Source/UbiquittyRenderKit/LastResort.swift)
 # — the CTLine run scan that stops the glyph atlas, colour sheet and ligature
 # strips baking a CoreText LastResort ?-box tofu into a cached image (where the

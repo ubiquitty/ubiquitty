@@ -49,6 +49,7 @@ set(UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES
     Source/UbiquittyRenderKit/GlyphRasterizer.swift
     Source/UbiquittyRenderKit/GlyphSource.swift
     Source/UbiquittyRenderKit/GrowableBuffer.swift
+    Source/UbiquittyRenderKit/IdeographicFace.swift
     Source/UbiquittyRenderKit/LastResort.swift
     Source/UbiquittyRenderKit/LigatureFeatureClassifier.swift
     Source/UbiquittyRenderKit/LigatureSheet.swift
