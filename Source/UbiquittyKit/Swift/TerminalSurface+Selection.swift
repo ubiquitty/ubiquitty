@@ -66,7 +66,7 @@ extension TerminalSurface {
         clearSelection()
     }
 
-    private func selectionDidChange() {
+    internal func selectionDidChange() {
         needsDisplay = true
         // VoiceOver's selected-text answers read the selection through the
         // projection, and the throttled post tells it the answer moved.

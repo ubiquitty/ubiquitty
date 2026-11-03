@@ -88,7 +88,7 @@ private func preservingGeneralPasteboard(_ body: () -> Void) {
 /// - Returns: The event, or nil when AppKit refuses it or the cell has no
 ///   place yet.
 @MainActor
-private func rightClick(on surface: TerminalSurface, row: Int, column: Int) -> NSEvent? {
+func rightClick(on surface: TerminalSurface, row: Int, column: Int) -> NSEvent? {
     guard let window = surface.window, let point = surface.viewPoint(forRow: row, column: column) else {
         return nil
     }
@@ -722,6 +722,86 @@ enum EditMenuScenarios {
                     )
                 }
                 surface.feed(Data("\u{1b}[?1000l".utf8))
+            }
+        }
+
+        // Clear Scrollback and Reset Terminal belong to the pane the click
+        // opened the menu over, which need not be the focused one.
+        UBUITestRegister("swift_shell_context_menu_clears_the_pane_it_opened_over") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                guard
+                    let shell = TerminalWindowController.spawn(
+                        arguments: ["/bin/sh", "-c", "exec sleep 1000"],
+                        localePolicy: .auto,
+                        sessionLifetime: .endsWithChild
+                    ),
+                    let window = shell.window,
+                    let clicked = terminalSurface(under: shell.paneHost)
+                else {
+                    t.expect(false, desc: "a Swift-shell window opens with a surface")
+                    return
+                }
+                defer { window.close() }
+                window.makeKeyAndOrderFront(nil)
+                t.pump(0.4)
+                shell.splitRight(nil)
+                t.expect(
+                    t.wait(until: { (shell.focusedSurfaceForTesting.map { $0 !== clicked }) ?? false }, timeout: 8),
+                    desc: "the split focuses its new pane"
+                )
+                guard let focused = shell.focusedSurfaceForTesting, focused !== clicked else {
+                    return
+                }
+
+                let lines = (1...60).map { "context-line-\($0)\r\n" }.joined()
+                clicked.feed(Data(lines.utf8))
+                focused.feed(Data(lines.utf8))
+                t.expect(
+                    t.wait(
+                        until: {
+                            clicked.drive.readSnapshot().scrollbackCount > 0 && focused.drive.readSnapshot().scrollbackCount > 0
+                        },
+                        timeout: 8
+                    ),
+                    desc: "both panes hold history"
+                )
+
+                guard let event = rightClick(on: clicked, row: 0, column: 2),
+                    let menu = clicked.menu(for: event),
+                    let clear = menu.items.first(where: { $0.title == "Clear Scrollback" }),
+                    let clearAction = clear.action,
+                    let reset = menu.items.first(where: { $0.title == "Reset Terminal" }),
+                    let resetAction = reset.action
+                else {
+                    t.expect(false, desc: "a right-click on the unfocused pane offers Clear Scrollback and Reset Terminal")
+                    return
+                }
+                _ = NSApp.sendAction(clearAction, to: clear.target, from: clear)
+                t.pump(0.2)
+                t.expect(
+                    clicked.drive.readSnapshot().scrollbackCount == 0,
+                    desc: "Clear Scrollback empties the clicked pane's history (\(clicked.drive.readSnapshot().scrollbackCount) rows left)"
+                )
+                t.expect(
+                    focused.drive.readSnapshot().scrollbackCount > 0,
+                    desc: "and leaves the focused pane's"
+                )
+
+                // Insert mode, which a soft reset turns off: the next
+                // character then overwrites rather than pushing the row along.
+                clicked.feed(Data("\u{1b}[H\u{1b}[2Jabc\r\u{1b}[4hY".utf8))
+                t.expect(
+                    t.wait(until: { clicked.gridTextForTesting().hasPrefix("Yabc") }, timeout: 4),
+                    desc: "insert mode inserts in the clicked pane"
+                )
+                _ = NSApp.sendAction(resetAction, to: reset.target, from: reset)
+                clicked.feed(Data("Z".utf8))
+                t.expect(
+                    t.wait(until: { !clicked.gridTextForTesting().hasPrefix("Yabc") }, timeout: 4)
+                        && clicked.gridTextForTesting().hasPrefix("YZbc\n"),
+                    desc: "Reset Terminal resets the clicked pane (row 0 reads \(clicked.gridTextForTesting().prefix(8).debugDescription))"
+                )
             }
         }
 

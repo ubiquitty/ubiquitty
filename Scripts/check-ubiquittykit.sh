@@ -1117,6 +1117,325 @@ xcrun swiftc "$HOST_DIR/window.swift" \
 run_consumer "$HOST_DIR/window-consumer"
 echo "check-ubiquittykit: ok (a surface in a window drew its own frame, and its layer answered a host's task and thread nil under the display link, never a raise)"
 
+# The clear commands, from a host that has only the public interface. Each pane
+# runs a program of known output as its login shell: sixty numbered lines and a
+# two-line prompt, marked as shell integration marks it, after which it writes
+# every byte the terminal sends it to a file. What the screen and its history
+# hold is read the way an assistive reader reads it; what the program was sent
+# is that file, read up to a sentinel sent after the clear.
+CLEAR_DIR="$BUILD/clear-consumer"
+rm -rf "$CLEAR_DIR"
+mkdir -p "$CLEAR_DIR/input"
+cat > "$CLEAR_DIR/pane-program" <<'EOF'
+#!/bin/sh
+i=1
+while [ "$i" -le 60 ]; do
+    printf 'line-%02d\n' "$i"
+    i=$((i + 1))
+done
+stty raw -echo
+printf '\033]133;A\007user@host ~\r\nprompt$ '
+exec cat >"$UBIQUITTY_KIT_CONSUMER_INPUT"
+EOF
+chmod +x "$CLEAR_DIR/pane-program"
+cat > "$CLEAR_DIR/main.swift" <<'EOF'
+import AppKit
+import Foundation
+import UbiquittyKit
+
+final class SelectionWatch: TerminalSurfaceObserver {
+    var changes = 0
+
+    func terminalSurfaceSelectionDidChange(_: TerminalSurface) {
+        changes += 1
+    }
+}
+
+@MainActor
+final class Pane {
+    let surface: TerminalSurface
+    let input: String
+    var bytesRead = 0
+
+    init(surface: TerminalSurface, input: String) {
+        self.surface = surface
+        self.input = input
+    }
+}
+
+@MainActor
+final class ClearConsumer {
+    let program: String
+    let inputDirectory: String
+    var failures = 0
+    let prompt = ["user@host ~", "prompt$"]
+    let tail = (39...60).map { String(format: "line-%02d", $0) } + ["user@host ~", "prompt$"]
+
+    init(program: String, inputDirectory: String) {
+        self.program = program
+        self.inputDirectory = inputDirectory
+    }
+
+    func expect(_ condition: Bool, _ what: String) {
+        if !condition {
+            failures += 1
+            FileHandle.standardError.write(Data("clear-consumer: FAIL: \(what)\n".utf8))
+        }
+    }
+
+    func waitUntil(seconds: Double, _ condition: () -> Bool) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: seconds)
+        while !condition() {
+            guard Date() < deadline else { return false }
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        return true
+    }
+
+    func rows(_ surface: TerminalSurface) -> [String] {
+        (surface.accessibilityValue() as? String ?? "").components(separatedBy: "\n")
+    }
+
+    func blank(_ count: Int) -> [String] { Array(repeating: "", count: count) }
+
+    // A scroll reaches as far as the history the surface has published, which
+    // can trail the text read through accessibilityValue() while output is
+    // arriving, so a scroll is repeated until the view shows what it should.
+    func scroll(_ surface: TerminalSurface, _ action: String, until condition: () -> Bool) -> Bool {
+        waitUntil(seconds: 10) {
+            surface.performKeyAction(named: action)
+            return condition()
+        }
+    }
+
+    // Forty lines of output, written to the terminal as a program writes
+    // them: whether the view follows them, showing the last twenty-four.
+    func viewFollowsOutput(_ surface: TerminalSurface, _ label: String) -> Bool {
+        let lines = (1...40).map { label + String(format: "-%02d", $0) }
+        surface.feed(Data(lines.map { "\r\n" + $0 }.joined().utf8))
+        return waitUntil(seconds: 10) { rows(surface) == Array(lines[16...]) }
+    }
+
+    func openPane(_ name: String) -> Pane? {
+        let input = inputDirectory + "/" + name
+        FileManager.default.createFile(atPath: input, contents: nil)
+        setenv("SHELL", program, 1)
+        setenv("UBIQUITTY_KIT_CONSUMER_INPUT", input, 1)
+        guard let surface = TerminalSurface(rows: 24, columns: 80), surface.launchShell() else {
+            expect(false, "\(name): a surface launched its program")
+            return nil
+        }
+        guard waitUntil(seconds: 20, { rows(surface) == tail }) else {
+            expect(false, "\(name): the program's output filled the screen (shows \(rows(surface)))")
+            return nil
+        }
+        expect(
+            scroll(surface, "scroll_to_top", until: { rows(surface).first == "line-01" }),
+            "\(name): the history holds the program's first line (shows \(rows(surface)))"
+        )
+        surface.performKeyAction(named: "scroll_to_bottom")
+        return Pane(surface: surface, input: input)
+    }
+
+    // The bytes the program read since the last call, through a sentinel the
+    // terminal sends after them.
+    func received(_ pane: Pane) -> [UInt8]? {
+        pane.surface.send("#")
+        var bytes: [UInt8] = []
+        let didArrive = waitUntil(seconds: 10) {
+            bytes = Array(FileManager.default.contents(atPath: pane.input) ?? Data())
+            return bytes.count > pane.bytesRead && bytes.last == UInt8(ascii: "#")
+        }
+        guard didArrive else { return nil }
+        defer { pane.bytesRead = bytes.count }
+        return Array(bytes[pane.bytesRead..<(bytes.count - 1)])
+    }
+
+    func run() -> Bool {
+        let watch = SelectionWatch()
+
+        if let pane = openPane("buffer") {
+            let surface = pane.surface
+            surface.observer = watch
+            surface.selectAll(nil)
+            expect(surface.hasSelection && rows(surface) == tail, "buffer: the screen is selected and unchanged")
+            surface.performKeyAction(named: "scroll_page_up")
+            expect(rows(surface) != tail, "buffer: the view is scrolled back")
+            let changes = watch.changes
+            surface.clear(.buffer)
+            expect(rows(surface) == ["prompt$"] + blank(23), "buffer: the input line rises to a blank screen (shows \(rows(surface)))")
+            expect(!surface.hasSelection, "buffer: the selection is dropped")
+            expect(watch.changes > changes, "buffer: the observer hears the selection go")
+            let sent = received(pane)
+            expect(sent == [0x0C], "buffer: the program is sent Ctrl-L (got \(String(describing: sent)))")
+
+            // The view the clear returned to the tail follows the output that
+            // refills the history, which begins at the line the clear kept.
+            expect(viewFollowsOutput(surface, "buffer"), "buffer: the view follows the output after the clear (shows \(rows(surface)))")
+            let kept = ["prompt$"] + (1...23).map { String(format: "buffer-%02d", $0) }
+            expect(
+                scroll(surface, "scroll_to_top", until: { rows(surface) == kept }),
+                "buffer: no history is left from before the clear (shows \(rows(surface)))"
+            )
+        }
+
+        if let pane = openPane("scrollback") {
+            let surface = pane.surface
+            surface.performKeyAction(named: "scroll_page_up")
+            expect(rows(surface) != tail, "scrollback: the view is scrolled back")
+            surface.clear(.scrollback)
+            expect(rows(surface) == tail, "scrollback: the view is at the tail and the screen stands (shows \(rows(surface)))")
+            surface.performKeyAction(named: "scroll_to_top")
+            expect(rows(surface) == tail, "scrollback: no history is left (shows \(rows(surface)))")
+            var sent = received(pane)
+            expect(sent == [], "scrollback: the program is sent nothing (got \(String(describing: sent)))")
+
+            // With nothing selected and the view at the tail, no selection
+            // change and no viewport move follow a clear, and the text read
+            // just before it is what each must replace.
+            expect(!surface.hasSelection && rows(surface) == tail, "scrollback: nothing is selected and the view is at the tail")
+            surface.clear(.screen)
+            expect(rows(surface) == prompt + blank(22), "scrollback: Clear Screen at the tail with nothing selected moves the prompt to the top row (shows \(rows(surface)))")
+            surface.clear(.buffer)
+            expect(rows(surface) == ["prompt$"] + blank(23), "scrollback: Clear Buffer at the tail with nothing selected leaves the input line (shows \(rows(surface)))")
+            sent = received(pane)
+            expect(sent == [0x0C], "scrollback: the program is sent Ctrl-L for Clear Buffer alone (got \(String(describing: sent)))")
+
+            // A view scrolled back when Clear Scrollback empties the history
+            // returns to the tail, and follows the output that refills it.
+            expect(viewFollowsOutput(surface, "before"), "scrollback: output fills the history again (shows \(rows(surface)))")
+            expect(
+                scroll(surface, "scroll_page_up", until: { rows(surface).last != "before-40" }),
+                "scrollback: the view is scrolled back over the new history (shows \(rows(surface)))"
+            )
+            surface.clear(.scrollback)
+            expect(viewFollowsOutput(surface, "after"), "scrollback: the view follows the output that refills the history (shows \(rows(surface)))")
+        }
+
+        if let pane = openPane("screen") {
+            let surface = pane.surface
+            surface.observer = watch
+            surface.selectAll(nil)
+            expect(surface.hasSelection && rows(surface) == tail, "screen: the screen is selected and unchanged")
+            surface.performKeyAction(named: "scroll_page_up")
+            expect(rows(surface) != tail, "screen: the view is scrolled back")
+            let changes = watch.changes
+            surface.clear(.screen)
+            expect(rows(surface) == prompt + blank(22), "screen: the view is at the tail and the prompt's first row is its top row (shows \(rows(surface)))")
+            expect(!surface.hasSelection, "screen: the selection is dropped")
+            expect(watch.changes > changes, "screen: the observer hears the selection go")
+            for _ in 0..<22 {
+                surface.performKeyAction(named: "scroll_line_up")
+            }
+            expect(rows(surface) == tail, "screen: the rows above the prompt are the history's last rows (shows \(rows(surface)))")
+            surface.performKeyAction(named: "scroll_to_top")
+            expect(rows(surface).first == "line-01", "screen: the history keeps its first line")
+            surface.performKeyAction(named: "scroll_to_bottom")
+            var sent = received(pane)
+            expect(sent == [], "screen: the program is sent nothing (got \(String(describing: sent)))")
+
+            // A program on the alternate screen owns its rows, so both
+            // commands that would change them send it Ctrl-L instead.
+            let alternate = ["alternate"] + blank(23)
+            surface.feed(Data("\u{1B}[?1049h\u{1B}[Halternate".utf8))
+            expect(waitUntil(seconds: 10, { rows(surface) == alternate }), "screen: the alternate screen shows (shows \(rows(surface)))")
+            surface.selectAll(nil)
+            surface.clear(.screen)
+            surface.clear(.buffer)
+            expect(rows(surface) == alternate, "screen: the alternate screen stands (shows \(rows(surface)))")
+            expect(surface.hasSelection, "screen: the alternate screen's selection stays")
+            sent = received(pane)
+            expect(sent == [0x0C, 0x0C], "screen: the program is sent Ctrl-L for each (got \(String(describing: sent)))")
+
+            // Clear Scrollback asks the program for nothing, so it runs on the
+            // alternate screen too, and the selection goes with the history.
+            let heard = watch.changes
+            surface.clear(.scrollback)
+            expect(rows(surface) == alternate, "screen: the alternate screen stands Clear Scrollback (shows \(rows(surface)))")
+            expect(!surface.hasSelection, "screen: Clear Scrollback drops the alternate screen's selection")
+            expect(watch.changes > heard, "screen: the observer hears it go")
+            sent = received(pane)
+            expect(sent == [], "screen: Clear Scrollback sends the program nothing (got \(String(describing: sent)))")
+            surface.feed(Data("\u{1B}[?1049l".utf8))
+            expect(waitUntil(seconds: 10, { rows(surface) == prompt + blank(22) }), "screen: the main screen returns (shows \(rows(surface)))")
+            surface.performKeyAction(named: "scroll_to_top")
+            expect(rows(surface) == prompt + blank(22), "screen: the main screen's history is gone (shows \(rows(surface)))")
+        }
+
+        // The surface's own context menu, which a host shows as it is: its
+        // clear and reset items reach the surface it opened over through no
+        // responder but the surface.
+        if let surface = TerminalSurface(rows: 24, columns: 80) {
+            let lines = (1...60).map { String(format: "line-%02d", $0) }
+            let screen = Array(lines[37...]) + [""]
+            surface.feed(Data(lines.map { $0 + "\r\n" }.joined().utf8))
+            expect(waitUntil(seconds: 10, { rows(surface) == screen }), "menu: the lines fill the screen (shows \(rows(surface)))")
+            expect(scroll(surface, "scroll_to_top", until: { rows(surface).first == "line-01" }), "menu: the history holds the first line")
+            surface.performKeyAction(named: "scroll_to_bottom")
+
+            let click = NSEvent.mouseEvent(
+                with: .rightMouseDown,
+                location: NSPoint(x: 4, y: 4),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+            let menu = click.flatMap { surface.menu(for: $0) }
+            func pick(_ title: String) {
+                guard let item = menu?.items.first(where: { $0.title == title }), let action = item.action else {
+                    expect(false, "menu: the menu offers \(title)")
+                    return
+                }
+                let target = NSApplication.shared.target(forAction: action, to: item.target, from: item).map { $0 as AnyObject }
+                expect(target === surface && surface.validateMenuItem(item), "menu: \(title) is enabled and answered by the surface")
+                expect(NSApplication.shared.sendAction(action, to: item.target, from: item), "menu: picking \(title) reaches a responder")
+            }
+
+            pick("Clear Scrollback")
+            surface.performKeyAction(named: "scroll_to_top")
+            expect(rows(surface) == screen, "menu: Clear Scrollback leaves no history (shows \(rows(surface)))")
+            surface.performKeyAction(named: "scroll_to_bottom")
+
+            // Insert mode on, which a soft reset turns off: the next character
+            // then overwrites rather than pushing the row along.
+            surface.feed(Data("\u{1B}[H\u{1B}[2Jabc\r\u{1B}[4hY".utf8))
+            expect(waitUntil(seconds: 10, { rows(surface).first == "Yabc" }), "menu: insert mode inserts (shows \(rows(surface)))")
+            pick("Reset Terminal")
+            surface.feed(Data("Z".utf8))
+            expect(waitUntil(seconds: 10, { rows(surface).first != "Yabc" }), "menu: the next character lands")
+            expect(rows(surface).first == "YZbc", "menu: Reset Terminal turns insert mode off (shows \(rows(surface)))")
+        } else {
+            expect(false, "menu: a surface is made")
+        }
+        return failures == 0
+    }
+}
+
+let arguments = CommandLine.arguments
+guard arguments.count == 3 else {
+    FileHandle.standardError.write(Data("usage: clear-consumer <pane-program> <input-directory>\n".utf8))
+    exit(2)
+}
+let passed = MainActor.assumeIsolated {
+    ClearConsumer(program: arguments[1], inputDirectory: arguments[2]).run()
+}
+exit(passed ? 0 : 1)
+EOF
+
+xcrun swiftc "$CLEAR_DIR/main.swift" \
+    -swift-version 6 \
+    -o "$CLEAR_DIR/clear-consumer" \
+    -F "$FRAMEWORK_DIR" \
+    -framework UbiquittyKit \
+    -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
+
+"$CLEAR_DIR/clear-consumer" "$CLEAR_DIR/pane-program" "$CLEAR_DIR/input"
+echo "check-ubiquittykit: ok (external consumer ran Clear Buffer, Clear Scrollback and Clear Screen)"
+
 # The generated header and archive this build just produced are the only place a
 # Swift export naming a C++ interop type can silently vanish -- swiftc prints no
 # diagnostic and the build stays green. Assert every such export survived both.

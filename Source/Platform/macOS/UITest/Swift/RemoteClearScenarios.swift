@@ -5,24 +5,46 @@ import AppKit
 import UbiquittyCore
 import UbiquittyKit
 
-// RemoteClearScenarios.swift — Cmd-K in a window attached to a ubiquitty-host
-// session this scenario forks with a home of its own.
+// RemoteClearScenarios.swift — the clear commands in a window attached to a
+// ubiquitty-host session each scenario forks with a home of its own.
 //
 // The host owns the session's terminal, so the window's own grid is a replica
-// the next frame overwrites. Cmd-K therefore has to reach the host as a
+// the next frame overwrites. A clear therefore has to reach the host as a
 // request, and the window shows the clear only once the host's frame says so.
-// The gesture is taken from the Edit menu item AppKit would run, and delivered
-// to the responder AppKit would deliver it to: the harness has no key window,
-// so a nil-target dispatch would reach nobody and prove nothing.
+// Cmd-K is taken from the Edit menu item AppKit would run, and delivered to
+// the responder AppKit would deliver it to: the harness has no key window, so
+// a nil-target dispatch would reach nobody and prove nothing. The public
+// `clear(_:)` an embedding host calls is driven the way such a host drives it,
+// and the surface's context menu is opened over the hosted pane.
 
-/// Registers the hosted-session clear scenario with the UI-test runner, and
+/// Registers the hosted-session clear scenarios with the UI-test runner, and
 /// holds the menu dispatch the tmux clear scenario shares.
 enum RemoteClearScenarios {
     /// Registers every scenario in this file.
     static func register() {
         UBUITestRegister("remote_session_cmd_k_clears_on_the_host") { context in
             guard let t = context else { return }
-            MainActor.assumeIsolated { run(t) }
+            MainActor.assumeIsolated {
+                withHostedSurface(t) { surface, window in
+                    clearByMenu(t, surface, window)
+                }
+            }
+        }
+        UBUITestRegister("remote_session_public_clear_runs_on_the_host") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                withHostedSurface(t) { surface, _ in
+                    clearByPublicCall(t, surface)
+                }
+            }
+        }
+        UBUITestRegister("remote_session_context_menu_leaves_the_terminal_to_the_host") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                withHostedSurface(t) { surface, _ in
+                    contextMenuOnHostedPane(t, surface)
+                }
+            }
         }
     }
 
@@ -59,8 +81,14 @@ enum RemoteClearScenarios {
         return nil
     }
 
+    /// Forks a host with a home of its own, attaches a window to a session on
+    /// it, and runs `body` against that window's surface and window.
+    ///
+    /// - Parameters:
+    ///   - t: The scenario's context.
+    ///   - body: The scenario, run while the window is connected.
     @MainActor
-    private static func run(_ t: UBUITestContext) {
+    private static func withHostedSurface(_ t: UBUITestContext, _ body: (TerminalSurface, NSWindow) -> Void) {
         guard let hostBinary = ProcessInfo.processInfo.environment["UBIQUITTY_UI_TEST_HOST"],
             FileManager.default.isExecutableFile(atPath: hostBinary)
         else {
@@ -141,9 +169,18 @@ enum RemoteClearScenarios {
             t.expect(false, desc: "the window connected to the host session")
             return
         }
+        body(surface, window)
+    }
 
-        // History the clear has to take, and a marker on screen it has to take
-        // with it.
+    /// Runs output into the hosted session until it has history and a marker
+    /// on screen.
+    ///
+    /// - Parameters:
+    ///   - t: The scenario's context.
+    ///   - surface: The hosted window's surface.
+    /// - Returns: Whether the history and the marker arrived.
+    @MainActor
+    private static func fillHistory(_ t: UBUITestContext, _ surface: TerminalSurface) -> Bool {
         surface.send("seq 1 300; echo CLEAR_\"\"MARKER\n")
         let isFilled = t.wait(
             until: {
@@ -161,8 +198,22 @@ enum RemoteClearScenarios {
                 false,
                 desc: "the host session produced scrollback (got \(surface.drive.readSnapshot().scrollbackCount); on screen: \(screen))"
             )
-            return
+            return false
         }
+        return true
+    }
+
+    /// Cmd-K, as the Edit menu would deliver it, empties the hosted session.
+    ///
+    /// - Parameters:
+    ///   - t: The scenario's context.
+    ///   - surface: The hosted window's surface.
+    ///   - window: The hosted window.
+    @MainActor
+    private static func clearByMenu(_ t: UBUITestContext, _ surface: TerminalSurface, _ window: NSWindow) {
+        // History the clear has to take, and a marker on screen it has to take
+        // with it.
+        guard fillHistory(t, surface) else { return }
 
         // Cmd-K, as the menu would deliver it.
         guard let item = editMenuItem(key: "k", modifiers: [.command]), let action = item.action else {
@@ -194,6 +245,93 @@ enum RemoteClearScenarios {
         t.expect(
             t.wait(until: { surface.gridTextForTesting().contains("AFTER_CLEAR") }, timeout: 10),
             desc: "the cleared host session still answers input"
+        )
+    }
+
+    /// The three public clear commands run on the host, each a request whose
+    /// selection goes when it is sent and whose result arrives in the host's
+    /// frames.
+    ///
+    /// - Parameters:
+    ///   - t: The scenario's context.
+    ///   - surface: The hosted window's surface.
+    @MainActor
+    private static func clearByPublicCall(_ t: UBUITestContext, _ surface: TerminalSurface) {
+        guard fillHistory(t, surface) else { return }
+        let history = { Int(surface.drive.readSnapshot().scrollbackCount) }
+
+        // Clear Scrollback: the history goes and the marker on screen stands.
+        surface.selectAll(nil)
+        t.expect(surface.hasSelection, desc: "Select All selects in the hosted window")
+        surface.clear(.scrollback)
+        t.expect(!surface.hasSelection, desc: "Clear Scrollback drops the selection when it is sent")
+        t.expect(
+            t.wait(until: { history() == 0 }, timeout: 10),
+            desc: "Clear Scrollback empties the hosted session's history (now \(history()))"
+        )
+        t.expect(surface.gridTextForTesting().contains("CLEAR_MARKER"), desc: "Clear Scrollback leaves the hosted session's screen")
+
+        // Clear Screen: the prompt rises to the top row, and the rows above
+        // it, the marker among them, move into the history.
+        surface.clear(.screen)
+        t.expect(
+            t.wait(until: { history() > 0 && !surface.gridTextForTesting().contains("CLEAR_MARKER") }, timeout: 10),
+            desc: "Clear Screen lifts the hosted session's screen into its history (history \(history()))"
+        )
+
+        // Clear Buffer: the screen and the history both go.
+        surface.clear(.buffer)
+        t.expect(
+            t.wait(until: { history() == 0 }, timeout: 10),
+            desc: "Clear Buffer empties the hosted session's history (now \(history()))"
+        )
+        surface.send("echo AFTER_\"\"CLEAR\n")
+        t.expect(
+            t.wait(until: { surface.gridTextForTesting().contains("AFTER_CLEAR") }, timeout: 10),
+            desc: "the cleared host session still answers input"
+        )
+    }
+
+    /// The surface's context menu over a hosted pane: Clear Scrollback runs on
+    /// the host, and Reset Terminal, whose terminal is the host's, is disabled
+    /// and leaves the pane's copy as the host set it.
+    ///
+    /// - Parameters:
+    ///   - t: The scenario's context.
+    ///   - surface: The hosted window's surface.
+    @MainActor
+    private static func contextMenuOnHostedPane(_ t: UBUITestContext, _ surface: TerminalSurface) {
+        guard fillHistory(t, surface) else { return }
+        let history = { Int(surface.drive.readSnapshot().scrollbackCount) }
+        guard let event = rightClick(on: surface, row: 0, column: 2),
+            let menu = surface.menu(for: event),
+            let clear = menu.items.first(where: { $0.title == "Clear Scrollback" }),
+            let clearAction = clear.action,
+            let reset = menu.items.first(where: { $0.title == "Reset Terminal" })
+        else {
+            t.expect(false, desc: "a right-click on the hosted pane offers Clear Scrollback and Reset Terminal")
+            return
+        }
+        t.expect(surface.validateMenuItem(clear), desc: "Clear Scrollback is enabled on the hosted pane")
+        t.expect(!surface.validateMenuItem(reset), desc: "Reset Terminal is disabled on the hosted pane")
+        _ = NSApp.sendAction(clearAction, to: clear.target, from: clear)
+        t.expect(
+            t.wait(until: { history() == 0 }, timeout: 10),
+            desc: "the context menu's Clear Scrollback empties the hosted session's history (now \(history()))"
+        )
+
+        // Mouse reporting, which the host's program turns on and a reset of
+        // the pane's copy alone would turn off there.
+        surface.send("printf '\\033[?1000h'\n")
+        t.expect(
+            t.wait(until: { surface.drive.readSnapshot().mouseReportsActive }, timeout: 10),
+            desc: "the host's program turns mouse reporting on"
+        )
+        surface.softResetTerminal()
+        t.pump(0.5)
+        t.expect(
+            surface.drive.readSnapshot().mouseReportsActive,
+            desc: "a reset leaves the hosted pane's copy of the terminal as the host set it"
         )
     }
 }
