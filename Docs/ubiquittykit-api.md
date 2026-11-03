@@ -134,12 +134,13 @@ or pane chrome reads Core's answer instead of walking the process table:
 | `foregroundProgramKey` | The process catalog's key for the program, such as `claude-code`; nil when the catalog holds no entry |
 | `foregroundProcessChain` | The chain a title shows, such as `vi ◂ claude` |
 | `foregroundProcessChainWithArguments` | The same chain with each program's arguments |
+| `foregroundProgramIcon` | The catalog's icon for the key, as a `TerminalSurface.ProgramIcon`; nil when the key is nil (macOS) |
 
 Each is current whenever the observer's
 `terminalSurfaceDidChangeProcessState(_:)` fires and is read on the main
 thread, as the surface is. The callbacks of one delivery of what the session
 reported (process state, tab status, title, screen update, exit and the rest)
-read the four and `programStatus` from one sample; a read outside them takes
+read these and `programStatus` from one sample; a read outside them takes
 the newest. The key is Core's resolution, the one a title's program icon uses:
 the program an OSC 7501 status record names while a program holds the
 terminal, then the foreground process. A status record can move the key
@@ -201,6 +202,39 @@ The kind, label and colour come from the pane's primary OSC 7501 record. A
 pane with no record carries the OSC 21337 tab status a program set, as a colour
 and a label with no kind. The program a record names is
 `foregroundProgramKey`, not a field here.
+
+A host draws a program's icon from Core's catalog through the Kit, with no
+catalog of its own. `TerminalSurface.ProgramIcon(key:)` looks a catalog key up
+and answers nil for an empty key, for a key the catalog does not hold, and for
+a framework without the icon's file. A program's name is not a key: Claude
+Code runs as `claude`, its key is `claude-code`, and
+`ProgramIcon(key: "claude")` is nil. `foregroundProgramIcon` is the lookup of
+`foregroundProgramKey`. The icon is an AppKit value, on macOS only, where the
+icons ship:
+
+| Member | Value |
+| --- | --- |
+| `key` | The catalog key, such as `claude-code` |
+| `title` | The program's name as its owner writes it, such as `Claude Code`, for a tooltip or an accessibility label |
+| `renderingMode` | `template`: one colour, the ink of the text beside it; `original`: the icon's own colours |
+| `image` | The icon in its file's colours, fitted in a square of `preferredSide`; a template icon's is marked `isTemplate`, so an image view, button or menu tints it |
+| `preferredSide` | The side Ubiquitty's titles draw an icon at: 16 points, the size Safari draws a site's icon at in its tab |
+| `needsPlate(on:)` | Whether a drawn icon needs a plate behind it on a ground: Core's decision from the icon's own colour, its contrast with the ground and whether the icon brings a tile of its own; false for a template icon |
+| `image(side:ink:ground:)` | The icon as Ubiquitty's titles draw it: a template icon in the ink, a drawn icon in its colours on a squircle plate in the ink when `needsPlate(on:)` says so; nil for a side that is not positive |
+
+The lookup and `image(side:ink:ground:)` run on the main thread. The icon is
+`Sendable`: its members and `needsPlate(on:)` read on any thread and its
+images draw on any thread, so a host may hand one to a background task or an
+actor's cache and rasterise it there for a thumbnail. The icon's file is read
+from the framework's own bundle, never the host's, and from the app's bundle
+in the Ubiquitty app. The first lookup of a key reads its file, and the image
+read is kept for the life of the process: at most one per catalog program,
+whatever keys a host asks for. Every later lookup of the key reads nothing; a
+lookup walks the catalog's few entries by key, and a key the catalog does not
+hold reads no file. Each lookup returns images of its own that draw the kept
+one, so a host may resize or tint one without touching another lookup's, and
+may look an icon up on every process-state or tab status callback rather than
+keep one.
 
 ### Theme colors
 
@@ -414,12 +448,15 @@ renderer does; a lookup by name finds the shipped families the system has no
 copy of, which only a lookup after the registration does; every style of a
 shipped family and the symbol font are opened from the framework's files with
 same-named decoys registered; the Phosphor and program icons are drawn from
-the framework's files; a surface reports a family drawn under another of its
-names, a PostScript name and GNU Unifont as configured, a missing family and a
-name that only begins the names of CoreText's substitute by the substitute,
-and another family on the bitmap tier as GNU Unifont; a frame draws in a
-shipped family; and a theme's colors are read, applied by name and followed as
-programs move them.
+the framework's files, and a key outside the catalog draws and keeps none; a
+program's icon looked up by catalog key draws in its own colours or in the ink
+it is given, as the catalog says, with Core's plate decision, and handed to
+another thread reads and draws there as on the main one; a surface reports a
+family drawn under another of its names, a PostScript name and GNU Unifont as
+configured, a missing family and a name that only begins the names of
+CoreText's substitute by the substitute, and another family on the bitmap tier
+as GNU Unifont; a frame draws in a shipped family; and a theme's colors are
+read, applied by name and followed as programs move them.
 
 ## Versions and examples
 
@@ -446,7 +483,11 @@ headers are not a separate compatibility promise.
 - `Source/UbiquittyKit/Session.h` is the complete session declaration.
 - `Tests/UbiquittyKit/test_kit_session.cpp` exercises the session facade.
 - `Scripts/check-ubiquittykit.sh` builds `UbiquittyKit.framework` and runs a
-  Swift consumer compiled with `-F` alone: it draws a frame, reads a theme's
+  Swift consumer compiled with `-F` alone: it draws a frame, looks programs'
+  icons up by catalog key, a drawn one with Core's plate decision and a
+  template one in the ink it is given, hands them to another thread and reads
+  and draws them there as on the main one, and finds none for a key the
+  catalog does not hold; reads a theme's
   colors without a surface, applies the theme by name, and hears each OSC
   color write and reset, and a palette or theme it applies, move the colors
   through the observer, with nothing heard for a write that moves nothing or
@@ -454,7 +495,7 @@ headers are not a separate compatibility promise.
   hidden, or a program writes them to the surface's pseudo-terminal, among
   them a program writing updates back to back. A further consumer launches a
   shell in a surface taken out of its window, runs a program, and reads its
-  name, catalog key and chains; hears nothing while its observer declines
+  name, catalog key, icon and chains; hears nothing while its observer declines
   process facts and the move once it asks again; reads the status a record
   posts and the colour a program sets; and reads nothing named once the shell
   exits.

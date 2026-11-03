@@ -917,6 +917,9 @@ set(UBIQUITTY_KIT_SOURCES
     # questions it asks — an agent driving a session, a program reading the
     # clipboard, an install copying a binary to a host — are the desktop's.
     "${CMAKE_SOURCE_DIR}/Source/UbiquittyKit/Swift/ConsentAlert.swift"
+    # macOS only: a program's icon as AppKit images, read through ProcessIcons
+    # below from the process icons only the macOS products ship.
+    "${CMAKE_SOURCE_DIR}/Source/UbiquittyKit/Swift/TerminalSurface+ProgramIcon.swift"
     # macOS only: the pasteboard half of the PAL clipboard backend, which
     # Source/Platform/macOS/Clipboard.cpp calls through a C seam. It rides this
     # list because the seam has to resolve in both products — the app links this
