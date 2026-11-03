@@ -650,9 +650,11 @@ TEST(passwordDetectionReadsTheStreamInBothIngestPaths)
         stream->discipline = PAL::LineDiscipline {};
         CountingDrainHost host;
         const auto input = [&](std::string_view text) {
-            if (usesPipeline)
+            if (usesPipeline) {
                 CHECK_EQ(runtime.feedChunkUpToSyncClear({ text.data(), text.size() }).consumed, static_cast<int>(text.size()));
-            else {
+                // The pipeline reads the prompt where it closes a pass on a pause.
+                CHECK_EQ(runtime.finishExternalDrainPass(host, static_cast<int>(text.size()), DrainPassEnd::WouldBlock).bytesDrained, static_cast<int>(text.size()));
+            } else {
                 stream->toRead.append(text);
                 CHECK_EQ(runtime.drainAvailable(host).bytesDrained, static_cast<int>(text.size()));
             }

@@ -402,8 +402,11 @@ void setPasswordDetect(Ubiquitty::Terminal* t, bool isEnabled); // bool-ok: mirr
 ///   heuristic or asserted by the app through private mode 7401.
 [[nodiscard]] bool passwordPromptActive(const Ubiquitty::Terminal* t);
 
-/// Updates password protection at the end of an owned parser batch.
+/// Updates password protection once the program's output has paused.
 ///
+/// A prompt waits for a person, so the verdict is read when the writer pauses:
+/// the runtime settles at a drain pass that caught up, never per parsed chunk.
+/// The PTY facts cost a tty ioctl, and a chunk of a flood is one kernel quantum.
 /// The caller holds the terminal's model lock. Replicas keep their host's
 /// verdict; owners use canonical echo state or the text heuristic when the
 /// discipline is raw or unknown. Mode 7401 remains authoritative.
@@ -473,18 +476,6 @@ void processBytes(Ubiquitty::Terminal* t, std::string_view buffer, PAL::ProcessF
 /// - Returns: Bytes consumed. The whole run when neither stop is present.
 int processBytesUpToSyncClear(Ubiquitty::Terminal* t, std::string_view buffer, bool* stoppedAtSyncClear);
 
-/// Feeds a bounded batch with the owning PTY's facts.
-///
-/// Password detection samples the facts once when the whole buffer is consumed;
-/// a sync-clear or reply-pressure cut leaves that decision to the remaining tail.
-///
-/// - Parameters:
-///   - t: The terminal to feed, or null to consume nothing.
-///   - buffer: The bytes to parse.
-///   - stoppedAtSyncClear: Reports a sync-clear stop, if non-null.
-///   - process: The PTY owner's facts, or null for unknown discipline.
-/// - Returns: The number of bytes consumed.
-int processBytesUpToSyncClear(Ubiquitty::Terminal* t, std::string_view buffer, bool* stoppedAtSyncClear, PAL::ProcessFacts* process);
 /// The reason-blind form: an early return that is not a sync clear still needs
 /// its replies drained before the next call, or they overflow the same way.
 int processBytesUpToSyncClear(Ubiquitty::Terminal* t, std::string_view buffer);

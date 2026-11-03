@@ -214,6 +214,11 @@ int main(int argc, char** argv)
         SessionHandle handle;
         TerminalSession& session = *handle.session;
         session.start(rows, columns);
+        // As a frontend applies the preferences to a new pane: the terminal
+        // seeds from them, password detection among the seeds, and that
+        // detection is a tty ioctl wherever the runtime settles it. A bench
+        // that skips the step measures a parse the app never runs.
+        session.applyTerminalPreferences(Ubiquitty::Preferences::values());
         // As a frontend arms it at session start: the watch judges every byte
         // the terminal receives, so a bench that leaves it unarmed measures a
         // path the app never runs.

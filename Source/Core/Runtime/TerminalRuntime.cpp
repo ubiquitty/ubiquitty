@@ -321,7 +321,7 @@ FeedResult TerminalRuntime::feedChunkUpToSyncClear(std::span<const char> bytes)
     m_lastBytesMicros.store(PAL::monotonicMicros() | 1u, std::memory_order_relaxed);
     tickTerminalClock();
     bool stoppedAtSyncClear = false;
-    const int consumed = Ubiquitty::processBytesUpToSyncClear(m_term.get(), std::string_view(bytes.data(), static_cast<std::size_t>(length)), &stoppedAtSyncClear, m_stream ? &m_stream->process() : nullptr);
+    const int consumed = Ubiquitty::processBytesUpToSyncClear(m_term.get(), std::string_view(bytes.data(), static_cast<std::size_t>(length)), &stoppedAtSyncClear);
 #if UBIQUITTY_UI_TESTS
     uiTestBytesUnderModelLock.fetch_add(static_cast<std::uint64_t>((consumed > 0) ? consumed : length), std::memory_order_relaxed);
 #endif
@@ -628,6 +628,10 @@ void TerminalRuntime::finishDrainPass(DrainHost& host, DrainOutcome& outcome)
             // behind its last whole-screen erase has been parsed, including
             // a redraw whose last bytes ended a pass on its budget.
             noteEraseRedrawParsed();
+            // A prompt waits for a person, so a pause is where it is read: the
+            // program has stopped, and has had the gap to turn echo off after
+            // printing it. The facts are a tty ioctl, so never per bite.
+            Ubiquitty::settlePasswordPrompt(*m_term, &m_stream->process());
             // The final bite can fall inside the publish floor. An empty read
             // settles that bite even though it brings no new model mutations.
             if (m_hasUnpublishedSnapshot.load(std::memory_order_acquire))
@@ -710,6 +714,10 @@ void TerminalRuntime::finishDrainPass(DrainHost& host, DrainOutcome& outcome)
     // bell is consumed (cleared) here, matching the parser's own reply path.
     host.lockModel();
     flushReplies();
+    // The writer paused with bytes in this pass: the prompt those bytes may
+    // have printed is read now, and again on the confirming empty pass.
+    if (outcome.caughtUp || outcome.end == DrainPassEnd::WouldBlock)
+        Ubiquitty::settlePasswordPrompt(*m_term, &m_stream->process());
     // A drain that erased the whole screen arms the hold; the query on the
     // presenting thread releases it once the redraw has settled.
     armEraseHoldIfUnseen(*m_term, PAL::monotonicMicros());

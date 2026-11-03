@@ -7199,16 +7199,6 @@ void processBytes(Ubiquitty::Terminal* t, std::string_view buffer, PAL::ProcessF
 // processBytes's log).
 int processBytesUpToSyncClear(Ubiquitty::Terminal* t, std::string_view buffer, bool* stoppedAtSyncClear)
 {
-    if (!t) {
-        if (stoppedAtSyncClear)
-            *stoppedAtSyncClear = false;
-        return 0;
-    }
-    return processBytesUpToSyncClear(t, buffer, stoppedAtSyncClear, nullptr);
-}
-
-int processBytesUpToSyncClear(Ubiquitty::Terminal* t, std::string_view buffer, bool* stoppedAtSyncClear, PAL::ProcessFacts* process)
-{
     if (stoppedAtSyncClear)
         *stoppedAtSyncClear = false;
     if (!t)
@@ -7226,13 +7216,11 @@ int processBytesUpToSyncClear(Ubiquitty::Terminal* t, std::string_view buffer, b
     if ((t->sessionLogCaptureEnabled || t->loggingEnabled) && t->sessionLogFile && consumed > 0) {
         std::fwrite(buffer.data(), 1, static_cast<size_t>(consumed), static_cast<FILE*>(t->sessionLogFile));
     }
-    if (consumed >= static_cast<int>(buffer.size())) {
+    // No password settle here: a batch on this entry is one kernel quantum of
+    // a flood, and the owner's facts cost an ioctl. The runtime settles once
+    // the writer pauses (settlePasswordPrompt).
+    if (consumed >= static_cast<int>(buffer.size()))
         VT::termDrainSixel(t);
-        // The batch settled — the pty path's only chance to see the cursor at
-        // a password prompt. A batch cut at a synchronized-update clear is
-        // re-entered for its tail, which settles here in its turn.
-        settlePasswordPrompt(*t, process);
-    }
     return consumed;
 }
 

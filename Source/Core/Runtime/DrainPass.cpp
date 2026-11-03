@@ -58,7 +58,7 @@ DrainPassResult runDrainPass(Terminal& terminal, PAL::Stream& stream, DrainHost&
                 while (offset < biteEnd) {
                     const int remaining = biteEnd - offset;
                     bool stoppedAtSyncClear = false;
-                    const int consumed = Ubiquitty::processBytesUpToSyncClear(&terminal, std::string_view(buffer.data() + offset, static_cast<std::size_t>(remaining)), &stoppedAtSyncClear, &stream.process());
+                    const int consumed = Ubiquitty::processBytesUpToSyncClear(&terminal, std::string_view(buffer.data() + offset, static_cast<std::size_t>(remaining)), &stoppedAtSyncClear);
                     offset += (consumed > 0) ? consumed : remaining; // guard: never spin
                     if (stoppedAtSyncClear)
                         owner.noteSyncClear();

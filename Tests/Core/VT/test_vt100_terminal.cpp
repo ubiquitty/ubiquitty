@@ -182,10 +182,12 @@ TEST(testPasswordPromptHeuristic)
     CHECK(t.passwordPromptActive == false);
 }
 
-// The PTY read loop feeds through processBytesUpToSyncClear, not processBytes;
-// the heuristic must settle on that entry too, and on the tail of a batch the
-// loop re-enters after a synchronized-update clear.
-TEST(testPasswordPromptHeuristicOnThePTYEntry)
+// The PTY read loop feeds through processBytesUpToSyncClear, which decides
+// nothing about the prompt itself: a batch on that entry is one kernel quantum
+// of a flood, and the owner's facts cost an ioctl. The runtime settles once
+// the writer pauses, after any tail it re-enters past a synchronized-update
+// clear.
+TEST(testPasswordPromptSettlesAfterThePTYEntryNotInsideIt)
 {
     Ubiquitty::Terminal t;
     Ubiquitty::hardReset(t);
@@ -194,24 +196,30 @@ TEST(testPasswordPromptHeuristicOnThePTYEntry)
     Ubiquitty::TestDoubles::ProcessFactsDouble process;
 
     const std::string_view prompt = "Password: ";
-    CHECK(Ubiquitty::processBytesUpToSyncClear(&t, prompt, nullptr, &process) == static_cast<int>(prompt.size()));
+    CHECK(Ubiquitty::processBytesUpToSyncClear(&t, prompt, nullptr) == static_cast<int>(prompt.size()));
+    CHECK(t.passwordPromptActive == false); // the feed alone decides nothing
+    CHECK_EQ(process.disciplineProbes, 0);
+    Ubiquitty::settlePasswordPrompt(t, &process);
     CHECK(t.passwordPromptActive == true);
+    CHECK_EQ(process.disciplineProbes, 1);
 
     // A batch that ends inside a synchronized update stops at the clear; the
-    // loop feeds the remainder as its own batch, which is where the prompt
-    // row settles.
+    // loop feeds the remainder as its own batch before the pause settles.
     const std::string_view framed = "\r\n\033[?2026hls -la\033[?2026l\r\nPassphrase for key: ";
     bool stoppedAtSyncClear = false;
-    const int consumed = Ubiquitty::processBytesUpToSyncClear(&t, framed, &stoppedAtSyncClear, &process);
+    const int consumed = Ubiquitty::processBytesUpToSyncClear(&t, framed, &stoppedAtSyncClear);
     CHECK(stoppedAtSyncClear == true);
     CHECK(consumed > 0 && consumed < static_cast<int>(framed.size()));
-    CHECK(t.passwordPromptActive == true); // the cut batch leaves the flag alone
     const std::string_view tail = framed.substr(static_cast<std::size_t>(consumed));
-    CHECK(Ubiquitty::processBytesUpToSyncClear(&t, tail, nullptr, &process) == static_cast<int>(tail.size()));
+    CHECK(Ubiquitty::processBytesUpToSyncClear(&t, tail, nullptr) == static_cast<int>(tail.size()));
+    CHECK_EQ(process.disciplineProbes, 1); // neither the cut batch nor its tail sampled
+    Ubiquitty::settlePasswordPrompt(t, &process);
     CHECK(t.passwordPromptActive == true);
 
     const std::string_view plain = "\r\n$ ";
-    CHECK(Ubiquitty::processBytesUpToSyncClear(&t, plain, nullptr, &process) == static_cast<int>(plain.size()));
+    CHECK(Ubiquitty::processBytesUpToSyncClear(&t, plain, nullptr) == static_cast<int>(plain.size()));
+    CHECK(t.passwordPromptActive == true); // the last settled verdict stands until the pause
+    Ubiquitty::settlePasswordPrompt(t, &process);
     CHECK(t.passwordPromptActive == false);
 }
 
@@ -240,10 +248,14 @@ TEST(passwordDetectionUsesTheOwningPTYDiscipline)
                 terminal.passwordDetect = true;
                 TestDoubles::ProcessFactsDouble process;
                 process.discipline = discipline;
-                if (usesSyncEntry)
-                    CHECK_EQ(processBytesUpToSyncClear(&terminal, prompt, nullptr, &process), static_cast<int>(prompt.size()));
-                else
+                if (usesSyncEntry) {
+                    CHECK_EQ(processBytesUpToSyncClear(&terminal, prompt, nullptr), static_cast<int>(prompt.size()));
+                    CHECK_EQ(process.disciplineProbes, 0); // the PTY entry leaves the facts to the pause
+                    settlePasswordPrompt(terminal, &process);
+                } else {
                     processBytes(&terminal, prompt, &process);
+                    CHECK_EQ(process.disciplineProbes, 1); // the plain entry settles itself
+                }
                 const bool isExpectedActive = discipline && discipline->isCanonical ? !discipline->isEchoEnabled : prompt != "PIN> ";
                 CHECK_EQ(terminal.passwordPromptActive, isExpectedActive);
                 CHECK_EQ(process.disciplineProbes, 1);
@@ -277,12 +289,13 @@ TEST(passwordDetectionSamplesOnlyWhenAnUnassertedBatchSettles)
 
     const std::string_view batch = "\033[?2026h\r\nPassword:\033[?2026l tail";
     bool stopped = false;
-    const int consumed = processBytesUpToSyncClear(&terminal, batch, &stopped, &process);
+    const int consumed = processBytesUpToSyncClear(&terminal, batch, &stopped);
     REQUIRE(stopped);
     REQUIRE(consumed > 0 && consumed < static_cast<int>(batch.size()));
-    CHECK_EQ(process.disciplineProbes, 1);
     const auto tail = batch.substr(static_cast<std::size_t>(consumed));
-    CHECK_EQ(processBytesUpToSyncClear(&terminal, tail, &stopped, &process), static_cast<int>(tail.size()));
+    CHECK_EQ(processBytesUpToSyncClear(&terminal, tail, &stopped), static_cast<int>(tail.size()));
+    CHECK_EQ(process.disciplineProbes, 1); // the PTY entry never samples; the pause does
+    settlePasswordPrompt(terminal, &process);
     CHECK_EQ(process.disciplineProbes, 2);
     CHECK(!terminal.passwordPromptActive);
 }
@@ -320,11 +333,15 @@ TEST(aParserOwnerWithoutPTYFactsDetectsPasswordPrompts)
     CHECK(terminal.passwordPromptActive);
     processBytes(&terminal, "\r\n$ ");
     CHECK(!terminal.passwordPromptActive);
+    // The PTY entry leaves the verdict to the pause; an owner with no facts
+    // still reads the text when that pause settles.
     const std::string_view prompt = "\r\nuser@host's password:";
     CHECK_EQ(processBytesUpToSyncClear(&terminal, prompt), static_cast<int>(prompt.size()));
+    settlePasswordPrompt(terminal, nullptr);
     CHECK(terminal.passwordPromptActive);
     const std::string_view plain = "\r\n$ ";
     CHECK_EQ(processBytesUpToSyncClear(&terminal, plain), static_cast<int>(plain.size()));
+    settlePasswordPrompt(terminal, nullptr);
     CHECK(!terminal.passwordPromptActive);
 }
 
