@@ -2127,8 +2127,9 @@ extension GlyphAtlas: SizedGlyphSource {
             let window: [UInt8]
             if let glyph = GlyphAtlas.glyphIdentifier(for: codePoint, in: font) {
                 // The wide page is two cells across, so a window steps two
-                // advances. The wide sheet places its glyph at its own pen and
-                // grows it toward the slot, which the master draws as well.
+                // advances. The wide sheet places its glyph at its own pen, the
+                // advance centred in the two cells, and grows it toward the slot,
+                // which the master draws as well.
                 var canvas = Ubiquitty.Rendering.sizedWindowCanvas(
                     Int32(wide.slotWidthInPixels),
                     Int32(wide.slotHeightInPixels),
@@ -2148,7 +2149,7 @@ extension GlyphAtlas: SizedGlyphSource {
                             font: font,
                             widened: nil,
                             room: Ubiquitty.Rendering.WidthAxisRoom(),
-                            pen: .placed(wide.pen)
+                            pen: .placed(wide.centredPen(of: glyph, in: font))
                         ),
                         tile: tile,
                         phase: 0,

@@ -220,7 +220,7 @@ final class CoverageSheet {
         rasterizer.enqueue(
             glyph: glyph,
             in: font,
-            at: CGPoint(x: pen.x + centringOffset(of: glyph, in: font) + subpixel, y: pen.y),
+            at: CGPoint(x: centredPen(of: glyph, in: font).x + subpixel, y: pen.y),
             boostCappedTo: boostCap,
             style: style
         ) { [weak self] plane in
@@ -234,6 +234,21 @@ final class CoverageSheet {
                 )
             }
         }
+    }
+
+    /// The pen a glyph stands at in a slot so its advance is centred.
+    ///
+    /// The sheet's pen moved by the whole pixels its advance leaves of the
+    /// centring width, halved. A sized master magnifies this pen, so a sized
+    /// glyph stands where the unsized one does, at its scale.
+    ///
+    /// - Parameters:
+    ///   - glyph: The glyph, or a cluster's base.
+    ///   - font: The face that carries it.
+    /// - Returns: The pen, bottom-left origin; the sheet's own when it does not
+    ///   centre.
+    func centredPen(of glyph: CGGlyph, in font: CTFont) -> CGPoint {
+        CGPoint(x: pen.x + centringOffset(of: glyph, in: font), y: pen.y)
     }
 
     /// How far past the pen a glyph is drawn so its advance is centred.
@@ -471,7 +486,7 @@ final class CoverageSheet {
     ) {
         rasterizer.rasterise(
             line: line,
-            at: CGPoint(x: pen.x + centringOffset(of: baseGlyph, in: font) + subpixel, y: pen.y),
+            at: CGPoint(x: centredPen(of: baseGlyph, in: font).x + subpixel, y: pen.y),
             boostCappedTo: boostCap,
             sizedBy: baseGlyph,
             in: font,
