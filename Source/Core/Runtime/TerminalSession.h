@@ -5009,6 +5009,12 @@ public:
     /// - Parameter resize: Whether a live resize is in progress.
     void setLiveResize(LiveResize resize) { m_runtime->setLiveResize(resize); }
 
+    /// Returns what the frontend last said of its live resize. See
+    /// ``TerminalRuntime/liveResize()``.
+    ///
+    /// - Returns: The state `setLiveResize` last stored.
+    [[nodiscard]] LiveResize liveResize() const { return m_runtime->liveResize(); }
+
     /// Ticks until a withheld present may release on its own — the block's
     /// budget, or the erase hold's settle or watchdog — at least 1 while
     /// anything is held, 0 otherwise.

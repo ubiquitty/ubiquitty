@@ -4257,6 +4257,9 @@ public final class RuntimeDrive {
         session.setLiveResize(resize)
     }
 
+    /// What the drain was last told of the live resize.
+    package var liveResize: Ubiquitty.Runtime.LiveResize { session.liveResize() }
+
     /// Ticks until a withheld present may release on its own; 0 when none is held.
     public func presentationHoldTicksRemaining(nowTicks: UInt32) -> UInt32 {
         session.presentationHoldTicksRemaining(Ubiquitty.Ticks(nowTicks))
