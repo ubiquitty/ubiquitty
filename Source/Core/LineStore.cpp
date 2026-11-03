@@ -324,7 +324,7 @@ void LineStore::init(int capacity)
     m_capacity = capacity;
     m_ring.reset(new StoredLine[static_cast<std::size_t>(capacity)]);
     for (int i = 0; i < capacity; ++i)
-        m_ring[i] = StoredLine { nullptr, 0, false, 0, 0, false };
+        m_ring[i] = StoredLine { nullptr, 0, false, 0, 0, false, false };
     m_start = 0;
     m_count = 0;
     m_frontEvicted = 0;
@@ -362,11 +362,43 @@ void LineStore::releaseRetiredSlab()
 {
     delete[] m_retiredSlab;
     m_retiredSlab = nullptr;
+    delete[] m_retiredText;
+    m_retiredText = nullptr;
+}
+
+void LineStore::parkTextSlab(std::uint8_t* slab)
+{
+    if (!slab)
+        return;
+    if (!m_retiredText)
+        m_retiredText = slab;
+    else
+        delete[] slab;
+}
+
+void LineStore::expandCompactRow(const std::uint8_t* bytes, Cell* cells, int length)
+{
+    Cell cell = defaultBlankCell;
+    for (int column = 0; column < length; ++column) {
+        cell.codePoint = bytes[column];
+        cells[column] = cell;
+    }
+}
+
+void LineStore::expandLine(StoredLine& line, const Block& block) const
+{
+    // Under the model lock, as every read is. A reader on another thread
+    // whose snapshot saw the row compact reads its bytes, which stay as they
+    // are; it never reads the cells written here.
+    assert(block.base && block.text && line.cells >= block.base.get());
+    expandCompactRow(block.text.get() + (line.cells - block.base.get()), line.cells, line.length);
+    line.isCompact = 0;
 }
 
 void LineStore::releaseBlock(Block& b)
 {
     parkSlab(b.base.release());
+    parkTextSlab(b.text.release());
     b.folded.reset();
     b.capacity = 0;
     dropDecodedBlock(b.sequence);
@@ -382,6 +414,7 @@ void LineStore::retireFrontBlock(Block& b)
             // The reader reading this block frees it when its read ends; the
             // next block takes a fresh slab rather than this one.
             delete[] m_gate->deferredSlab.exchange(b.base.release(), std::memory_order_acq_rel);
+            delete[] m_gate->deferredText.exchange(b.text.release(), std::memory_order_acq_rel);
             delete m_gate->deferredForms.exchange(b.folded.release(), std::memory_order_acq_rel);
             b.capacity = 0;
             dropDecodedBlock(b.sequence);
@@ -464,13 +497,17 @@ void LineStore::evictOldest()
 // the general path's preparation has nothing to secure. Every outcome is the
 // general path's: the same eviction, slot and numbering.
 template<typename Store>
-inline bool LineStore::appendWithinBackBlock(int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping, const Store& store) // bool-ok: wrap and shaping are stored row metadata, as append takes them.
+inline bool LineStore::appendWithinBackBlock(int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping, const Store& store, bool storesBytes) // bool-ok: wrap and shaping are stored row metadata, as append takes them.
 {
     if (length <= 0 || length > maxColumns || !m_ring || m_blocks.empty() || m_totalAppended == std::numeric_limits<long long>::max()
         || (!wrapped && m_headLine == std::numeric_limits<std::uint64_t>::max()))
         return false;
     Block& back = m_blocks.back();
     if (length > back.capacity - back.used)
+        return false;
+    // A block's first compact row brings its text slab, an allocation the
+    // general path secures.
+    if (storesBytes && !back.text)
         return false;
     if (m_count == m_capacity) {
         const StoredLine& front = m_ring[m_start];
@@ -489,10 +526,10 @@ inline bool LineStore::appendWithinBackBlock(int length, uint8_t lineAttribute, 
         --m_count;
     }
     Cell* slot = back.base.get() + back.used;
-    store(slot);
+    const bool isCompact = store(back, slot);
     back.used += length;
     ++back.linesAppended;
-    m_ring[ringIndex(m_start + m_count)] = StoredLine { slot, length, wrapped, lineAttribute, mark, needsShaping };
+    m_ring[ringIndex(m_start + m_count)] = StoredLine { slot, length, wrapped, lineAttribute, mark, needsShaping, isCompact };
     ++m_count;
     ++m_totalAppended;
     noteStoredRow(wrapped);
@@ -500,9 +537,9 @@ inline bool LineStore::appendWithinBackBlock(int length, uint8_t lineAttribute, 
 }
 
 template<typename Store>
-void LineStore::appendStoredRow(int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping, const Store& store) // bool-ok: wrap and shaping are stored row metadata.
+void LineStore::appendStoredRow(int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping, const Store& store, bool storesBytes) // bool-ok: wrap and shaping are stored row metadata.
 {
-    if (appendWithinBackBlock(length, lineAttribute, mark, wrapped, needsShaping, store)) [[likely]]
+    if (appendWithinBackBlock(length, lineAttribute, mark, wrapped, needsShaping, store, storesBytes)) [[likely]]
         return;
     if (!m_ring || length < 0 || m_totalAppended == std::numeric_limits<long long>::max()
         || (!wrapped && m_headLine == std::numeric_limits<std::uint64_t>::max()))
@@ -515,12 +552,24 @@ void LineStore::appendStoredRow(int length, uint8_t lineAttribute, uint8_t mark,
         && m_frontEvicted + 1 >= m_blocks.front().linesAppended;
     const bool keepsBack = !m_blocks.empty() && !(releasesFront && m_blocks.size() == 1);
     const bool needsBlock = length > 0 && (!keepsBack || length > m_blocks.back().capacity - m_blocks.back().used);
+    // A compact row needs the back block's text slab, which a block gets on
+    // its first compact row: secured here like the cell slab.
+    const bool needsText = storesBytes && length > 0 && (needsBlock || !m_blocks.back().text);
     std::unique_ptr<Cell[]> readySlab;
+    std::unique_ptr<std::uint8_t[]> readyText;
+    // A reader may hold a hazard on the front block, and then its slabs are
+    // the reader's to free rather than this append's to reuse: they are
+    // secured here, before eviction, while a reader is registered.
+    const bool hasReader = m_gate && m_gate->readerCount.load(std::memory_order_acquire) > 0;
+    if (needsText) {
+        const bool isReleasedTextReusable = releasesFront && m_blocks.front().text && !hasReader;
+        if (!m_retiredText && !isReleasedTextReusable) {
+            readyText.reset(new (std::nothrow) std::uint8_t[static_cast<std::size_t>(blockCells)]);
+            if (!readyText)
+                return;
+        }
+    }
     if (needsBlock) {
-        // A reader may hold a hazard on the front block, and then its slab is
-        // the reader's to free rather than this append's to reuse: the slab is
-        // secured here, before eviction, while a reader is registered.
-        const bool hasReader = m_gate && m_gate->readerCount.load(std::memory_order_acquire) > 0;
         const bool reusesReleasedSlab = releasesFront && m_blocks.front().base && !hasReader;
         if (!m_retiredSlab && !reusesReleasedSlab) {
             readySlab.reset(new (std::nothrow) Cell[static_cast<std::size_t>(blockCells)]);
@@ -541,6 +590,7 @@ void LineStore::appendStoredRow(int length, uint8_t lineAttribute, uint8_t mark,
         evictOldest();
 
     Cell* slot = nullptr;
+    bool isCompact = false;
     if (length > 0) {
         if (needsBlock) {
             Block block;
@@ -555,14 +605,21 @@ void LineStore::appendStoredRow(int length, uint8_t lineAttribute, uint8_t mark,
             m_blocks.pushBack(std::move(block));
         }
         Block& b = m_blocks.back();
+        if (needsText && !b.text) {
+            if (!readyText) {
+                assert(m_retiredText);
+                readyText.reset(std::exchange(m_retiredText, nullptr));
+            }
+            b.text = std::move(readyText);
+        }
         slot = b.base.get() + b.used;
-        store(slot);
+        isCompact = store(b, slot);
         b.used += length;
         ++b.linesAppended;
     }
 
     const int index = ringIndex(m_start + m_count);
-    m_ring[index] = StoredLine { slot, length, wrapped, lineAttribute, mark, needsShaping };
+    m_ring[index] = StoredLine { slot, length, wrapped, lineAttribute, mark, needsShaping, isCompact };
     ++m_count;
     ++m_totalAppended; // monotonic; survives eviction + clear (see totalAppended)
     noteStoredRow(wrapped);
@@ -573,22 +630,33 @@ void LineStore::append(const Cell* cells, int length, uint8_t lineAttribute, uin
     if (!cells || length < 0)
         return;
     length = std::min(length, maxColumns);
-    appendStoredRow(length, lineAttribute, mark, wrapped, needsShaping, [cells, length](Cell* destination) {
+    appendStoredRow(length, lineAttribute, mark, wrapped, needsShaping, [cells, length](Block&, Cell* destination) {
         copyCellsIntoSlab(destination, cells, length);
-    });
+        return false; }, false);
 }
 
 void LineStore::appendDefaultASCII(std::span<const std::uint8_t> text, int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping) // bool-ok: wrap and shaping are stored row metadata.
 {
     if (length < 0 || length > maxColumns || text.size() > static_cast<std::size_t>(length))
         return;
-    appendStoredRow(length, lineAttribute, mark, wrapped, needsShaping, [text, length](Cell* destination) {
+    appendStoredRow(length, lineAttribute, mark, wrapped, needsShaping, [text, length](Block& block, Cell* destination) {
+        // The bytes land in the block's text slab at the cells' offset and
+        // the cells stay unwritten: a flood evicts most rows unread, and a
+        // 32-byte cell per byte was most of the append. A read expands the
+        // row in place (expandLine). The slab was secured before this ran;
+        // a block without one takes the row expanded, as every row was.
+        if (block.text) [[likely]] {
+            std::uint8_t* bytes = block.text.get() + (destination - block.base.get());
+            std::memcpy(bytes, text.data(), text.size());
+            std::memset(bytes + text.size(), 0, static_cast<std::size_t>(length) - text.size());
+            return true;
+        }
         Cell cell = defaultBlankCell;
         for (int column = 0; column < length; ++column) {
             cell.codePoint = static_cast<std::size_t>(column) < text.size() ? text[static_cast<std::size_t>(column)] : 0;
             destination[column] = cell;
         }
-    });
+        return false; }, true);
 }
 
 // The newest row takes ordinal m_nextOrdinal and belongs to the open line,
@@ -755,6 +823,7 @@ bool LineStore::prepend(std::span<const StoredLine> rows, FrontLine front, int n
         const auto& row = rows[index];
         prepared[index] = row;
         prepared[index].cells = nullptr;
+        prepared[index].isCompact = 0;
         if (!row.length)
             continue;
         if (!nextBlock || row.length > blocks[nextBlock - 1].capacity - blocks[nextBlock - 1].used) {
@@ -888,6 +957,7 @@ void LineStore::swap(LineStore& other) noexcept
 {
     m_blocks.swap(other.m_blocks);
     std::swap(m_retiredSlab, other.m_retiredSlab);
+    std::swap(m_retiredText, other.m_retiredText);
     m_ring.swap(other.m_ring);
     std::swap(m_capacity, other.m_capacity);
     std::swap(m_start, other.m_start);
@@ -916,6 +986,8 @@ StoredLine* LineStore::resolved(int index) const
     // decode is not held; a raw line always points into its slab.
     if (!line.cells && line.length > 0) [[unlikely]]
         decodeLine(index);
+    else if (line.isCompact) [[unlikely]]
+        expandLine(line, m_blocks[blockIndexHolding(frontOrdinal() + static_cast<std::uint64_t>(index))]);
     return &line;
 }
 
@@ -935,6 +1007,8 @@ StoredLine* LineStore::writableAt(int index)
         const std::size_t block = blockIndexHolding(frontOrdinal() + static_cast<std::uint64_t>(index));
         if (m_blocks[block].isFolded)
             unfoldBlock(block);
+        else if (line.isCompact)
+            expandLine(line, m_blocks[block]);
     }
     return &line;
 }
@@ -1010,6 +1084,13 @@ void LineStore::foldBlock(std::size_t index)
         refuse();
         return;
     }
+    // A compact row's cells are written now: the form is made from cells,
+    // and the check below compares them.
+    for (std::uint64_t ordinal = b.firstOrdinal; ordinal < end; ++ordinal) {
+        StoredLine& line = descriptor(static_cast<int>(ordinal - front));
+        if (line.isCompact)
+            expandLine(line, b);
+    }
     b.folded = std::make_unique<FoldedForms>();
     FoldedForms& folded = *b.folded;
     // Text is about a byte a cell and the lists a few bytes a line.
@@ -1051,6 +1132,7 @@ void LineStore::foldBlock(std::size_t index)
     for (std::uint64_t ordinal = std::max(b.firstOrdinal, front); ordinal < end; ++ordinal)
         descriptor(static_cast<int>(ordinal - front)).cells = nullptr;
     parkSlab(b.base.release());
+    parkTextSlab(b.text.release());
     b.capacity = 0;
     parkSlab(scratch);
     b.isFolded = true;
@@ -1284,6 +1366,8 @@ std::size_t LineStore::arenaBytes() const
             total += static_cast<std::size_t>(b.capacity) * sizeof(Cell);
         else if (b.folded)
             total += b.folded->forms.size() + b.folded->entries.size() * sizeof(FormEntry) + b.folded->pens.size() * sizeof(Pen);
+        if (b.text)
+            total += static_cast<std::size_t>(blockCells);
     }
     return total;
 }
@@ -1326,7 +1410,8 @@ std::expected<std::size_t, LineStore::StorageError> LineStore::ownedBackingBytes
         return std::unexpected(StorageError::OverCapacity);
     for (std::size_t index = 0; index < m_blocks.size(); ++index) {
         const Block& block = m_blocks[index];
-        if (!addArrayBytes(total, block.base ? static_cast<std::size_t>(block.capacity) : 0, sizeof(Cell)))
+        if (!addArrayBytes(total, block.base ? static_cast<std::size_t>(block.capacity) : 0, sizeof(Cell))
+            || !addBytes(total, block.text ? static_cast<std::size_t>(blockCells) : 0))
             return std::unexpected(StorageError::OverCapacity);
         if (block.folded
             && (!addBytes(total, sizeof(FoldedForms))
@@ -1359,6 +1444,7 @@ LineStore::ReaderGate::~ReaderGate() { releaseDeferred(); }
 void LineStore::ReaderGate::releaseDeferred()
 {
     delete[] deferredSlab.exchange(nullptr, std::memory_order_acq_rel);
+    delete[] deferredText.exchange(nullptr, std::memory_order_acq_rel);
     delete deferredForms.exchange(nullptr, std::memory_order_acq_rel);
 }
 
@@ -1376,7 +1462,7 @@ namespace {
 
 LineStore::RowFacts factsOf(const StoredLine& line)
 {
-    return { .length = static_cast<std::uint16_t>(line.length), .isWrapped = line.wrapped, .needsShaping = line.needsShaping, .lineAttribute = line.lineAttribute };
+    return { .length = static_cast<std::uint16_t>(line.length), .isWrapped = line.wrapped, .needsShaping = line.needsShaping, .isCompact = line.isCompact, .lineAttribute = line.lineAttribute };
 }
 
 } // namespace
@@ -1500,11 +1586,20 @@ bool LineStore::captureRegionFacts(Snapshot& snapshot, std::size_t regionIndex) 
     }
     region.factsOffset = static_cast<std::uint32_t>(snapshot.facts.size());
     region.cells = nullptr;
+    region.text = nullptr;
     for (std::uint64_t ordinal = begin; ordinal < region.endOrdinal; ++ordinal) {
         const StoredLine& line = descriptor(static_cast<int>(ordinal - front));
         if (!region.cells && line.length > 0)
             region.cells = line.cells;
         (void)snapshot.facts.tryPushBack(factsOf(line));
+    }
+    // The block still stands: a region with a live row has not been retired,
+    // and a rewrite since the snapshot was refused above as stale. The text
+    // starts where the region's first cells do, so a row's bytes sit at the
+    // offset its cells have from `cells`, evicted rows ahead of it included.
+    if (region.sequence && region.cells) {
+        const Block& block = m_blocks[blockIndexHolding(begin)];
+        region.text = block.text ? block.text.get() + (region.cells - block.base.get()) : nullptr;
     }
     region.hasFacts = true;
     return true;

@@ -469,6 +469,9 @@ public:
         std::uint16_t length = 0;
         std::uint8_t isWrapped : 1 = 0;
         std::uint8_t needsShaping : 1 = 0;
+        /// The row's cells are unwritten; its bytes are at the same offset in
+        /// the region's `text` as its cells in `cells`.
+        std::uint8_t isCompact : 1 = 0;
         std::uint8_t lineAttribute = 0;
     };
     static_assert(sizeof(RowFacts) == 4, "a raw row's facts copy at four bytes");
@@ -501,6 +504,7 @@ public:
         std::atomic<int> readerCount { 0 };
         std::unique_ptr<PAL::PriorityInheritingLock> lock;
         std::atomic<Cell*> deferredSlab { nullptr };
+        std::atomic<std::uint8_t*> deferredText { nullptr };
         std::atomic<FoldedForms*> deferredForms { nullptr };
     };
 
@@ -515,6 +519,9 @@ public:
         bool isFolded = false;
         /// A raw region's first stored cell; its rows' cells follow in order.
         const Cell* cells = nullptr;
+        /// A raw region's text slab, where a compact row's bytes sit at the
+        /// offset its cells have from `cells`; null when no row is compact.
+        const std::uint8_t* text = nullptr;
         /// A folded region's forms, entries and pens, entries indexed from
         /// `entryOrdinal`.
         std::span<const std::uint8_t> forms;
@@ -633,6 +640,14 @@ public:
     /// Decodes one row form into `cells`, which hold its facts' length.
     [[nodiscard]] static bool decodeRowForm(std::span<const std::uint8_t> form, std::span<const Pen> pens, std::span<Cell> cells);
 
+    /// Expands a compact row's bytes into default-pen cells.
+    ///
+    /// - Parameters:
+    ///   - bytes: The row's `length` bytes, one code point each.
+    ///   - cells: Where the row's cells go.
+    ///   - length: The row's cell count.
+    static void expandCompactRow(const std::uint8_t* bytes, Cell* cells, int length);
+
 private:
     /// A folded block's storage: every line's row form back to back, one
     /// entry per ordinal of the block's span at the fold, blank lines
@@ -647,6 +662,10 @@ private:
     struct Block {
         // The raw slab, or null once folded. Freed by parkSlab() or dispose().
         std::unique_ptr<Cell[]> base;
+        // A byte per slab cell, allocated by the first compact row: a row
+        // appended as bytes keeps them here at its cells' offset until a read
+        // expands them. Null until then, and once folded.
+        std::unique_ptr<std::uint8_t[]> text;
         int capacity = 0; // cells the slab can hold; 0 once folded, so the append test fails it
         int used = 0; // cells consumed
         int linesAppended = 0; // lines whose cells live in this block, evicted ones included
@@ -718,6 +737,17 @@ private:
     ///
     /// - Returns: A slab of `blockCells` cells the caller owns.
     [[nodiscard]] Cell* takeSlab();
+    /// Parks a text slab for the next `takeTextSlab`, or frees it when one
+    /// is parked.
+    ///
+    /// - Parameter slab: The slab, which may be null.
+    void parkTextSlab(std::uint8_t* slab);
+    /// Writes a compact row's cells from its bytes, in place.
+    ///
+    /// - Parameters:
+    ///   - line: A compact line of a raw block.
+    ///   - block: The block whose slabs hold it.
+    void expandLine(StoredLine& line, const Block& block) const;
     /// Parks a slab for the next `takeSlab`, or frees it when one is parked.
     ///
     /// - Parameter slab: The slab, which may be null.
@@ -749,7 +779,7 @@ private:
     ///
     /// - Returns: False, having changed nothing, when the general path must run.
     template<typename Store>
-    [[nodiscard]] bool appendWithinBackBlock(int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping, const Store&); // bool-ok: wrap and shaping are stored row metadata, as append takes them.
+    [[nodiscard]] bool appendWithinBackBlock(int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping, const Store&, bool storesBytes); // bool-ok: wrap and shaping are stored row metadata, as append takes them.
     /// Commits a row through an infallible writer after securing its owners.
     ///
     /// Allocation refusal precedes eviction or counter changes.
@@ -759,9 +789,13 @@ private:
     ///   - mark: The row's OSC 133 mark.
     ///   - wrapped: Whether the row continues into the following row.
     ///   - needsShaping: The captured row's shaping flag.
-    ///   - store: An allocation-free writer for the reserved destination cells.
+    ///   - store: A writer for the reserved destination cells, given the block
+    ///     and the cells, returning whether it left them compact: bytes in the
+    ///     block's text slab at the cells' offset, the cells unwritten.
+    ///   - storesBytes: Whether the writer stores bytes, so the block needs its
+    ///     text slab: secured here with the cell slab, before any eviction.
     template<typename Store>
-    void appendStoredRow(int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping, const Store& store); // bool-ok: wrap and shaping are stored row metadata, as append takes them.
+    void appendStoredRow(int length, uint8_t lineAttribute, uint8_t mark, bool wrapped, bool needsShaping, const Store& store, bool storesBytes); // bool-ok: wrap and shaping are stored row metadata, as append takes them.
 
     /// Returns a descriptor with no decode: the numbering and the drops read
     /// only a line's facts, never its cells.
@@ -841,6 +875,7 @@ private:
     // 256 KiB allocation per block cycle instead of a new/delete pair.
     // Freed on clear/dispose/dropNewest so an idle store holds no spare slab.
     /* owned */ Cell* m_retiredSlab = nullptr; // parked slab for reuse; freed on clear/dispose/dropNewest
+    /* owned */ std::uint8_t* m_retiredText = nullptr; // parked text slab, freed with m_retiredSlab
     std::unique_ptr<StoredLine[]> m_ring;
     int m_capacity = 0;
     int m_start = 0; // ring index of the oldest line

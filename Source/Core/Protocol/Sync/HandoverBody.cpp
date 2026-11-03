@@ -1343,7 +1343,10 @@ std::expected<void, HandoverBodyError> restoreHandoverHistory(std::span<const st
             readScalar(reader, row.wrapped);
             row.lineAttribute = reader.u8();
             row.mark = reader.u8();
-            readScalar(reader, row.needsShaping);
+            bool needsShaping = false;
+            readScalar(reader, needsShaping);
+            row.needsShaping = needsShaping;
+            row.isCompact = 0;
             row.cells = row.length ? cells.get() + offset : nullptr;
             for (int column = 0; column < row.length; ++column)
                 row.cells[column] = readHistoryCell(reader);

@@ -32,10 +32,13 @@ struct ScrollLine {
     // Row holds any codePoint that might need shaping/RTL (Unicode::mayNeedShaping). getDisplayRow reads it
     // so a scrolled-back all-LTR row skips the shaping pass. Computed once at capture; a superset, so a
     // stale-true only wastes a pass, never misses a shape.
-    bool needsShaping;
+    uint8_t needsShaping : 1;
+    // The cells are reserved but unwritten: the row's bytes wait in its block's text slab, and the
+    // store expands them into `cells` on the first read (LineStore::appendDefaultASCII).
+    uint8_t isCompact : 1;
 };
-// lineAttribute/mark/needsShaping land in the tail pad after `length`, so the struct never grows past
-// pointer + int + that word. Assert the invariant (not a fixed size) so it stays minimal on every target.
-static_assert(sizeof(ScrollLine) == sizeof(Ubiquitty::Cell*) + sizeof(int) + 4, "lineAttribute/mark/needsShaping must land in the existing tail pad");
+// lineAttribute/mark/needsShaping/isCompact land in the tail pad after `length`, so the struct never grows
+// past pointer + int + that word. Assert the invariant (not a fixed size) so it stays minimal on every target.
+static_assert(sizeof(ScrollLine) == sizeof(Ubiquitty::Cell*) + sizeof(int) + 4, "lineAttribute/mark/needsShaping/isCompact must land in the existing tail pad");
 
 } // namespace Ubiquitty::Screen

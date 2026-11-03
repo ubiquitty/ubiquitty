@@ -205,7 +205,7 @@ void cancelPreviousGraphic(Terminal& t)
                 continue;
             const auto& meta = operation.historyMeta;
             oldest.push_back({ undo.cells.data() + operation.historyOffset, operation.historyLength,
-                meta.has(RowFlag::Wrapped), meta.lineAttribute, meta.oscMark, meta.has(RowFlag::NeedsShaping) });
+                meta.has(RowFlag::Wrapped), meta.lineAttribute, meta.oscMark, meta.has(RowFlag::NeedsShaping), false });
         }
         const int dropped = std::min(appended, t.lineStore->count());
         if (oldest.empty())

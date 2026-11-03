@@ -1014,7 +1014,7 @@ TEST(aHistoryRestoreValidatesEveryRowAndCounterBeforeMutation)
     LineStore restored;
     restored.init(2);
     Ubiquitty::Cell cell {};
-    const std::array<StoredLine, 2> rows { StoredLine { &cell, 1, true, 0, 0, false }, StoredLine { nullptr, 0, false, 2, 3, true } };
+    const std::array<StoredLine, 2> rows { StoredLine { &cell, 1, true, 0, 0, false, false }, StoredLine { nullptr, 0, false, 2, 3, true, false } };
     const LineStore::Continuation valid { .front = { 20, LineStore::LineContinuity::ContinuesLine }, .head = 21, .maxHead = 30, .totalAppended = 50 };
     for (int fault = 0; fault < 7; ++fault) {
         auto changed = valid;
@@ -1081,7 +1081,7 @@ TEST(aRestoredHistoryCannotOverflowItsCounters)
     LineStore store;
     store.init(3);
     Ubiquitty::Cell cell {};
-    const StoredLine row { &cell, 1, false, 0, 0, false };
+    const StoredLine row { &cell, 1, false, 0, 0, false, false };
     const auto maxLine = std::numeric_limits<std::uint64_t>::max();
     const auto maxAppends = std::numeric_limits<long long>::max();
     REQUIRE(store.restore({ &row, 1 }, { .front = { maxLine - 2, LineStore::LineContinuity::StartsLine }, .head = maxLine - 1, .maxHead = maxLine - 1, .totalAppended = maxAppends - 1 }));
@@ -1144,7 +1144,7 @@ TEST(prependRestoresEvictedRowsWithRawOrFoldedHistory)
             foldEverythingCold(store);
             REQUIRE(store.foldedBlockCount() > 0);
         }
-        const StoredLine original { rows[0].data(), 80, true, 0, 0, false };
+        const StoredLine original { rows[0].data(), 80, true, 0, 0, false, false };
         for (int cycle = 0; cycle < 20; ++cycle) {
             store.append(rows.back().data(), 80, 0, 0, false, false);
             store.dropNewest(1);
@@ -1175,9 +1175,9 @@ TEST(prependRestoresBlankRowsAndRebasesAnEmptyStore)
     store.append(&content, 1, 0, 0, false, false);
     store.dropNewest(1);
     const std::array<StoredLine, 3> rows { {
-        { nullptr, 0, false, 0, 2, false },
-        { &content, 1, true, 0, 4, false },
-        { nullptr, 0, false, 0, 5, false },
+        { nullptr, 0, false, 0, 2, false, false },
+        { &content, 1, true, 0, 4, false, false },
+        { nullptr, 0, false, 0, 5, false, false },
     } };
     REQUIRE(store.prepend(rows, { 10, LineStore::LineContinuity::StartsLine }));
     CHECK(store.count() == 3);
@@ -1202,7 +1202,7 @@ TEST(prependCopiesSeveralBlocksAndPreservesRetainedRows)
     store.append(&tail, 1, 0, 0, false, false);
     std::vector<Ubiquitty::Cell> content(128);
     fillRow(content.data(), 128, 1);
-    std::vector<StoredLine> prefix(150, StoredLine { content.data(), 128, false, 0, 0, false });
+    std::vector<StoredLine> prefix(150, StoredLine { content.data(), 128, false, 0, 0, false, false });
     REQUIRE(store.prepend(prefix, { 50, LineStore::LineContinuity::StartsLine }));
     REQUIRE(store.count() == 151);
     for (int index = 0; index < 150; ++index)
@@ -1224,7 +1224,7 @@ TEST(prependRefusesInvalidRowsWithoutChangingHistory)
     Ubiquitty::Cell content;
     content.codePoint = 'A';
     store.append(&content, 1, 0, 0, false, false);
-    StoredLine invalid { nullptr, 1, false, 0, 0, false };
+    StoredLine invalid { nullptr, 1, false, 0, 0, false, false };
     CHECK(!store.prepend(std::span(&invalid, 1), store.frontLine()));
     invalid.cells = &content;
     invalid.length = -1;
@@ -1240,6 +1240,142 @@ TEST(prependRefusesInvalidRowsWithoutChangingHistory)
     CHECK(store.count() == 1);
     CHECK(store.at(0)->cells[0].codePoint == 'A');
     CHECK(store.headLineNumber() == 1);
+}
+
+// ---- Compact rows: appendDefaultASCII keeps bytes, a read expands them ----
+
+static std::vector<std::uint8_t> asciiRowBytes(int seed, int length)
+{
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+    for (int column = 0; column < length; ++column)
+        bytes[static_cast<std::size_t>(column)] = static_cast<std::uint8_t>(0x20 + (seed * 7 + column) % 95);
+    return bytes;
+}
+
+// The cells an ASCII row expands to: the default blank cell with the byte as
+// its code point, and zero past the bytes up to the stored length.
+static bool asciiRowMatches(const StoredLine* stored, const std::vector<std::uint8_t>& bytes, int length)
+{
+    if (!stored || stored->length != length || !stored->cells)
+        return false;
+    for (int column = 0; column < length; ++column) {
+        Ubiquitty::Cell expected = Ubiquitty::defaultBlankCell;
+        expected.codePoint = static_cast<std::size_t>(column) < bytes.size() ? bytes[static_cast<std::size_t>(column)] : 0;
+        if (std::memcmp(&stored->cells[column], &expected, sizeof(Ubiquitty::Cell)) != 0)
+            return false;
+    }
+    return true;
+}
+
+TEST(testDefaultASCIIRowsExpandOnFirstRead)
+{
+    LineStore s;
+    s.init(64);
+    for (int i = 0; i < 20; ++i) {
+        const auto bytes = asciiRowBytes(i, 10 + i);
+        // A stored length past the bytes is blank cells, as a capture trims.
+        s.appendDefaultASCII(bytes, 10 + i + (i % 3), 0, static_cast<uint8_t>(i), i % 2 == 0, false);
+    }
+    CHECK_EQ(s.count(), 20);
+    CHECK(s.arenaBytes() > 0);
+    for (int i = 0; i < 20; ++i) {
+        const auto bytes = asciiRowBytes(i, 10 + i);
+        const StoredLine* line = s.at(i);
+        CHECK_MSG(asciiRowMatches(line, bytes, 10 + i + (i % 3)), "an ASCII row read back differs from the bytes appended");
+        CHECK(line && !line->isCompact);
+        CHECK(line && line->mark == i && line->wrapped == (i % 2 == 0));
+        CHECK(s.at(i) == line); // the second read is the same cells, expanded once
+    }
+}
+
+TEST(testWritableAtExpandsACompactRowBeforeItIsWritten)
+{
+    LineStore s;
+    s.init(8);
+    const auto bytes = asciiRowBytes(3, 12);
+    s.appendDefaultASCII(bytes, 12, 0, 0, false, false);
+    StoredLine* line = s.writableAt(0);
+    CHECK(line && !line->isCompact);
+    CHECK(asciiRowMatches(line, bytes, 12));
+    if (line) {
+        line->cells[4].codePoint = 0x4E2D;
+        CHECK(s.at(0)->cells[4].codePoint == 0x4E2D);
+    }
+}
+
+TEST(testCompactRowsFoldReadAndEvictLikeCellRows)
+{
+    struct Expected {
+        bool isASCII;
+        SeededLine line;
+        std::vector<std::uint8_t> bytes;
+        int length;
+    };
+    for (std::uint64_t seed = 1; seed <= 3; ++seed) {
+        Random random = seededRandom(seed * 0x9E3779B97F4A7C15ull);
+        LineStore s;
+        s.init(4000);
+        std::vector<Expected> lines;
+        while (s.blockCount() < 6) {
+            if (random.below(2) == 0) {
+                const int length = static_cast<int>(random.below(161));
+                const int written = static_cast<int>(random.below(static_cast<std::uint32_t>(length) + 1));
+                Expected expected { true, {}, asciiRowBytes(static_cast<int>(lines.size()), written), length };
+                s.appendDefaultASCII(expected.bytes, length, 0, 0, random.below(2) == 0, false);
+                lines.push_back(std::move(expected));
+            } else {
+                lines.push_back(Expected { false, appendRandomLine(s, random, 160), {}, 0 });
+            }
+        }
+        const auto checkAll = [&](const char* when) {
+            int mismatches = 0;
+            for (std::size_t i = 0; i < lines.size(); ++i) {
+                const StoredLine* stored = s.at(static_cast<int>(i));
+                const bool matches = lines[i].isASCII
+                    ? (lines[i].length == 0 ? stored && stored->length == 0 : asciiRowMatches(stored, lines[i].bytes, lines[i].length))
+                    : lineMatches(stored, lines[i].line);
+                mismatches += matches ? 0 : 1;
+            }
+            CHECK_MSG(mismatches == 0, when);
+        };
+        // Read a few rows now, so some compact rows are expanded before the
+        // fold and the rest by it.
+        for (std::size_t i = 0; i < lines.size(); i += 5)
+            (void)s.at(static_cast<int>(i));
+        const std::size_t rawBytes = s.arenaBytes();
+        foldEverythingCold(s);
+        CHECK_EQ(s.foldedBlockCount(), s.blockCount() - LineStore::rawBlockWindow);
+        CHECK(s.arenaBytes() < rawBytes);
+        checkAll("a row read after the fold differs from the row appended");
+        // Evict everything through the capacity, then drop the rest: every
+        // slab and text slab goes with its block.
+        for (int i = 0; i < 4000; ++i)
+            s.appendDefaultASCII(asciiRowBytes(i, 8), 8, 0, 0, false, false);
+        CHECK_EQ(s.count(), 4000);
+        s.clear();
+        CHECK_EQ(s.arenaBytes(), 0u);
+    }
+}
+
+TEST(testDropNewestThroughCompactRows)
+{
+    LineStore s;
+    s.init(32);
+    for (int i = 0; i < 10; ++i)
+        s.appendDefaultASCII(asciiRowBytes(i, 6 + i), 6 + i, 0, 0, false, false);
+    (void)s.at(9); // one expanded row among the dropped
+    s.dropNewest(4);
+    CHECK_EQ(s.count(), 6);
+    for (int i = 0; i < 6; ++i)
+        CHECK(asciiRowMatches(s.at(i), asciiRowBytes(i, 6 + i), 6 + i));
+    // The slack the drop freed is reused by the next rows, bytes and cells alike.
+    for (int i = 6; i < 10; ++i)
+        s.appendDefaultASCII(asciiRowBytes(100 + i, 6 + i), 6 + i, 0, 0, false, false);
+    for (int i = 6; i < 10; ++i)
+        CHECK(asciiRowMatches(s.at(i), asciiRowBytes(100 + i, 6 + i), 6 + i));
+    s.dropNewest(10);
+    CHECK_EQ(s.count(), 0);
+    CHECK_EQ(s.arenaBytes(), 0u);
 }
 
 UBIQUITTY_TEST_MAIN()

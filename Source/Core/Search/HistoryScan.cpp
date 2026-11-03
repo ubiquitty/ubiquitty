@@ -218,6 +218,16 @@ HistoryScanState HistoryScan::step(int blockBudget, HistoryHitSink sink, void* c
             for (std::uint64_t ordinal = region.endOrdinal; ordinal-- > region.firstOrdinal;) {
                 const LineStore::RowFacts& facts = factsOf(ordinal);
                 end -= facts.length;
+                if (facts.isCompact && facts.length && region.text) {
+                    // A compact row's cells are unwritten; its bytes sit at
+                    // the same offset in the text slab and expand into the
+                    // scan's own scratch.
+                    if (m_decoded.size() < facts.length)
+                        m_decoded.resize(facts.length);
+                    LineStore::expandCompactRow(region.text + end, m_decoded.data(), facts.length);
+                    takeRow(m_decoded.data(), facts);
+                    continue;
+                }
                 takeRow(facts.length && region.cells ? region.cells + end : nullptr, facts);
             }
         }

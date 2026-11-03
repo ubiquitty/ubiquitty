@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -33,15 +34,30 @@ namespace {
 // so a reader can tell a row from any other without asking the store.
 int lengthFor(std::uint64_t ordinal) { return static_cast<int>(ordinal % 97 == 0 ? 0 : 1 + ordinal % 71); }
 
-std::uint32_t codePointFor(std::uint64_t ordinal, int column) { return 0x4E00u + static_cast<std::uint32_t>((ordinal * 31 + static_cast<std::uint64_t>(column)) % 4000); }
+// Every third row is stored as bytes (appendDefaultASCII), so a reader meets
+// compact rows beside cell rows in the same blocks.
+bool isCompactFor(std::uint64_t ordinal) { return ordinal % 3 == 0; }
+
+std::uint32_t codePointFor(std::uint64_t ordinal, int column)
+{
+    const auto base = static_cast<std::uint32_t>((ordinal * 31 + static_cast<std::uint64_t>(column)) % 4000);
+    return isCompactFor(ordinal) ? 0x20u + base % 95 : 0x4E00u + base;
+}
 
 bool isWrappedFor(std::uint64_t ordinal) { return ordinal % 5 == 2; }
 
 void appendRow(LineStore& store)
 {
     const std::uint64_t ordinal = store.nextOrdinal();
-    Cell row[128];
     const int length = lengthFor(ordinal);
+    if (isCompactFor(ordinal)) {
+        std::uint8_t bytes[128];
+        for (int column = 0; column < length; ++column)
+            bytes[column] = static_cast<std::uint8_t>(codePointFor(ordinal, column));
+        store.appendDefaultASCII(std::span<const std::uint8_t>(bytes, static_cast<std::size_t>(length)), length, 0, 0, isWrappedFor(ordinal), false);
+        return;
+    }
+    Cell row[128];
     for (int column = 0; column < length; ++column) {
         row[column] = Cell {};
         row[column].codePoint = codePointFor(ordinal, column);
@@ -89,7 +105,15 @@ RegionReport readRegion(const LineStore::Snapshot& snapshot, const LineStore::Sn
     for (std::uint64_t ordinal = region.firstOrdinal; ordinal < region.endOrdinal; ++ordinal) {
         const LineStore::RowFacts& facts = snapshot.facts[region.factsOffset + static_cast<std::size_t>(ordinal - region.firstOrdinal)];
         ++report.rows;
-        report.mismatches += rowMatches(ordinal, facts, cells) ? 0 : 1;
+        const Cell* rowCells = cells;
+        if (facts.isCompact && facts.length && cells && region.text) {
+            // As the scan reads a compact row: from its bytes, into its own scratch.
+            if (scratch.size() < facts.length)
+                scratch.resize(facts.length);
+            LineStore::expandCompactRow(region.text + (cells - region.cells), scratch.data(), facts.length);
+            rowCells = scratch.data();
+        }
+        report.mismatches += rowMatches(ordinal, facts, rowCells) ? 0 : 1;
         if (cells)
             cells += facts.length;
     }
@@ -117,6 +141,45 @@ bool capture(const LineStore& store, LineStore::Snapshot& snapshot, std::size_t 
 }
 
 } // namespace
+
+TEST(aSnapshotReadsACompactRowFromItsBytesAndAfterItsExpansion)
+{
+    LineStore store;
+    store.init(400);
+    for (int row = 0; row < 300; ++row)
+        appendRow(store);
+    const auto readEverything = [&](int& rows, int& compactRows, int& mismatches) {
+        LineStore::Snapshot snapshot;
+        CHECK(capture(store, snapshot, 1u << 20));
+        std::vector<Cell> scratch = decodeScratch();
+        for (const auto& region : snapshot.regions) {
+            const RegionReport report = readRegion(snapshot, region, scratch);
+            CHECK(report.isValid);
+            rows += report.rows;
+            mismatches += report.mismatches;
+            if (region.sequence && !region.isFolded && region.hasFacts) {
+                for (std::uint64_t ordinal = region.firstOrdinal; ordinal < region.endOrdinal; ++ordinal)
+                    compactRows += snapshot.facts[region.factsOffset + static_cast<std::size_t>(ordinal - region.firstOrdinal)].isCompact;
+            }
+        }
+    };
+    int rows = 0;
+    int compactRows = 0;
+    int mismatches = 0;
+    readEverything(rows, compactRows, mismatches);
+    CHECK_EQ(rows, store.count());
+    CHECK_EQ(mismatches, 0);
+    CHECK_MSG(compactRows > 0, "no row was stored compact, so the bytes path went unread");
+    // A read through the store expands every compact row in place; the next
+    // snapshot sees them as cell rows and reads the same content.
+    for (int index = 0; index < store.count(); ++index)
+        (void)store.at(index);
+    rows = compactRows = mismatches = 0;
+    readEverything(rows, compactRows, mismatches);
+    CHECK_EQ(rows, store.count());
+    CHECK_EQ(mismatches, 0);
+    CHECK_EQ(compactRows, 0);
+}
 
 TEST(aSnapshotCoversEveryRowOnceAndReadsWhatTheStoreHolds)
 {

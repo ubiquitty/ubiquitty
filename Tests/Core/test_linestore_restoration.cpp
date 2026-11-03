@@ -81,7 +81,7 @@ public:
                 cells[column].setCombiningLength(1);
             }
             m_rows.push_back({ cells.empty() ? nullptr : cells.data(), lengths[index], isOpen || index % 3 != 2,
-                static_cast<std::uint8_t>(index % 4), static_cast<std::uint8_t>(index % 8), index % 2 == 0 });
+                static_cast<std::uint8_t>(index % 4), static_cast<std::uint8_t>(index % 8), index % 2 == 0, false });
         }
     }
 
@@ -564,7 +564,7 @@ TEST(prependRefusedAllocationsLeaveRetainedHistoryIntact)
             store.append(&retained, 1, 0, 0, false, false);
             Cell preceding;
             preceding.codePoint = 'P';
-            const StoredLine row { &preceding, 1, false, 0, 0, false };
+            const StoredLine row { &preceding, 1, false, 0, 0, false, false };
             AllocationObservation observation { .refuseAt = refusal };
             bool didPrepend = false;
             {
