@@ -278,8 +278,7 @@ extension TerminalWindowController {
         // The modes first, then the frame: the input and pointer paths read
         // the published snapshot, and a frame drawn against the previous one
         // would show the pane a keystroke ago.
-        surface.drive.republishSnapshot()
-        surface.needsDisplay = true
+        surface.publishModelWrite()
         surface.refreshScrollbackChrome()
         // What the pane's program asked of the window — a verb, a banner, a
         // trigger — was queued on the pane's own session by the output that

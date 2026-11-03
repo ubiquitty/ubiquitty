@@ -5,6 +5,7 @@
 
 #include "Core/Themes/ThemeApply.h"
 
+#include "Core/Accessibility/Palette.h"
 #include "Core/Preferences/Preferences.h"
 #include "Core/TermPalette.h"
 #include "Core/Themes/TermPaletteFromTheme.h"
@@ -63,6 +64,14 @@ bool themeColorBytes(int index, unsigned char* indexedRGB, unsigned char* defaul
     defaultsRGB[7] = channel16To8(palette.cursor.green);
     defaultsRGB[8] = channel16To8(palette.cursor.blue);
     return true;
+}
+
+std::optional<Rendering::PaletteColors> themeColors(int index)
+{
+    const std::optional<TermPalette> palette = resolveThemePalette(index, Accessibility::paletteAdaptation());
+    if (!palette)
+        return std::nullopt;
+    return Rendering::paletteColors(*palette);
 }
 
 } // namespace Ubiquitty::Themes

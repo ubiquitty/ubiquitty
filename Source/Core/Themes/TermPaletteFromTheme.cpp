@@ -25,6 +25,21 @@ void applyToTermPalette(const Theme& theme, Ubiquitty::TermPalette& palette)
     palette.cursor = toRGB(theme.cursor);
 }
 
+std::optional<Ubiquitty::TermPalette> resolveThemePalette(int themeIndex, const Ubiquitty::Accessibility::PaletteAdaptation& adaptation)
+{
+    const Theme* theme = get(themeIndex);
+    if (!theme)
+        return std::nullopt;
+    Ubiquitty::TermPalette palette;
+    palette.seedDefaults();
+    applyToTermPalette(*theme, palette);
+    // Before the cube is filled, so the 240 derived entries describe the
+    // adapted base.
+    Accessibility::adaptPalette(palette, adaptation);
+    palette.fillExtended();
+    return palette;
+}
+
 bool applyThemeToTerminal(Ubiquitty::Terminal& terminal, int themeIndex)
 {
     const Theme* theme = get(themeIndex);

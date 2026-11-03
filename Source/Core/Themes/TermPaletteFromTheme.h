@@ -12,6 +12,12 @@
 #include "Core/Themes/Themes.h"
 #include "Forward.h"
 
+#include <optional>
+
+namespace Ubiquitty::Accessibility {
+struct PaletteAdaptation; // Core/Accessibility/Palette.h
+}
+
 namespace Ubiquitty::Themes {
 
 /// Applies a theme's colours to a terminal's live palette.
@@ -25,6 +31,21 @@ namespace Ubiquitty::Themes {
 ///   - theme: The colours to apply.
 ///   - palette: The live palette to write into.
 void applyToTermPalette(const Theme&, Ubiquitty::TermPalette&);
+
+/// Resolves the palette a theme applies as.
+///
+/// The theme's sixteen colours and its three named ones over the compiled-in
+/// palette, adapted for colour vision and contrast, with the cube filled from
+/// the adapted base. One resolution for a session applying a theme, the match
+/// that names the theme a palette came from, and a host reading a theme's
+/// colours without applying it, so all three agree on what the theme draws.
+///
+/// - Parameters:
+///   - themeIndex: The theme's index.
+///   - adaptation: The adaptation to resolve under, normally
+///     ``Accessibility/paletteAdaptation()``.
+/// - Returns: The palette, or nothing when there is no theme at `themeIndex`.
+[[nodiscard]] std::optional<Ubiquitty::TermPalette> resolveThemePalette(int themeIndex, const Ubiquitty::Accessibility::PaletteAdaptation& adaptation);
 
 // Resolve a theme by index and apply it as the Terminal's palette authority
 // (applyToTermPalette + cube fill + the baseline OSC 104/110-119 resets restore

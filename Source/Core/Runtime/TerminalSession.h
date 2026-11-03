@@ -89,6 +89,7 @@
 #include "Core/Tek/Project.h"
 #include "Core/Tek/Tek4014.h"
 #include "Core/Themes/RethemeDefaults.h"
+#include "Core/Themes/TermPaletteFromTheme.h"
 #if defined(UBIQUITTY_QUIC)
 #include "Core/Transport/QUICChannel.h"
 #endif
@@ -5159,6 +5160,14 @@ public:
     ///   before the first drain publishes one.
     [[nodiscard]] RuntimeSnapshot readSnapshot() { return m_runtime->link().reads.read(); }
 
+    /// The colours the pane's frame shows, read lock-free from any thread.
+    ///
+    /// The palette as of the newest moment no synchronized update held the
+    /// frame, with the epoch it was read at; see ``CoherentColors``.
+    ///
+    /// - Returns: The latest published colours.
+    [[nodiscard]] CoherentColors readCoherentColors() { return m_runtime->link().coherentColors.read(); }
+
     /// The grid a title names: the laid-out grid during remote bootstrap, then the model's grid.
     [[nodiscard]] TitleGrid titleGrid(TitleGrid laidOut)
     {
@@ -5440,28 +5449,23 @@ public:
         const int chosenIndex = Themes::indexForName(m_chosenThemeName.c_str());
         for (int candidateIndex = -1; candidateIndex < Themes::count(); ++candidateIndex) {
             const int index = candidateIndex < 0 ? chosenIndex : candidateIndex;
-            const auto* theme = Themes::get(index);
-            if (!theme) {
+            const std::optional<TermPalette> candidate = Themes::resolveThemePalette(index, adaptation);
+            if (!candidate) {
                 continue;
             }
-            TermPalette candidate;
-            candidate.seedDefaults();
-            Themes::applyToTermPalette(*theme, candidate);
-            Accessibility::adaptPalette(candidate, adaptation);
-            candidate.fillExtended();
-            if (!equalColor(candidate.defaultForeground, baseline.defaultForeground)
-                || !equalColor(candidate.defaultBackground, baseline.defaultBackground)
-                || !equalColor(candidate.cursor, baseline.cursor)
-                || candidate.indexedAlpha != baseline.indexedAlpha) {
+            if (!equalColor(candidate->defaultForeground, baseline.defaultForeground)
+                || !equalColor(candidate->defaultBackground, baseline.defaultBackground)
+                || !equalColor(candidate->cursor, baseline.cursor)
+                || candidate->indexedAlpha != baseline.indexedAlpha) {
                 continue;
             }
             bool matches = true;
             for (int slot = 0; slot < 256 && matches; ++slot) {
-                matches = equalColor(candidate.indexed[slot], baseline.indexed[slot]);
+                matches = equalColor(candidate->indexed[slot], baseline.indexed[slot]);
             }
             for (int slot = 0; slot < specialCount && matches; ++slot) {
-                matches = candidate.specialSet[slot] == baseline.specialSet[slot]
-                    && (!baseline.specialSet[slot] || equalColor(candidate.special[slot], baseline.special[slot]));
+                matches = candidate->specialSet[slot] == baseline.specialSet[slot]
+                    && (!baseline.specialSet[slot] || equalColor(candidate->special[slot], baseline.special[slot]));
             }
             if (matches) {
                 m_themeIdentity->index = index;
@@ -6783,14 +6787,8 @@ public:
     [[nodiscard]] bool applyTheme(int index)
     {
         const Themes::Theme* theme = Themes::get(index);
-        if (!theme)
-            return false;
-        TermPalette palette;
-        palette.seedDefaults();
-        Themes::applyToTermPalette(*theme, palette);
-        Accessibility::adaptPalette(palette, Accessibility::paletteAdaptation());
-        palette.fillExtended();
-        if (!applyResolvedPalette(palette)) {
+        const std::optional<TermPalette> palette = Themes::resolveThemePalette(index, Accessibility::paletteAdaptation());
+        if (!theme || !palette || !applyResolvedPalette(*palette)) {
             return false;
         }
         const std::scoped_lock hold(m_themeIdentityLock);

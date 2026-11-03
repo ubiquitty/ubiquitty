@@ -496,6 +496,36 @@ public protocol TerminalSurfaceObserver: AnyObject {
     /// - Parameter surface: The surface whose palette moved.
     func terminalSurfaceDidChangeWithheldPalette(_ surface: TerminalSurface)
 
+    /// The colours the surface draws with changed.
+    ///
+    /// A theme or palette was applied, or the program set or reset a colour
+    /// with OSC 4, 10, 11, 12, 17 or 19 (or 104, 110, 111, 112, 117 or 119).
+    /// Raised on the main actor at most once per apply or batch of output,
+    /// however many colours it moved, and only when ``TerminalSurface/colors``
+    /// differs from what the previous call carried, or before any call from
+    /// what the surface was created with. A program re-asserting the colours
+    /// it already set raises nothing, and neither does a batch that moves a
+    /// colour and puts it back. On a local session
+    /// ``TerminalSurface/applyTheme(at:)``,
+    /// ``TerminalSurface/applyTheme(named:)`` and
+    /// ``TerminalSurface/applyPalette(indexedRGB:defaultsRGB:indexedAlpha:)``
+    /// raise it before they return, so a handler that applies colours is
+    /// called again from inside that apply when it moves them.
+    /// While a program holds a synchronized update (DEC 2026) open the grid
+    /// keeps the frame from before it, and the call waits with it: it is
+    /// raised when the update ends or the terminal gives up waiting on it.
+    /// Each update that ends is a frame the grid can draw, so a program
+    /// writing updates back to back is heard at the first to end, not when it
+    /// stops writing. The grid's own brief holds, such as its wait for the
+    /// redraw that follows a whole-screen erase, do not delay it.
+    /// Raised whether or not the surface is drawing: a host's chrome around a
+    /// pane nothing composites still shows the pane's colours.
+    ///
+    /// - Parameters:
+    ///   - surface: The surface whose colours changed.
+    ///   - colors: Its colours now.
+    func terminalSurface(_ surface: TerminalSurface, didChangeColors colors: TerminalColors)
+
     /// The link under the pointer changed, or there is none.
     ///
     /// Its own callback rather than a flag the host polls: the preview is
@@ -784,6 +814,7 @@ extension TerminalSurfaceObserver {
     public func terminalSurfaceDidRequestConsent(_: TerminalSurface) {}
     public func terminalSurfaceDidUpdateScreen(_: TerminalSurface) {}
     public func terminalSurfaceDidChangeWithheldPalette(_: TerminalSurface) {}
+    public func terminalSurface(_: TerminalSurface, didChangeColors _: TerminalColors) {}
     public func terminalSurfaceDidChangeProgress(_: TerminalSurface) {}
     public func terminalSurfaceDidChangeSearch(_: TerminalSurface) {}
     public func terminalSurfaceDidChangeTabStatus(_: TerminalSurface) {}
@@ -2368,6 +2399,11 @@ public final class TerminalSurface: PlatformView {
     /// theme that dims an index by alpha is drawn dimmed by every arm, and an
     /// OSC 4 write that replaces the colour draws opaque from the next frame.
     ///
+    /// The observer hears the colours it moved through
+    /// ``TerminalSurfaceObserver/terminalSurface(_:didChangeColors:)``: from
+    /// this call for a local session, unless a program holds a synchronized
+    /// update open, and when the host's palette arrives for a remote one.
+    ///
     /// - Parameters:
     ///   - indexedRGB: 768 bytes — red, green, blue for each index 0–255.
     ///   - defaultsRGB: 9 bytes — the default foreground, the default
@@ -2389,7 +2425,44 @@ public final class TerminalSurface: PlatformView {
                 }
             }
         }
+        if applied {
+            publishModelWrite()
+        }
         return applied
+    }
+
+    /// Publishes a model its caller wrote outside a drain, draws it, and tells
+    /// the observer of the colours it moved.
+    ///
+    /// A write with no drain behind it (a theme or palette apply, a reseed
+    /// under a new adaptation, a pane the tmux session wrote, the expiry of a
+    /// synchronized update) has nothing else to publish it: without this the
+    /// snapshot, the frame and the host's chrome keep the replaced state until
+    /// unrelated output moves them. A remote session's palette write is a
+    /// request to its host; its colours arrive with the host's next screen and
+    /// are reported from the drain.
+    package func publishModelWrite() {
+        drive.republishSnapshot()
+        needsDisplay = true
+        reportColorsIfChanged()
+    }
+
+    /// Hands the observer the colours the frame shows when they differ from
+    /// the ones it was last handed.
+    ///
+    /// Core publishes them only where the model is outside a synchronized
+    /// update, at each update's close among them, so a colour set inside one
+    /// arrives when it ends and one put back before it ends never does. Read
+    /// lock-free, and turned into the observer's colours only when their epoch
+    /// has moved since the last comparison.
+    private func reportColorsIfChanged() {
+        let published = drive.readCoherentColors()
+        guard published.paletteEpoch != comparedColorsEpoch else { return }
+        comparedColorsEpoch = published.paletteEpoch
+        let current = TerminalColors(published.colors)
+        guard current != reportedColors else { return }
+        reportedColors = current
+        observer?.terminalSurface(self, didChangeColors: current)
     }
 
     /// The live capture's status-row scratch, explicitly allocated rather
@@ -2591,6 +2664,11 @@ public final class TerminalSurface: PlatformView {
         drive.withTerminal { terminal in
             Ubiquitty.Preferences.Effective.applyCursorPreferences(terminal, Ubiquitty.Preferences.values().pointee)
         }
+        // What a host can read before the first report, which that report is
+        // measured against.
+        let created = drive.readCoherentColors()
+        comparedColorsEpoch = created.paletteEpoch
+        reportedColors = TerminalColors(created.colors)
         // Before any ingest starts: the signal pair is read unsynchronized on
         // the loop's thread, and the setter's contract is the session's —
         // install against a parked loop. Without this hop the surface draws
@@ -3717,6 +3795,14 @@ public final class TerminalSurface: PlatformView {
     /// of, so a withheld pane reports a palette that moved and nothing else.
     private var reportedPaletteEpoch: UInt64 = 0
 
+    /// The colours the observer was last handed, or the surface's own from
+    /// creation before the first; the next report is measured against them.
+    private var reportedColors: TerminalColors?
+
+    /// The epoch of the published colours ``reportedColors`` was last compared
+    /// with, so a delivery that published none builds nothing to compare.
+    private var comparedColorsEpoch: UInt64 = 0
+
     private var deferredPresentationEvents: RuntimeEvents = []
     private var isMetadataPresented = true
     private var processInspectors: Set<ObjectIdentifier> = []
@@ -4028,6 +4114,11 @@ public final class TerminalSurface: PlatformView {
             let stillHeld = self.drive.shouldWithholdFrame(nowTicks: TerminalSurface.monotonicTicksNow())
             if stillHeld {
                 self.scheduleSyncOutputRecheck()
+            } else if self.drive.readSnapshot().syncHoldActive {
+                // An expiry drops the block from the model and publishes
+                // nothing, so the snapshot still names it and the colours are
+                // the ones from before it.
+                self.publishModelWrite()
             }
             self.needsDisplay = true
         }
@@ -4233,8 +4324,7 @@ public final class TerminalSurface: PlatformView {
     /// clock is woken — a setting that took effect only on the next byte from
     /// the host is one a reader changes and watches do nothing.
     package func republishAfterPreferenceWrite() {
-        drive.republishSnapshot()
-        needsDisplay = true
+        publishModelWrite()
         frameClock.noteAnimationActivity()
     }
 
@@ -5528,6 +5618,11 @@ public final class TerminalSurface: PlatformView {
             refreshHint()
             observer?.terminalSurfaceDidUpdateScreen(self)
             traceFrame("ingest-scheduled")
+        }
+        // From the incoming flags, not the ones a withheld pane holds back: the
+        // colours are chrome's as much as the grid's.
+        if incomingEvents.contains(.screenDirty) {
+            reportColorsIfChanged()
         }
         if events.contains(.progressChanged) {
             observer?.terminalSurfaceDidChangeProgress(self)

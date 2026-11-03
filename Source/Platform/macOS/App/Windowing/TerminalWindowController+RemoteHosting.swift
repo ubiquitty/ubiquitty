@@ -194,8 +194,8 @@ extension TerminalWindowController {
             let isSeededFromSource = source?.activeSurface.map { surface.drive.seedPalette(from: $0.drive) } ?? false
             if !isSeededFromSource {
                 _ = surface.drive.reseedLaunchTheme(Ubiquitty.Preferences.values().pointee)
-                surface.drive.republishSnapshot()
             }
+            surface.publishModelWrite()
         }
         // A hosted window: the remote authority owns the topology, so the
         // surface sits outside the model and fills the window directly.

@@ -2073,9 +2073,8 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         for controller in spawnedControllers {
             for surface in controller.projectedSurfaces {
                 _ = apply(surface)
-                surface.drive.republishSnapshot()
+                surface.publishModelWrite()
                 surface.invalidateRetainedBaseline()
-                surface.needsDisplay = true
             }
             // The memo holds the facts, and a theme reseeded under it moves
             // every one of them; dropped here so the repaint does not depend

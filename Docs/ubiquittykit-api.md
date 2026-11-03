@@ -125,6 +125,66 @@ surfaces can share glyph resources and remains alive until its last owner
 releases it. Prefer the surface initializer that creates and installs a renderer;
 use separate construction when sharing one renderer between surfaces.
 
+### Theme colors
+
+A host that paints its own chrome around a surface reads the terminal's colors
+from the Kit rather than deriving them:
+
+| API | Use |
+| --- | --- |
+| `TerminalSurface.colors(ofTheme:)` | A theme's colors, by name, without a surface; nil for a name Core does not know |
+| `TerminalSurface.colors` | The colors a surface's grid draws now |
+| `applyTheme(named:)` | Applies a theme by name; false, with nothing changed, for a name Core does not know |
+| `TerminalSurfaceObserver.terminalSurface(_:didChangeColors:)` | The colors moved: a theme or palette was applied, or a program set or reset one with OSC 4, 10, 11, 12, 17 or 19, or 104, 110–112, 117 or 119 |
+
+`TerminalColors` carries the default text color (`foreground`), `background`,
+`cursor`, the sixteen `ansi` colors in palette order, and the
+`selectionBackground` and `selectionForeground` a program set with OSC 17 and
+19. A name is matched whole: one holding a NUL names no theme.
+
+A theme's colors are the ones its apply draws: both are resolved under the
+palette adaptation the process runs with. The Ubiquitty app sets that
+adaptation from its color vision setting and the system's Increase Contrast.
+The Kit sets none, so in another host a theme's colors are the ones the theme
+names, and a host that follows Increase Contrast picks its themes for it.
+
+A surface's colors are its theme's with a program's OSC overrides in place;
+DECSCNM's whole-screen swap is drawn over them rather than written into them.
+While a program holds a synchronized update (DEC 2026) open they stay the
+colors of the frame from before it: a color the program sets inside the update
+is not in them until the update ends, and one it puts back before then never
+is.
+No theme names a selection color, so a theme's selection colors are nil, and a
+surface's are nil until a program sets one; while the background is nil the
+grid fills a selection in the `[selection]` style.
+
+Each color is a `TerminalColor`: the 8-bit channels Core holds, with the
+opacity the grid draws text in it, rather than a platform color. The
+`[appearance] color_space` setting reads the same channels as sRGB or as
+Display P3 ([surface color space](wide-gamut.md)), and a theme read without a
+surface has no space yet. `platformColor(usesDisplayP3:)` makes the color once
+the host knows the space, which is the `SurfaceStyle.usesDisplayP3` its
+renderer draws under.
+
+The callback is raised on the main actor, at most once per apply or batch of
+output however many colors it moved, and only when the colors differ from
+those the previous call carried. A program re-asserting a color it already set
+raises nothing, and neither does a batch that moves a color and puts it back.
+On a local surface `applyTheme(at:)`, `applyTheme(named:)` and
+`applyPalette(indexedRGB:defaultsRGB:indexedAlpha:)` report before they
+return, so a handler that applies colors is called again from inside that
+apply when it moves them; a remote surface reports when its host's palette
+arrives. While a program holds a synchronized update open, the grid keeps the
+frame from before it and the callback waits with it, until the update ends or
+the terminal stops waiting on it. Each update that ends is a frame the grid
+can draw, so a program writing updates back to back is heard at the first one
+to end rather than when it stops writing, and an apply made while an update is
+open is heard when it ends. The grid's own brief holds, such as its wait for
+the redraw that follows a whole-screen erase, do not delay the callback, and a
+surface nothing draws reports as a drawn one does, since a host's chrome around
+a hidden pane still shows its colors. The callback has an empty default, so an
+existing observer compiles unchanged.
+
 ## Swift framework
 
 `UbiquittyKit.framework` packages the Swift views for an app built outside
@@ -182,8 +242,9 @@ same-named decoys registered; the Phosphor and program icons are drawn from
 the framework's files; a surface reports a family drawn under another of its
 names, a PostScript name and GNU Unifont as configured, a missing family and a
 name that only begins the names of CoreText's substitute by the substitute,
-and another family on the bitmap tier as GNU Unifont; and a frame draws in a
-shipped family.
+and another family on the bitmap tier as GNU Unifont; a frame draws in a
+shipped family; and a theme's colors are read, applied by name and followed as
+programs move them.
 
 ## Versions and examples
 
@@ -209,3 +270,11 @@ headers are not a separate compatibility promise.
 - `Samples/find-package-consumer` consumes the installed package.
 - `Source/UbiquittyKit/Session.h` is the complete session declaration.
 - `Tests/UbiquittyKit/test_kit_session.cpp` exercises the session facade.
+- `Scripts/check-ubiquittykit.sh` builds `UbiquittyKit.framework` and runs a
+  Swift consumer compiled with `-F` alone: it draws a frame, reads a theme's
+  colors without a surface, applies the theme by name, and hears each OSC
+  color write and reset, and a palette or theme it applies, move the colors
+  through the observer, with nothing heard for a write that moves nothing or
+  inside a synchronized update, whether the bytes are fed, the surface is
+  hidden, or a program writes them to the surface's pseudo-terminal, among
+  them a program writing updates back to back.

@@ -12,7 +12,13 @@
 # build a renderer, resolve the shipped faces past same-named decoys, draw the
 # icons, report the family each of a set of configurations is drawn in, and
 # draw a frame — create a surface, make a renderer through the public factory
-# in a family the framework ships, feed bytes, draw. This is the one oracle
+# in a family the framework ships, feed bytes, draw — and read a theme's colors
+# without a surface, apply the theme by name, and hear each OSC color write and
+# reset, and a palette or theme the host applies, move the colors through the
+# observer, once per batch or apply, never for one that moves nothing, and not
+# inside a synchronized update, from fed bytes, on a surface nothing draws, and
+# from programs writing to the surface's pseudo-terminal, one of them writing
+# updates back to back. This is the one oracle
 # over the framework's packaging: the
 # versioned layout codesign seals, its Info.plist and the Kit version in it,
 # the metallib, fonts and icons riding the framework bundle and read from it,
@@ -230,6 +236,352 @@ func families(of fonts: [URL]) -> Set<String> {
     return names
 }
 
+/// Records each colour change a surface announces and when, and each batch of
+/// output it delivers.
+@MainActor
+final class ColorWatch: TerminalSurfaceObserver {
+    private(set) var reports: [TerminalColors] = []
+    private(set) var reportTimes: [Date] = []
+    private(set) var deliveredBatches = 0
+
+    nonisolated func terminalSurface(_ surface: TerminalSurface, didChangeColors colors: TerminalColors) {
+        MainActor.assumeIsolated {
+            reports.append(colors)
+            reportTimes.append(Date())
+        }
+    }
+
+    nonisolated func terminalSurfaceDidUpdateScreen(_ surface: TerminalSurface) {
+        MainActor.assumeIsolated {
+            deliveredBatches += 1
+        }
+    }
+}
+
+/// Runs the main loop, which carries the surface's deliveries, until the
+/// condition holds or the time is up.
+@MainActor
+func wait(seconds: TimeInterval, until condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while !condition() {
+        guard Date() < deadline else { return false }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    }
+    return true
+}
+
+/// Feeds bytes as one batch and runs the main loop until the surface has
+/// delivered it, so every report the batch raises has been raised.
+///
+/// The printed dot after the bytes makes the batch one the surface delivers
+/// whatever the bytes did; a write that moves nothing still arrives.
+@MainActor
+func feedBatch(_ surface: TerminalSurface, _ watch: ColorWatch, _ bytes: String) -> Bool {
+    let delivered = watch.deliveredBatches
+    surface.feed(Data((bytes + ".").utf8))
+    return wait(seconds: 10) { watch.deliveredBatches > delivered }
+}
+
+/// Reads a theme's colours without a surface, applies the theme by name, and
+/// hears a program move the colours: once per batch that moves them, never
+/// for one that moves nothing, and not inside a synchronized update.
+@MainActor
+func followsTheThemeColors() -> Bool {
+    guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+        return refuse("no theme surface")
+    }
+    let watch = ColorWatch()
+    surface.observer = watch
+    let initial = surface.colors
+
+    /// Feeds a batch and holds the reports it raised to the count expected.
+    func expect(_ bytes: String, reports expected: Int, _ what: String) -> Bool {
+        let before = watch.reports.count
+        guard feedBatch(surface, watch, bytes) else {
+            return refuse("\(what): the batch was never delivered")
+        }
+        let raised = watch.reports.count - before
+        guard raised == expected else {
+            return refuse("\(what) reported \(raised) changes, not \(expected)")
+        }
+        guard raised == 0 || watch.reports.last == surface.colors else {
+            return refuse("\(what) reported colours the surface does not hold")
+        }
+        return true
+    }
+
+    // A theme whose background differs from the surface's, so the apply shows.
+    guard let name = TerminalSurface.themeNames.first(where: { TerminalSurface.colors(ofTheme: $0)?.background != initial.background }),
+        let themed = TerminalSurface.colors(ofTheme: name)
+    else {
+        return refuse("no theme's background differs from \(initial.background)")
+    }
+    guard themed.ansi.count == 16, themed.selectionBackground == nil, themed.selectionForeground == nil else {
+        return refuse("\(name) carries \(themed.ansi.count) ANSI colours and selection \(String(describing: themed.selectionBackground))")
+    }
+    // A name Core does not know, and a known name with more after a NUL, which
+    // a C string would cut back to the known name.
+    for unknown in ["No Such Theme", "\(name)\u{0}No Such Theme"] {
+        guard TerminalSurface.colors(ofTheme: unknown) == nil else {
+            return refuse("the unknown theme name \(unknown.debugDescription) had colours")
+        }
+        guard !surface.applyTheme(named: unknown), surface.colors == initial, watch.reports.isEmpty else {
+            return refuse("the unknown theme name \(unknown.debugDescription) was applied or moved the colours")
+        }
+    }
+    // The first write is measured against the colours the surface was created
+    // with, and one past the sixteen moves none of them.
+    guard expect("\u{1b}]4;100;rgb:01/02/03\u{7}", reports: 0, "a first write, OSC 4 on index 100") else {
+        return false
+    }
+    guard surface.applyTheme(named: name) else {
+        return refuse("applying \(name) was refused")
+    }
+    guard surface.colors == themed else {
+        return refuse("\(name) drew background \(surface.colors.background), not the \(themed.background) read for it")
+    }
+    guard watch.reports == [themed] else {
+        return refuse("applying \(name) reported \(watch.reports.count) changes, not its colours once")
+    }
+    // The same theme again rewrites the palette and moves nothing.
+    guard surface.applyTheme(named: name), watch.reports.count == 1 else {
+        return refuse("re-applying \(name) reported \(watch.reports.count - 1) changes")
+    }
+
+    // Two colours in one batch are one change.
+    guard expect("\u{1b}]10;rgb:ab/cd/ef\u{7}\u{1b}]11;rgb:12/34/56\u{7}", reports: 1, "OSC 10 and 11") else {
+        return false
+    }
+    let ground = TerminalColor(red: 0x12, green: 0x34, blue: 0x56)
+    var moved = themed
+    moved.foreground = TerminalColor(red: 0xAB, green: 0xCD, blue: 0xEF)
+    moved.background = ground
+    guard watch.reports.last == moved else {
+        return refuse("OSC 10 and 11 reported \(String(describing: watch.reports.last)), over \(themed)")
+    }
+    // The channels read in the space the host names.
+    let sRGB = ground.platformColor(usesDisplayP3: false).usingColorSpace(.sRGB)
+    guard let sRGB, abs(sRGB.redComponent - 0x12 / 255) < 0.001, abs(sRGB.blueComponent - 0x56 / 255) < 0.001 else {
+        return refuse("the background read as \(String(describing: sRGB)) in sRGB")
+    }
+    let displayP3 = ground.platformColor(usesDisplayP3: true)
+    guard displayP3.colorSpace == .displayP3, abs(displayP3.redComponent - 0x12 / 255) < 0.001,
+        abs(displayP3.blueComponent - 0x56 / 255) < 0.001,
+        let widened = displayP3.usingColorSpace(.sRGB), abs(widened.redComponent - sRGB.redComponent) > 0.001
+    else {
+        return refuse("the background read as \(displayP3) in Display P3")
+    }
+
+    // Writes that move nothing the host sees: a re-asserted colour, a colour
+    // moved and put back in one batch, and a palette slot past the sixteen.
+    guard expect("\u{1b}]11;rgb:12/34/56\u{7}", reports: 0, "a re-asserted OSC 11"),
+        expect("\u{1b}]11;rgb:fe/fe/fe\u{7}\u{1b}]11;rgb:12/34/56\u{7}", reports: 0, "OSC 11 moved and put back"),
+        expect("\u{1b}]4;100;rgb:01/02/03\u{7}", reports: 0, "OSC 4 on index 100")
+    else {
+        return false
+    }
+
+    // An ANSI colour and the cursor, then the selection colours, set and reset.
+    guard expect("\u{1b}]4;1;rgb:0a/0b/0c\u{7}\u{1b}]12;rgb:65/43/21\u{7}", reports: 1, "OSC 4 on index 1 and OSC 12") else {
+        return false
+    }
+    moved.ansi[1] = TerminalColor(red: 0x0A, green: 0x0B, blue: 0x0C)
+    moved.cursor = TerminalColor(red: 0x65, green: 0x43, blue: 0x21)
+    guard watch.reports.last == moved else {
+        return refuse("OSC 4 and 12 reported \(String(describing: watch.reports.last))")
+    }
+    guard expect("\u{1b}]17;rgb:21/43/65\u{7}\u{1b}]19;rgb:fe/dc/ba\u{7}", reports: 1, "OSC 17 and 19") else {
+        return false
+    }
+    guard watch.reports.last?.selectionBackground == TerminalColor(red: 0x21, green: 0x43, blue: 0x65),
+        watch.reports.last?.selectionForeground == TerminalColor(red: 0xFE, green: 0xDC, blue: 0xBA)
+    else {
+        return refuse("OSC 17 and 19 reported \(String(describing: watch.reports.last))")
+    }
+    guard expect("\u{1b}]117\u{7}\u{1b}]119\u{7}", reports: 1, "OSC 117 and 119"), watch.reports.last == moved else {
+        return refuse("OSC 117 and 119 reported \(String(describing: watch.reports.last))")
+    }
+
+    // A synchronized update holds the frame, and the report with it: the block
+    // that closes reports, and so does one the terminal expires.
+    guard expect("\u{1b}[?2026h\u{1b}]11;rgb:77/00/77\u{7}", reports: 0, "OSC 11 inside a synchronized update"),
+        expect("\u{1b}[?2026l", reports: 1, "closing the synchronized update"),
+        watch.reports.last?.background == TerminalColor(red: 0x77, green: 0x00, blue: 0x77)
+    else {
+        return refuse("the closed update reported \(String(describing: watch.reports.last?.background))")
+    }
+    let reportsBeforeExpiry = watch.reports.count
+    guard expect("\u{1b}[?2026h\u{1b}]11;rgb:00/77/77\u{7}", reports: 0, "OSC 11 inside an update left open"),
+        wait(seconds: 10, until: { watch.reports.count > reportsBeforeExpiry }),
+        watch.reports.count == reportsBeforeExpiry + 1,
+        watch.reports.last?.background == TerminalColor(red: 0x00, green: 0x77, blue: 0x77)
+    else {
+        return refuse("the expired update reported \(watch.reports.count - reportsBeforeExpiry) changes")
+    }
+
+    // The resets in one batch are one change, and land on the theme.
+    guard expect("\u{1b}[?2026l\u{1b}]104;1\u{7}\u{1b}]110\u{7}\u{1b}]111\u{7}\u{1b}]112\u{7}", reports: 1, "OSC 104, 110, 111 and 112"),
+        watch.reports.last == themed
+    else {
+        return refuse("the resets reported \(String(describing: watch.reports.last)), not \(name)'s colours")
+    }
+
+    // A palette the host resolved itself reports from inside the apply, and
+    // once: the same palette again moves nothing.
+    let paletteGround = TerminalColor(red: 0x2A, green: 0x2B, blue: 0x2C)
+    var indexedRGB = [UInt8](repeating: 0, count: 768)
+    for (index, color) in themed.ansi.enumerated() {
+        indexedRGB.replaceSubrange(index * 3..<index * 3 + 3, with: [color.red, color.green, color.blue])
+    }
+    let defaultsRGB = [
+        themed.foreground.red, themed.foreground.green, themed.foreground.blue,
+        paletteGround.red, paletteGround.green, paletteGround.blue,
+        themed.cursor.red, themed.cursor.green, themed.cursor.blue,
+    ]
+    let reportsBeforePalette = watch.reports.count
+    guard surface.applyPalette(indexedRGB: indexedRGB, defaultsRGB: defaultsRGB),
+        watch.reports.count == reportsBeforePalette + 1,
+        watch.reports.last == surface.colors,
+        watch.reports.last?.background == paletteGround
+    else {
+        return refuse(
+            "applying a palette reported \(watch.reports.count - reportsBeforePalette) changes before it returned, "
+                + "last \(String(describing: watch.reports.last?.background))"
+        )
+    }
+    guard surface.applyPalette(indexedRGB: indexedRGB, defaultsRGB: defaultsRGB), watch.reports.count == reportsBeforePalette + 1 else {
+        return refuse("re-applying the palette reported \(watch.reports.count - reportsBeforePalette - 1) changes")
+    }
+
+    // A theme applied while a program holds a synchronized update open waits
+    // for the update to end, as the program's own write does.
+    let held = surface.colors
+    guard let next = TerminalSurface.themeNames.first(where: { TerminalSurface.colors(ofTheme: $0)?.background != held.background }),
+        let nextColors = TerminalSurface.colors(ofTheme: next)
+    else {
+        return refuse("no theme's background differs from \(held.background)")
+    }
+    guard expect("\u{1b}[?2026h", reports: 0, "opening a synchronized update") else {
+        return false
+    }
+    let reportsBeforeHeldApply = watch.reports.count
+    guard surface.applyTheme(named: next), watch.reports.count == reportsBeforeHeldApply, surface.colors == held else {
+        return refuse("applying \(next) inside a synchronized update reported \(watch.reports.count - reportsBeforeHeldApply) changes before it ended")
+    }
+    guard expect("\u{1b}[?2026l", reports: 1, "closing the update around the apply"), watch.reports.last == nextColors else {
+        return refuse("the update around the apply reported \(String(describing: watch.reports.last?.background)), not \(next)'s colours")
+    }
+    print("consumer: \(name) applied by name and a palette applied; each OSC colour batch and apply reported once, and none that moved nothing or sat in an update")
+    return true
+}
+
+/// Hears the colours of a surface nothing draws: a host's chrome around a
+/// hidden pane still shows them.
+@MainActor
+func followsAWithheldSurfacesColors() -> Bool {
+    _ = NSApplication.shared
+    guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+        return refuse("no surface to withhold")
+    }
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 384), styleMask: [.titled], backing: .buffered, defer: false)
+    let content = NSView(frame: window.contentLayoutRect)
+    window.contentView = content
+    content.addSubview(surface)
+    surface.frame = content.bounds
+    surface.isHidden = true
+    let watch = ColorWatch()
+    surface.observer = watch
+    let ground = TerminalColor(red: 0x21, green: 0x22, blue: 0x23)
+    surface.feed(Data("\u{1b}]11;rgb:21/22/23\u{7}.".utf8))
+    guard wait(seconds: 10, until: { !watch.reports.isEmpty }) else {
+        return refuse("a withheld surface never reported its background")
+    }
+    guard watch.reports.count == 1, watch.reports.last?.background == ground, watch.reports.last == surface.colors else {
+        return refuse("a withheld surface reported \(watch.reports.count) changes, last \(String(describing: watch.reports.last?.background))")
+    }
+    // The surface holds its screen updates for the reveal, so none raised
+    // means the batch reached a withheld pane.
+    guard watch.deliveredBatches == 0 else {
+        return refuse("the hidden surface raised \(watch.deliveredBatches) screen updates, so it was drawing")
+    }
+    print("consumer: a surface nothing draws reported its colours")
+    return true
+}
+
+/// Runs a program on the surface's pseudo-terminal that sets a canary
+/// background only inside synchronized updates, putting the background back
+/// before each one ends, and hears the colours it leaves outside them and never
+/// the canary.
+///
+/// Fed bytes parse on the main actor, so the published screen never trails the
+/// parser. A pseudo-terminal's output parses on the session's own thread, which
+/// is often inside an update the surface has not published when a delivery
+/// reads the colours.
+///
+/// - Parameter writer: The program, which the surface runs as its shell.
+@MainActor
+func followsAProgramsColorsOverItsTerminal(writer: String) -> Bool {
+    guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+        return refuse("no terminal surface")
+    }
+    let watch = ColorWatch()
+    surface.observer = watch
+    // The login shell launchShell starts is the one SHELL names.
+    setenv("SHELL", writer, 1)
+    guard surface.launchShell() else {
+        return refuse("the writer did not launch")
+    }
+    let canary = TerminalColor(red: 0xAB, green: 0x01, blue: 0xCD)
+    let finished = TerminalColor(red: 0x0E, green: 0x0D, blue: 0x0C)
+    guard wait(seconds: 30, until: { watch.reports.last?.background == finished }) else {
+        return refuse("the writer's last background was never reported; \(watch.reports.count) reports")
+    }
+    let carried = watch.reports.filter { $0.background == canary }.count
+    guard carried == 0 else {
+        return refuse("\(carried) of \(watch.reports.count) reports carried a background set only inside a synchronized update")
+    }
+    guard watch.reports.last == surface.colors else {
+        return refuse("the last report is not the colours the surface holds")
+    }
+    print("consumer: a program's colours over its terminal reported \(watch.reports.count) times, never from inside an update")
+    return true
+}
+
+/// Runs a program on the surface's pseudo-terminal that moves the background
+/// outside any synchronized update and then writes updates back to back for
+/// seconds, moving nothing inside them, and hears the background long before
+/// the updates stop: each one that ends is a frame the grid draws it in.
+///
+/// - Parameter writer: The program, which the surface runs as its shell.
+@MainActor
+func followsAColorPastBackToBackUpdates(writer: String) -> Bool {
+    guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+        return refuse("no surface for back-to-back updates")
+    }
+    let watch = ColorWatch()
+    surface.observer = watch
+    setenv("SHELL", writer, 1)
+    guard surface.launchShell() else {
+        return refuse("the back-to-back writer did not launch")
+    }
+    let moved = TerminalColor(red: 0x44, green: 0x55, blue: 0x66)
+    let finished = TerminalColor(red: 0x0E, green: 0x0D, blue: 0x0C)
+    guard wait(seconds: 60, until: { watch.reports.last?.background == finished }) else {
+        return refuse("the back-to-back writer's last background was never reported; \(watch.reports.count) reports")
+    }
+    guard let movedIndex = watch.reports.firstIndex(where: { $0.background == moved }), let finishedAt = watch.reportTimes.last else {
+        return refuse("the background set before the updates was never reported on its own")
+    }
+    // The writer spends three seconds on its updates; a report that waited for
+    // them to stop lands beside the last one.
+    let lead = finishedAt.timeIntervalSince(watch.reportTimes[movedIndex])
+    guard lead > 1.5 else {
+        return refuse(String(format: "the background set before three seconds of updates was reported %.2f s before they stopped", lead))
+    }
+    print(String(format: "consumer: a colour set before back-to-back updates was reported %.2f s before they stopped", lead))
+    return true
+}
+
 /// The first call into the framework, then everything the step asserts.
 ///
 /// - Parameters:
@@ -323,6 +675,18 @@ func run(_ step: String, arguments: [String], shipped: [URL]) -> Bool {
         // smoke's decoys and the machine's own copies; only a face opened from
         // the framework's file by path passes.
         return ShippedFacesSmokeEntry.run() || refuse("a shipped face resolved off the framework's own files")
+    case "theme":
+        return followsTheThemeColors() && followsAWithheldSurfacesColors()
+    case "program-colors":
+        guard let writer = arguments.first else {
+            return refuse("no writer program")
+        }
+        return followsAProgramsColorsOverItsTerminal(writer: writer)
+    case "back-to-back":
+        guard let writer = arguments.first else {
+            return refuse("no back-to-back writer program")
+        }
+        return followsAColorPastBackToBackUpdates(writer: writer)
     case "draw":
         guard let surface = TerminalSurface(rows: 24, columns: 80) else {
             return refuse("no surface")
@@ -434,6 +798,64 @@ if ! codesign --force --deep --sign - "$APP" >"$sign_log" 2>&1 \
 fi
 echo "check-ubiquittykit: ok (an app embedding the framework signs and verifies strictly)"
 
+# The program the consumer runs on a surface's pseudo-terminal. Each round
+# moves the background outside any synchronized update, then opens one, sets a
+# canary background, floods text and puts the background back before closing
+# it, so no frame the grid draws shows the canary. The pause between the two
+# writes varies, so updates open at different points of a delivery.
+cat > "$HOST_DIR/writer.swift" <<'EOF'
+import Darwin
+
+func put(_ text: String) {
+    let bytes = Array(text.utf8)
+    var offset = 0
+    while offset < bytes.count {
+        let written = bytes[offset...].withUnsafeBytes { write(STDOUT_FILENO, $0.baseAddress, $0.count) }
+        guard written > 0 else { exit(1) }
+        offset += written
+    }
+}
+
+let flood = String(repeating: String(repeating: "y", count: 79) + "\r\n", count: 2500)
+for round in 0..<40 {
+    let outside = round.isMultiple(of: 2) ? "rgb:10/20/30" : "rgb:30/20/10"
+    put("\u{1b}]11;\(outside)\u{7}")
+    usleep(useconds_t(round % 8 * 40))
+    put("\u{1b}[?2026h\u{1b}]11;rgb:ab/01/cd\u{7}" + flood + "\u{1b}]11;\(outside)\u{7}\u{1b}[?2026l")
+}
+put("\u{1b}]11;rgb:0e/0d/0c\u{7}")
+sleep(30)
+EOF
+
+# The program that moves the background once outside any synchronized update
+# and then writes 200 KB updates back to back for three seconds, moving no
+# colour inside them, so a pass of the drain almost always ends inside one.
+cat > "$HOST_DIR/back-to-back-writer.swift" <<'EOF'
+import Darwin
+
+func put(_ text: String) {
+    let bytes = Array(text.utf8)
+    var offset = 0
+    while offset < bytes.count {
+        let written = bytes[offset...].withUnsafeBytes { write(STDOUT_FILENO, $0.baseAddress, $0.count) }
+        guard written > 0 else { exit(1) }
+        offset += written
+    }
+}
+
+let update = "\u{1b}[?2026h" + String(repeating: String(repeating: "z", count: 79) + "\r\n", count: 2500) + "\u{1b}[?2026l"
+put("\u{1b}]11;rgb:44/55/66\u{7}")
+let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+while clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start < 3_000_000_000 {
+    put(update)
+}
+put("\u{1b}]11;rgb:0e/0d/0c\u{7}")
+sleep(30)
+EOF
+
+xcrun swiftc -O "$HOST_DIR/writer.swift" -o "$HOST_DIR/writer"
+xcrun swiftc -O "$HOST_DIR/back-to-back-writer.swift" -o "$HOST_DIR/back-to-back-writer"
+
 # Core's preference list, best first, which the preferred family's step works
 # its answer out from.
 preferred=()
@@ -462,6 +884,12 @@ run_consumer "$consumer" family
 echo "check-ubiquittykit: ok (a surface reports a family that is drawn as configured, under any of its names, and one that is not by the family drawn in its place)"
 run_consumer "$consumer" draw
 echo "check-ubiquittykit: ok (the signed app drew a frame in a shipped family through its embedded framework)"
+run_consumer "$consumer" theme
+echo "check-ubiquittykit: ok (a theme's colors are read without a surface and applied by name, and a surface reports the colors a program moves, once per batch, never for one that moves nothing and not inside a synchronized update)"
+run_consumer "$consumer" program-colors "$HOST_DIR/writer"
+echo "check-ubiquittykit: ok (a program on the surface's pseudo-terminal moves the colors without one reported from inside a synchronized update)"
+run_consumer "$consumer" back-to-back "$HOST_DIR/back-to-back-writer"
+echo "check-ubiquittykit: ok (a color set before back-to-back synchronized updates is reported while they run)"
 
 cat > "$HOST_DIR/window.swift" <<'EOF'
 import AppKit

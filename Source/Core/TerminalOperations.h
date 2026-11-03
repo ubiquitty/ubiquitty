@@ -21,6 +21,7 @@
 #include "Core/Modes/TerminalModes.h"
 #include "Core/Mouse/MouseEvent.h"
 #include "Core/OSC/ProgressIndicator.h"
+#include "Core/Rendering/PaletteColors.h"
 #include "Core/Unicode/Encodings.h"
 #include "Core/Unicode/UTF8Decoder.h"
 #include "Forward.h"
@@ -597,6 +598,14 @@ void flushOutput(Terminal& terminal, bool (*accept)(void*, std::span<const char>
 /// - Parameter t: The terminal. Null yields the compiled-in default.
 /// - Returns: The colour, alpha opaque.
 [[nodiscard]] ColorRGBA chromeCursorColor(const Ubiquitty::Terminal* t);
+
+/// The colours a terminal draws with: its palette's, through the narrowing the
+/// chrome colours above take, and the selection colours a program set.
+///
+/// - Parameter t: The terminal, read under the caller's model lock.
+/// - Returns: ``Rendering/paletteColors`` of its palette, with the OSC 17 and
+///   19 colours.
+[[nodiscard]] Rendering::PaletteColors terminalColors(const Ubiquitty::Terminal& t);
 
 // OSC 1337 "SetUserVar" — read back a per-session user variable's value by
 // name. Returns a pointer into the Terminal's user-var table (NUL-terminated,

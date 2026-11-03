@@ -14,6 +14,7 @@
 #include "Core/Diagnostics/DiagLog.h"
 #include "Core/Mouse/Mouse.h"
 #include "Core/Mouse/MouseEvent.h"
+#include "Core/Rendering/PaletteColors.h"
 #include "Core/TerminalShared.h"
 #include "Core/Triggers/Engine.h"
 #include "Core/Unicode/Encodings.h"
@@ -128,25 +129,18 @@ int screenIndex(const Ubiquitty::Terminal& t) { return t.screens.isUsingAlternat
 
 bool isReverseVideo(const Ubiquitty::Terminal* t) { return t ? t->modes.reverseVideo : false; }
 
-// 257 is the palette's widening factor, so this narrowing is exact for every
-// theme that arrived as 8-bit — which is every theme the config can express.
-static ColorRGBA narrowPaletteColor(const PaletteRGB& color)
-{
-    return { static_cast<uint8_t>(color.red / 257), static_cast<uint8_t>(color.green / 257), static_cast<uint8_t>(color.blue / 257), 0xFF };
-}
-
 ColorRGBA chromeForegroundColor(const Ubiquitty::Terminal* t)
 {
     if (!t)
         return { defaultForegroundRGB[0], defaultForegroundRGB[1], defaultForegroundRGB[2], 0xFF };
-    return narrowPaletteColor(t->palette.defaultForeground);
+    return Rendering::narrowPaletteColor(t->palette.defaultForeground);
 }
 
 ColorRGBA chromeBackgroundColor(const Ubiquitty::Terminal* t)
 {
     if (!t)
         return { defaultBackgroundRGB[0], defaultBackgroundRGB[1], defaultBackgroundRGB[2], 0xFF };
-    return narrowPaletteColor(t->palette.defaultBackground);
+    return Rendering::narrowPaletteColor(t->palette.defaultBackground);
 }
 
 // The palette slot the accent is read from, named because 4 as a bare index
@@ -161,16 +155,26 @@ ColorRGBA chromeAccentColor(const Ubiquitty::Terminal* t)
         // colour the first frame will.
         TermPalette defaults;
         defaults.seedDefaults();
-        return narrowPaletteColor(defaults.indexed[ansiBlueIndex]);
+        return Rendering::narrowPaletteColor(defaults.indexed[ansiBlueIndex]);
     }
-    return narrowPaletteColor(t->palette.indexed[ansiBlueIndex]);
+    return Rendering::narrowPaletteColor(t->palette.indexed[ansiBlueIndex]);
 }
 
 ColorRGBA chromeCursorColor(const Ubiquitty::Terminal* t)
 {
     if (!t)
         return { defaultCursorRGB[0], defaultCursorRGB[1], defaultCursorRGB[2], 0xFF };
-    return narrowPaletteColor(t->palette.cursor);
+    return Rendering::narrowPaletteColor(t->palette.cursor);
+}
+
+Rendering::PaletteColors terminalColors(const Ubiquitty::Terminal& t)
+{
+    Rendering::PaletteColors colors = Rendering::paletteColors(t.palette);
+    if (t.selectionBackgroundSet)
+        colors.selectionBackground = Rendering::narrowPaletteColor({ t.selectionBackgroundRed, t.selectionBackgroundGreen, t.selectionBackgroundBlue });
+    if (t.selectionForegroundSet)
+        colors.selectionForeground = Rendering::narrowPaletteColor({ t.selectionForegroundRed, t.selectionForegroundGreen, t.selectionForegroundBlue });
+    return colors;
 }
 
 // ---- OSC 8 hyperlink table ------------------------------------------

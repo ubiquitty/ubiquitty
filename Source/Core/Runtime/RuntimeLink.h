@@ -5,6 +5,7 @@
 
 #include "Core/Color.h"
 #include "Core/OSC/TabStatus.h"
+#include "Core/Rendering/PaletteColors.h"
 #include "Core/Runtime/ModeSnapshot.h"
 #include "Core/Screen/HistoryFacts.h"
 #include "Core/Search/Search.h"
@@ -302,6 +303,19 @@ struct ChromeTint {
 // beside it on the link, and this refuses it a way back in.
 static_assert(sizeof(RuntimeSnapshot) <= 320, "RuntimeSnapshot is copied per key press; publish bulk beside it on the link, not inside it");
 
+/// A pane's colours as its frame shows them: the palette as of the newest
+/// moment no synchronized update (DEC 2026) held the frame.
+///
+/// A colour a program sets inside an update is not here until the update ends,
+/// and one it sets and puts back inside an update never is: the grid draws
+/// neither, and a host painting its chrome from these matches the grid.
+struct CoherentColors {
+    /// The palette epoch the colours were read at.
+    std::uint64_t paletteEpoch = 0;
+    /// The colours.
+    Rendering::PaletteColors colors;
+};
+
 // A single writer publishes to any number of readers. Atomic words permit a
 // reader to overlap reuse of its slot; the sequence check rejects that copy.
 template<typename T> class SnapshotPublisher {
@@ -449,6 +463,12 @@ struct RuntimeLink {
     // dwarfs them. Published before `reads`, so a reader seeing a nonzero
     // userDefinedKeyCount finds a table at least that new.
     SnapshotPublisher<VT::UserDefinedKeys> userDefinedKeys; // (R) model -> main
+    // (R) The colours the frame shows, beside `reads` rather than inside it:
+    // the snapshot is copied per key press, and its size is what that costs.
+    // Published by every snapshot publish that finds no update open, and at
+    // each update's close, which the next update can follow inside one drain.
+    // An expiry publishes nothing; its colours ride the next snapshot publish.
+    SnapshotPublisher<CoherentColors> coherentColors; // (R) model -> main
     CommandRing<Command, 64> commands; // (W) main -> model
 };
 
