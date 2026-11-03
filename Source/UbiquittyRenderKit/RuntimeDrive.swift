@@ -3482,6 +3482,17 @@ public final class RuntimeDrive {
         session.readSnapshot()
     }
 
+    /// Reads the colours the pane's frame shows, lock-free.
+    ///
+    /// The palette as of the newest moment no synchronized update held the
+    /// frame, with the palette epoch it was read at.
+    ///
+    /// - Returns: The latest published colours.
+    // swift-only: the generated C++ header drops this package helper, and only the Kit's colour report reads it
+    package func readCoherentColors() -> Ubiquitty.Runtime.CoherentColors {
+        session.readCoherentColors()
+    }
+
     /// Passes the frontend's laid-out grid to Core for title composition.
     public func titleGrid(for laidOutGrid: (rows: Int, columns: Int)) -> (rows: Int32, columns: Int32) {
         let grid = session.titleGrid(

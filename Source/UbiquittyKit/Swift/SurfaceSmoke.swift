@@ -1495,6 +1495,10 @@ enum SurfaceSmoke {
             return false
         }
 
+        guard paletteWriterReportLegs() else {
+            return false
+        }
+
         return passed(
             "the surface's layer draws, frames drew, the reuse legs held, the clock moved,"
                 + " the three notification dialects reached the host as resolved banners,"
@@ -1504,8 +1508,77 @@ enum SurfaceSmoke {
                 + " somebody else is on the session, a prompt fed before a capture's"
                 + " first frame gets the lock a prompt fed after a frame gets, and a"
                 + " swallowed drag teaches its reach-through modifier once per gesture"
-                + " within Core's budget"
+                + " within Core's budget, and the palette writes only the app makes"
+                + " report their colours from the publish that follows them"
         )
+    }
+
+    /// The colour reports of the palette writes only the app makes.
+    ///
+    /// An inspector's background, its reset and a reseed of the launch theme
+    /// write the model with no drain behind them. The app publishes each
+    /// through ``TerminalSurface/republishAfterPreferenceWrite()`` or
+    /// ``TerminalSurface/publishModelWrite()``, and the observer hears the
+    /// colours from that call rather than from the next output, which an idle
+    /// shell never writes.
+    ///
+    /// - Returns: Whether the legs held.
+    private static func paletteWriterReportLegs() -> Bool {
+        guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+            return failed("palette writers: no surface session")
+        }
+        let witness = ColorWitness()
+        surface.observer = witness
+
+        let inspected = TerminalColor(red: 0x21, green: 0x43, blue: 0x65)
+        guard surface.drive.setInspectorBackground(red: inspected.red, green: inspected.green, blue: inspected.blue) else {
+            return failed("palette writers: the inspector's background was refused")
+        }
+        surface.republishAfterPreferenceWrite()
+        guard witness.reports.map(\.background) == [inspected] else {
+            return failed("palette writers: the inspector's background reported \(witness.reports.map(\.background))")
+        }
+        guard surface.drive.resetBackground() else {
+            return failed("palette writers: the inspector's reset was refused")
+        }
+        surface.republishAfterPreferenceWrite()
+        guard witness.reports.count == 2, witness.reports.last == surface.colors, surface.colors.background != inspected else {
+            return failed("palette writers: the inspector's reset reported \(witness.reports.count - 1) changes")
+        }
+
+        // The launch theme, then another, then the reseed back: the reseed is
+        // the write a moved adaptation or a reloaded configuration makes.
+        let configuration = Ubiquitty.Preferences.values().pointee
+        guard surface.drive.reseedLaunchTheme(configuration) else {
+            return failed("palette writers: the launch theme did not seed")
+        }
+        surface.publishModelWrite()
+        let launched = surface.colors
+        guard
+            let other = TerminalSurface.themeNames.first(where: { TerminalSurface.colors(ofTheme: $0)?.background != launched.background }),
+            surface.applyTheme(named: other)
+        else {
+            return failed("palette writers: no theme moved the launch theme's background")
+        }
+        let reportsBeforeReseed = witness.reports.count
+        guard surface.drive.reseedLaunchTheme(configuration) else {
+            return failed("palette writers: the reseed was refused")
+        }
+        surface.publishModelWrite()
+        guard witness.reports.count == reportsBeforeReseed + 1, witness.reports.last == launched else {
+            return failed("palette writers: the reseed from \(other) reported \(witness.reports.count - reportsBeforeReseed) changes")
+        }
+        surface.observer = nil
+        return true
+    }
+
+    /// The palette writers' oracle: each colour report, in order.
+    private final class ColorWitness: TerminalSurfaceObserver {
+        var reports: [TerminalColors] = []
+
+        func terminalSurface(_ surface: TerminalSurface, didChangeColors colors: TerminalColors) {
+            reports.append(colors)
+        }
     }
 
     /// The lock on a capture's first frame.

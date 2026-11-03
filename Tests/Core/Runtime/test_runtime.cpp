@@ -44,6 +44,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,6 +53,7 @@
 #include <semaphore>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -524,6 +526,57 @@ TEST(aPublishedSnapshotCarriesTheEffectiveGroundUnderReverseVideo)
     CHECK_MSG(snapshot.defaultBackgroundRed == plainRed, "and the reset restores it");
 
     t.reset();
+}
+
+namespace {
+
+/// Feeds bytes through the runtime's sync-clear pump until all are parsed, as
+/// a drain does, publishing nothing on the way.
+bool feedThroughSyncClears(TerminalRuntime& runtime, std::string_view bytes)
+{
+    while (!bytes.empty()) {
+        const FeedResult fed = runtime.feedChunkUpToSyncClear({ bytes.data(), bytes.size() });
+        if (fed.consumed <= 0)
+            return false;
+        bytes.remove_prefix(static_cast<std::size_t>(fed.consumed));
+    }
+    return true;
+}
+
+bool isCoherentBackground(const TerminalRuntime& runtime, std::uint8_t red, std::uint8_t green, std::uint8_t blue)
+{
+    const Ubiquitty::ColorRGBA background = runtime.link().coherentColors.read().colors.background;
+    return background.red == red && background.green == green && background.blue == blue;
+}
+
+} // namespace
+
+// The colours a host paints its chrome from are the frame's, which a
+// synchronized update holds back: published outside an update and at each
+// close, never from inside one, and not withheld from a program that opens
+// the next update in the read that closed the last.
+TEST(theCoherentColoursAreTheFramesAndNeverAnOpenUpdates)
+{
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+
+    REQUIRE(feedThroughSyncClears(runtime, "\x1b]11;rgb:12/34/56\a"));
+    runtime.republishSnapshot();
+    CHECK_MSG(isCoherentBackground(runtime, 0x12, 0x34, 0x56), "a colour set outside an update publishes with the snapshot");
+
+    REQUIRE(feedThroughSyncClears(runtime, "\x1b[?2026h\x1b]11;rgb:ab/01/cd\a"));
+    runtime.republishSnapshot();
+    CHECK_MSG(isCoherentBackground(runtime, 0x12, 0x34, 0x56), "a snapshot inside an update keeps the colours from before it");
+
+    REQUIRE(feedThroughSyncClears(runtime, "\x1b]11;rgb:65/43/21\a\x1b[?2026l\x1b[?2026h\x1b]11;rgb:ab/01/cd\a"));
+    CHECK_MSG(isCoherentBackground(runtime, 0x65, 0x43, 0x21), "the close publishes the colours of the frame it completes");
+    runtime.republishSnapshot();
+    CHECK_MSG(isCoherentBackground(runtime, 0x65, 0x43, 0x21), "the update opened after it publishes nothing over them");
+
+    REQUIRE(feedThroughSyncClears(runtime, "\x1b]11;rgb:65/43/21\a\x1b[?2026l"));
+    const std::uint64_t publications = runtime.link().coherentColors.version();
+    REQUIRE(feedThroughSyncClears(runtime, "\x1b[?2026hAB\x1b[?2026l"));
+    CHECK_MSG(runtime.link().coherentColors.version() == publications, "a close that moved no colour reads and publishes none");
 }
 
 // DECSET 7402's edge-to-edge frame is a fact the pointer maps through on the

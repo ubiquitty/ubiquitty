@@ -329,7 +329,7 @@ FeedResult TerminalRuntime::feedChunkUpToSyncClear(std::span<const char> bytes)
     // over, so the flag, not the consumed count, says a 2026 frame completed.
     result.reachedSyncClear = stoppedAtSyncClear;
     if (stoppedAtSyncClear)
-        m_didDrainSeeSyncClear = true, ++m_syncClearSeenCount; // a 2026 frame completed this pass
+        noteSyncClearParsed();
     if (consumed > 0 && consumed < length) {
         // Stopped early: at reply pressure the queued replies are drained here
         // so the caller's next feed cannot overflow the reply buffer.
@@ -462,11 +462,7 @@ DrainOutcome TerminalRuntime::drainAvailable(DrainHost& host)
                 runtime.noteDrainInput();
         }
         void flushReplies() override { runtime.flushReplies(); }
-        void noteSyncClear() override
-        {
-            runtime.m_didDrainSeeSyncClear = true;
-            ++runtime.m_syncClearSeenCount;
-        }
+        void noteSyncClear() override { runtime.noteSyncClearParsed(); }
         void publishMidReadSyncFrame(DrainHost& host) override
         {
             runtime.publishMidReadBoundaryIfCoherent(host);
@@ -1171,8 +1167,26 @@ void TerminalRuntime::publishReads(const RuntimeSnapshot& snap, Ubiquitty::Termi
         m_modelPublishHook(m_modelPublishContext, *term);
     if (term)
         publishUserDefinedKeys(*term);
+    // Inside an update the grid keeps the frame from before it, and the
+    // colours stay the ones that frame was drawn in.
+    if (term && !term->modes.syncOutput)
+        publishCoherentColors(*term);
     m_link.reads.publish(snap);
     m_hasUnpublishedSnapshot.store(false, std::memory_order_release);
+}
+
+void TerminalRuntime::publishCoherentColors(const Ubiquitty::Terminal& term)
+{
+    m_link.coherentColors.publish({ term.paletteEpoch, terminalColors(term) });
+    m_coherentColorsEpoch = term.paletteEpoch;
+}
+
+void TerminalRuntime::noteSyncClearParsed()
+{
+    m_didDrainSeeSyncClear = true; // a 2026 frame completed this pass
+    ++m_syncClearSeenCount;
+    if (m_term && m_term->paletteEpoch != m_coherentColorsEpoch)
+        publishCoherentColors(*m_term);
 }
 
 void captureSnapshotFromTerm(Ubiquitty::Terminal* term, std::uint32_t version, RuntimeSnapshot& out)

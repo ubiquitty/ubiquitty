@@ -541,48 +541,68 @@ static Ubiquitty::PaletteRGB unsetDynamicColor(const Ubiquitty::Terminal& t, int
 
 // One of OSC 13-19: the `?` query reports the code's colour, the set colour or
 // the default above; a colour spec sets it, under the SetColor gate every
-// colour write takes.
-static void handleOSCDynamicColor(Ubiquitty::Terminal& t, std::string_view p, int osc, uint16_t* storeR, uint16_t* storeG, uint16_t* storeB, bool* storeSet, Ubiquitty::PAL::SelectionColorSetHandler setter)
+// colour write takes. Returns whether the stored colour moved: a slot that was
+// unset, or held another colour.
+static bool handleOSCDynamicColor(Ubiquitty::Terminal& t, std::string_view p, int osc, uint16_t* storeR, uint16_t* storeG, uint16_t* storeB, bool* storeSet, Ubiquitty::PAL::SelectionColorSetHandler setter)
 {
     if (isColorQueryPayload(p)) {
         const Ubiquitty::PaletteRGB color = *storeSet ? Ubiquitty::PaletteRGB { *storeR, *storeG, *storeB } : unsetDynamicColor(t, osc);
         Ubiquitty::ReplyBuilder reply = colorReply(t, osc, color.red, color.green, color.blue);
         if (reply.isTruncated() || reply.length() == 0)
-            return;
+            return false;
         Ubiquitty::respond(t, Ubiquitty::Capability::ColorRead, reply.span());
-        return;
+        return false;
     }
 
     if (!colorSetAllowed(t))
-        return;
+        return false;
     uint16_t r = 0;
     uint16_t g = 0;
     uint16_t b = 0;
     if (parseColorSpec(p, &r, &g, &b) != 0)
-        return;
+        return false;
+    const bool didMove = !*storeSet || *storeR != r || *storeG != g || *storeB != b;
     *storeR = r;
     *storeG = g;
     *storeB = b;
     *storeSet = true;
     if (setter)
         setter(&t, r, g, b);
+    return didMove;
 }
 
-// OSC 17 / 19 — selection background / foreground (routes the PAL hook).
-void handleSelectionBackgroundColor(Ubiquitty::Terminal& t, std::string_view p) { handleOSCDynamicColor(t, p, 17, &t.selectionBackgroundRed, &t.selectionBackgroundGreen, &t.selectionBackgroundBlue, &t.selectionBackgroundSet, Ubiquitty::PAL::selectionBackgroundSetter()); }
-void handleSelectionForegroundColor(Ubiquitty::Terminal& t, std::string_view p) { handleOSCDynamicColor(t, p, 19, &t.selectionForegroundRed, &t.selectionForegroundGreen, &t.selectionForegroundBlue, &t.selectionForegroundSet, Ubiquitty::PAL::selectionForegroundSetter()); }
+// OSC 17 / 19 — selection background / foreground (routes the PAL hook). The
+// selection colours are palette state: the colour stack saves them, a Sync
+// palette block carries them, and an embedding host reads them beside the
+// palette's, so a write that moves one moves the palette epoch.
+void handleSelectionBackgroundColor(Ubiquitty::Terminal& t, std::string_view p)
+{
+    if (handleOSCDynamicColor(t, p, 17, &t.selectionBackgroundRed, &t.selectionBackgroundGreen, &t.selectionBackgroundBlue, &t.selectionBackgroundSet, Ubiquitty::PAL::selectionBackgroundSetter()))
+        invalidateForPalette(t);
+}
+void handleSelectionForegroundColor(Ubiquitty::Terminal& t, std::string_view p)
+{
+    if (handleOSCDynamicColor(t, p, 19, &t.selectionForegroundRed, &t.selectionForegroundGreen, &t.selectionForegroundBlue, &t.selectionForegroundSet, Ubiquitty::PAL::selectionForegroundSetter()))
+        invalidateForPalette(t);
+}
 // OSC 117 / 119 — reset the selection background / foreground color.
 void resetSelectionBackground(Ubiquitty::Terminal& t)
 {
+    const bool wasSet = t.selectionBackgroundSet;
     t.selectionBackgroundSet = false;
     if (Ubiquitty::PAL::SelectionColorResetHandler fn = Ubiquitty::PAL::selectionBackgroundResetter())
         fn(&t);
+    if (wasSet)
+        invalidateForPalette(t);
 }
 void resetSelectionForeground(Ubiquitty::Terminal& t)
 {
+    const bool wasSet = t.selectionForegroundSet;
     t.selectionForegroundSet = false;
     if (Ubiquitty::PAL::SelectionColorResetHandler fn = Ubiquitty::PAL::selectionForegroundResetter())
         fn(&t);
+    if (wasSet)
+        invalidateForPalette(t);
 }
 
 // OSC 13/14 (mouse pointer fg/bg), 15/16 (Tek fg/bg), 18 (Tek cursor). OSC 15/16/18 drive the Tek

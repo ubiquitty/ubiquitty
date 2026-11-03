@@ -3,14 +3,15 @@
 
 #pragma once
 
-// The theme list, and a theme's colours as the bytes a palette apply takes.
+// The theme list, and a theme's colours: as the bytes a palette apply takes, and
+// as the values chrome is painted with.
 //
 // Themes.h and TermPaletteFromTheme.h carry the whole model — Theme, its colour
-// slots, TermPalette — and reach Preferences and the palette through their
-// includes. A frontend picking a theme wants none of that: it wants a list of
-// names and the colours of one. This header names no type of its own and
-// includes nothing, which is what lets it be imported beside the terminal model
-// rather than dragging a second definition of what those headers already own.
+// slots, the resolution — and reach Preferences through their includes. A
+// frontend picking a theme wants none of that: it wants a list of names and the
+// colours of one. This header hands out no Theme and no palette to write: a
+// theme's colours leave it as bytes or as `PaletteColors`, a value with nothing
+// behind it.
 //
 // Colours come out as bytes rather than as a TermPalette because that is what
 // the one palette-apply path takes (`Runtime::TerminalSession::applyPalette`),
@@ -18,6 +19,10 @@
 // wrong. A theme carries only its sixteen ANSI colours and three named ones;
 // indices 16-255 are the xterm cube, which this fills in the way every other
 // consumer gets it.
+
+#include "Core/Rendering/PaletteColors.h"
+
+#include <optional>
 
 namespace Ubiquitty::Themes {
 
@@ -62,5 +67,16 @@ enum class AutomaticAppearance {
 /// - Returns: Whether there was a theme at `index` and the two colour
 ///   pointers were given.
 [[nodiscard]] bool themeColorBytes(int index, unsigned char* indexedRGB, unsigned char* defaultsRGB, unsigned char* indexedAlpha);
+
+/// The colours a theme draws, read without applying it.
+///
+/// What a session applying the theme shows, adapted for colour vision and
+/// contrast as the apply adapts it (``resolveThemePalette``), so a host
+/// painting chrome from a theme it has not applied yet paints the colours the
+/// terminal will draw.
+///
+/// - Parameter index: The theme's index.
+/// - Returns: The colours, or nothing when there is no theme at `index`.
+[[nodiscard]] std::optional<Ubiquitty::Rendering::PaletteColors> themeColors(int index);
 
 } // namespace Ubiquitty::Themes

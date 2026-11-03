@@ -1675,7 +1675,7 @@ private:
     void publishUserDefinedKeys(const Ubiquitty::Terminal& term);
 
     /// Publishes `snap` on the link, preceded by the DECUDK table when `term`
-    /// has one.
+    /// has one, and by its colours when no synchronized update is open.
     ///
     /// The order is the invariant the side channel rests on: the table goes
     /// out before the snapshot, so a reader that sees a nonzero
@@ -1685,9 +1685,26 @@ private:
     ///
     /// - Parameters:
     ///   - snap: The snapshot to publish.
-    ///   - term: The terminal whose table rides ahead of it; nullptr publishes
-    ///     the snapshot alone.
+    ///   - term: The terminal whose table and colours ride ahead of it;
+    ///     nullptr publishes the snapshot alone.
     void publishReads(const RuntimeSnapshot& snap, Ubiquitty::Terminal* term);
+
+    /// Publishes a terminal's colours as the ones its frame shows.
+    ///
+    /// Caller holds the model lock, and no synchronized update is open: the
+    /// grid draws the model as it stands.
+    ///
+    /// - Parameter term: The terminal.
+    void publishCoherentColors(const Ubiquitty::Terminal& term);
+
+    /// Counts a DECSET 2026 close the parser stopped at, and publishes the
+    /// colours of the frame it completes.
+    ///
+    /// At the close rather than at the pass's end: a program writing updates
+    /// back to back has opened the next one by then, and a pass ending inside
+    /// every update would publish no colours for as long as it keeps writing.
+    /// Writer thread, under the model lock.
+    void noteSyncClearParsed();
 
     void emit(EventKind, std::uint32_t data0 = 0);
 
@@ -2004,6 +2021,10 @@ private:
     // publish one because the frame was not coherent.
     std::uint64_t m_syncClearSeenCount = 0;
     std::uint64_t m_settlePublishRefusedCount = 0;
+    /// The palette epoch of the colours last published on the link, which a
+    /// close compares before it reads and publishes them again. Under the
+    /// model lock.
+    std::uint64_t m_coherentColorsEpoch = 0;
     // When the pane's frame may be announced: the rule the daemon publishes
     // by. Pacing is the drain host's (PacedDrainHost throttles to the
     // display's rate), so the rule paces no flood of its own here. Writer-thread
