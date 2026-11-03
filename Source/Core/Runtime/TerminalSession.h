@@ -6060,10 +6060,10 @@ public:
     ///
     /// - Parameter presentation: The pane's presentation state.
     void setPresentation(PanePresentation presentation) { m_runtime->setPresentation(presentation); }
-    /// Defers process discovery until the frontend can present its result.
+    /// Defers what the frontend does not read of the foreground until it does.
     ///
-    /// - Parameter presentation: Whether the frontend has a visible reader of process state.
-    void setProcessStatePresentation(PanePresentation presentation) { m_runtime->setProcessStatePresentation(presentation); }
+    /// - Parameter observation: What the frontend reads of the foreground.
+    void setForegroundObservation(ForegroundObservation observation) { m_runtime->setForegroundObservation(observation); }
 
     /// Pushes the machine-wide load lever to the drain gate.
     ///

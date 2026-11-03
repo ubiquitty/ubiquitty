@@ -62,6 +62,11 @@ final class SurfaceWindowBridge: TerminalSurfaceObserver {
         MainActor.assumeIsolated { controller?.needsProcessTitle(for: surface) ?? surface.hasProcessInspector }
     }
 
+    /// The app draws a pane's title and directory only in the pane's own
+    /// window or its inspector, whose presentation the surface follows
+    /// itself. The control socket's pane list reads the title last told.
+    nonisolated func terminalSurfaceNeedsTitleAndDirectory(_ surface: TerminalSurface) -> Bool { false }
+
     nonisolated func terminalSurfacePaneIdentifier(_ surface: TerminalSurface) -> Int? {
         MainActor.assumeIsolated { controller?.paneIdentifier(of: surface) }
     }

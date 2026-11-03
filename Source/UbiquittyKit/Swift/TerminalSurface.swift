@@ -377,10 +377,37 @@ public protocol TerminalSurfaceObserver: AnyObject {
     /// - Returns: Whether any displayed title needs process facts.
     func terminalSurfaceNeedsProcessState(_ surface: TerminalSurface) -> Bool
 
+    /// Reports whether the host shows the surface's title and working
+    /// directory where no window of the surface shows them.
+    ///
+    /// Asked when ``terminalSurfaceNeedsProcessState(_:)`` is. While it
+    /// answers true, ``terminalSurface(_:didChangeTitle:)`` and
+    /// ``terminalSurface(_:didChangeCurrentDirectory:)`` fire whether or not
+    /// the surface is in a window: the answer for a host that draws a tab for
+    /// a surface it keeps out of the window. While it does, a local session
+    /// reads which program holds its terminal and where that program is, so
+    /// a title a program set is told empty once the program exits and a
+    /// shell that reports no directory is followed from one to the next. It
+    /// walks no process chain for them: a host that declines process facts
+    /// still hears both kept current.
+    ///
+    /// - Parameter surface: The pane whose title and directory would be held.
+    /// - Returns: Whether the host shows them beyond the surface's window.
+    func terminalSurfaceNeedsTitleAndDirectory(_ surface: TerminalSurface) -> Bool
+
     /// The terminal's OSC title changed.
     ///
     /// Delivered as a value rather than drawn, so one surface serves a pane
     /// header, a tab and a window title without knowing which exist.
+    ///
+    /// Fires while the surface's window shows its title, and while
+    /// ``terminalSurfaceNeedsTitleAndDirectory(_:)`` answers true, in a
+    /// window or out of one. A surface that has never been in a window counts
+    /// as shown, hidden or not. Otherwise the change is held, and the newest
+    /// title fires once either holds again. A local session tells an empty
+    /// title once the program that set it exits, while this observer answers
+    /// true to ``terminalSurfaceNeedsTitleAndDirectory(_:)`` or to
+    /// ``terminalSurfaceNeedsProcessState(_:)``.
     ///
     /// - Parameters:
     ///   - surface: The surface whose title changed.
@@ -392,6 +419,10 @@ public protocol TerminalSurfaceObserver: AnyObject {
     ///
     /// A value, as the title is: the window title, the proxy icon and a pane
     /// header all read the same directory, and none of them owns it.
+    ///
+    /// Held and handed over by the rule
+    /// ``terminalSurface(_:didChangeTitle:)`` follows, the newest directory
+    /// firing once either holds again.
     ///
     /// - Parameters:
     ///   - surface: The surface whose directory changed.
@@ -412,8 +443,9 @@ public protocol TerminalSurfaceObserver: AnyObject {
     ///
     /// Fires while the surface's window shows its title, and while
     /// ``terminalSurfaceNeedsProcessState(_:)`` answers true, in a window or
-    /// out of one. A surface that has never been in a window counts as shown.
-    /// Otherwise the move is held and fires once either holds again.
+    /// out of one. A surface that has never been in a window counts as shown,
+    /// hidden or not. Otherwise the move is held and fires once either holds
+    /// again.
     ///
     /// - Parameter surface: The surface whose process sample moved.
     func terminalSurfaceDidChangeProcessState(_ surface: TerminalSurface)
@@ -874,6 +906,9 @@ public protocol TerminalSurfaceObserver: AnyObject {
 
 extension TerminalSurfaceObserver {
     public func terminalSurfaceNeedsProcessState(_ surface: TerminalSurface) -> Bool { true }
+    /// A host that does not answer hears every title and directory, wherever
+    /// its surface is.
+    public func terminalSurfaceNeedsTitleAndDirectory(_ surface: TerminalSurface) -> Bool { true }
 
     public func terminalSurfaceDidChangeHostedWindows(_: TerminalSurface) {}
     public func terminalSurface(_: TerminalSurface, didChangeTitle _: String) {}
@@ -1337,11 +1372,13 @@ private func surfaceDrainSignal(_ context: UInt) {
 public final class TerminalSurface: PlatformView {
     /// Receives what the session reports. Held weakly: a host owns the surface.
     ///
-    /// Assigning one asks it at once whether it needs process facts, so a host
-    /// that observes a surface already on screen is not left waiting for the
-    /// next presentation edge to learn what the pane runs.
+    /// Assigning one asks it at once whether it needs process facts and the
+    /// title and directory, so a host that observes a surface already on
+    /// screen is not left waiting for the next presentation edge to learn what
+    /// the pane runs, and one that observes a surface out of its window hears
+    /// what was held for it.
     public weak var observer: TerminalSurfaceObserver? {
-        didSet { publishProcessStateObservation() }
+        didSet { publishMetadataObservation() }
     }
     var lastSearchRevealGeneration: UInt64 = 0
     var lastSearchRevealEpoch: UInt32 = 0
@@ -1354,14 +1391,19 @@ public final class TerminalSurface: PlatformView {
     /// The terminal's current OSC title, empty until one arrives.
     ///
     /// Readable at any time so a host attaching late does not wait for the next
-    /// change to populate a tab.
+    /// change to populate a tab. It moves as
+    /// ``TerminalSurfaceObserver/terminalSurface(_:didChangeTitle:)`` fires,
+    /// so while that callback is held it reads the title last told.
     public private(set) var title: String = ""
 
-    /// The working directory the session last reported, or empty until a
-    /// shell with integration installed says where it is.
+    /// The working directory the session last reported, or the one a local
+    /// session found its foreground program in; empty until either is known.
     ///
     /// Readable at any time, as ``title`` is, so a host attaching late does
-    /// not wait for the next `cd` to learn where the shell already is.
+    /// not wait for the next `cd` to learn where the shell already is. It
+    /// moves as
+    /// ``TerminalSurfaceObserver/terminalSurface(_:didChangeCurrentDirectory:)``
+    /// fires, so while that callback is held it reads the directory last told.
     public private(set) var currentDirectory: String = ""
 
     /// The foreground process's own name, without its ancestors: `vim`, `claude`.
@@ -4023,27 +4065,47 @@ public final class TerminalSurface: PlatformView {
 
     private var deferredPresentationEvents: RuntimeEvents = []
     private var isMetadataPresented = true
+    /// Whether the surface has been in a window, before which its metadata
+    /// counts as shown however it is hidden.
+    private var hasBeenInWindow = false
+    /// The observer's last answer to whether it needs the title and
+    /// directory, which keeps their callbacks live for a surface no window
+    /// shows.
+    private var isTitleAndDirectoryObserved = false
     /// The observer's last answer to whether it needs process facts, which
     /// keeps the process-state callback live for a surface no window shows.
     private var isProcessStateObserved = false
     private var processInspectors: Set<ObjectIdentifier> = []
     package var hasProcessInspector: Bool { !processInspectors.isEmpty }
 
-    /// Whether a process-state move reaches the observer now rather than on
-    /// the next reveal.
-    private var isProcessStateDelivered: Bool { isMetadataPresented || isProcessStateObserved }
-
-    /// Asks the observer whether it needs process facts, turns Core's sampling
-    /// to match, and hands over a process-state move held while nobody did.
-    private func publishProcessStateObservation() {
-        let wasDelivered = isProcessStateDelivered
-        isProcessStateObserved = observer?.terminalSurfaceNeedsProcessState(self) ?? hasProcessInspector
-        drive.setProcessStatePresentation(isProcessStateObserved ? .Presented : .Hidden)
-        let processStateChanged = RuntimeEvents(.processStateChanged)
-        if isProcessStateDelivered && !wasDelivered && deferredPresentationEvents.contains(processStateChanged) {
-            deferredPresentationEvents.subtract(processStateChanged)
-            deliver(processStateChanged)
+    /// The metadata changes held for the next reveal rather than told now:
+    /// those neither the surface's presentation nor the observer asks for.
+    private var withheldMetadataEvents: RuntimeEvents {
+        guard !isMetadataPresented else { return [] }
+        var events: RuntimeEvents = []
+        if !isTitleAndDirectoryObserved {
+            events.formUnion([.titleChanged, RuntimeEvents(.directoryChanged)])
         }
+        if !isProcessStateObserved {
+            events.formUnion(RuntimeEvents(.processStateChanged))
+        }
+        return events
+    }
+
+    /// Asks the observer what it needs where no window shows the surface,
+    /// turns Core's sampling to match, and hands over a held change the
+    /// answers no longer withhold.
+    private func publishMetadataObservation() {
+        let wasWithheld = withheldMetadataEvents
+        isTitleAndDirectoryObserved = observer?.terminalSurfaceNeedsTitleAndDirectory(self) ?? false
+        isProcessStateObserved = observer?.terminalSurfaceNeedsProcessState(self) ?? hasProcessInspector
+        drive.setForegroundObservation(
+            isProcessStateObserved ? .ProcessState : isTitleAndDirectoryObserved ? .TitleAndDirectory : .Unread
+        )
+        let released = deferredPresentationEvents.intersection(wasWithheld.subtracting(withheldMetadataEvents))
+        guard !released.isEmpty else { return }
+        deferredPresentationEvents.subtract(released)
+        deliver(released)
     }
 
     /// Registers whether an inspector consumes this pane's metadata.
@@ -4478,6 +4540,9 @@ public final class TerminalSurface: PlatformView {
         // asked for before AppKit flips the state, and that draw is the one
         // that would show stale pixels.
         installPlatformWindowObservers()
+        if window != nil {
+            hasBeenInWindow = true
+        }
         // Arriving in a window is a reveal edge like any other: a pane
         // attached into a window the system reports covered draws its content
         // once rather than waiting for a report about a window it was not in.
@@ -4596,8 +4661,8 @@ public final class TerminalSurface: PlatformView {
         let presentation = Ubiquitty.Runtime.panePresentation(visibility)
         drive.setPresentation(presentation)
         let wasMetadataPresented = isMetadataPresented
-        isMetadataPresented = isTitlePresentationVisible || !processInspectors.isEmpty
-        publishProcessStateObservation()
+        isMetadataPresented = !hasBeenInWindow || isTitlePresentationVisible || !processInspectors.isEmpty
+        publishMetadataObservation()
         if isMetadataPresented && !wasMetadataPresented {
             let metadata = deferredPresentationEvents.subtracting(.screenDirty)
             deferredPresentationEvents.subtract(metadata)
@@ -5790,12 +5855,7 @@ public final class TerminalSurface: PlatformView {
             if frameDelivery == .Withhold {
                 presentationEvents.insert(.screenDirty)
             }
-            if !isMetadataPresented {
-                presentationEvents.formUnion([.titleChanged, RuntimeEvents(.directoryChanged)])
-            }
-            if !isProcessStateDelivered {
-                presentationEvents.formUnion(RuntimeEvents(.processStateChanged))
-            }
+            presentationEvents.formUnion(withheldMetadataEvents)
             deferredPresentationEvents.formUnion(events.intersection(presentationEvents))
             if frameDelivery == .Withhold && events.contains(.screenDirty) {
                 needsDisplay = true

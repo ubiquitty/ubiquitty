@@ -182,6 +182,23 @@ enum class PanePresentation : uint8_t {
     Presented
 };
 
+/// How much of a local session's foreground a frontend reads.
+///
+/// Each level reads what the one below it does and more. Which group holds the
+/// terminal is what retires a title or a directory report its program left
+/// behind, and where that group is answers the directory of a shell that
+/// reports none, so the title and directory are kept by that probe; the
+/// process chain is a walk of its own, which only process state reads.
+enum class ForegroundObservation : uint8_t {
+    /// Nothing is probed, and an edge waits for a reader.
+    Unread,
+    /// The probe reads the terminal's holder and its directory, and walks no
+    /// chain.
+    TitleAndDirectory,
+    /// The probe walks the foreground chain as well.
+    ProcessState
+};
+
 /// Whether the frontend is in a live resize: a drag of the window's edge,
 /// from the press that starts it to the release that ends it.
 enum class LiveResize : uint8_t {
@@ -395,11 +412,16 @@ struct MachineBudget {
 /// prepared — so it is stored into this rather than captured when the watcher
 /// is registered, which would have captured nothing.
 struct ProcessTreeSignal {
-    /// Defers discovery and its wakeups while the frontend has no visible reader.
-    std::atomic<bool> isObserved { true };
+    /// What the frontend reads, which defers the probe, the walk and their
+    /// wakeups it does not.
+    std::atomic<ForegroundObservation> observation { ForegroundObservation::ProcessState };
     /// Raised by an edge, cleared by the walk that answers it. Starts raised so
     /// the first sample walks rather than trusting an empty cache.
     std::atomic<bool> dirty { true };
+    /// Raised with `dirty` and cleared by the probe of the terminal's holder,
+    /// so a reader of the title and directory alone answers an edge once,
+    /// without the walk that clears `dirty`.
+    std::atomic<bool> isForegroundProbeOwed { true };
     /// How many edges have arrived, ever. The loop watches this for MOVEMENT
     /// rather than for presence: a shell loop forking twenty times a second
     /// keeps `dirty` raised continuously, and answering each edge walks the
@@ -850,30 +872,40 @@ public:
 
     /// Whether a kernel process-tree edge is waiting to be answered.
     ///
-    /// A peek, not a take: the flag is cleared by the sample that answers it.
+    /// A peek, not a take: what the frontend reads says which sample answers
+    /// an edge, and that sample clears it. The probe of the terminal's holder
+    /// answers a reader of the title and directory, the walk answers a reader
+    /// of process state, and an unread foreground is answered by neither.
     ///
-    /// - Returns: Whether the tree moved since the last walk.
+    /// - Returns: Whether an edge waits for the probe or walk that the current
+    ///   observation reads.
     [[nodiscard]] bool hasPendingProcessTreeEdge() const
     {
-        return m_processTree->isObserved.load(std::memory_order_acquire)
-            && m_processTree->dirty.load(std::memory_order_relaxed);
+        switch (foregroundObservation()) {
+        case ForegroundObservation::Unread:
+            return false;
+        case ForegroundObservation::TitleAndDirectory:
+            return m_processTree->isForegroundProbeOwed.load(std::memory_order_relaxed);
+        case ForegroundObservation::ProcessState:
+            return m_processTree->dirty.load(std::memory_order_relaxed);
+        }
+        return false;
     }
 
-    /// Suspends process discovery while retaining an invalidation for reveal.
+    /// Defers what the frontend does not read, retaining an invalidation for
+    /// the reader that reads it.
     ///
-    /// - Parameter presentation: Whether the frontend has a visible reader of process state.
-    void setProcessStatePresentation(PanePresentation presentation)
+    /// - Parameter observation: What the frontend reads of the foreground.
+    void setForegroundObservation(ForegroundObservation observation)
     {
-        const bool isObserved = presentation == PanePresentation::Presented;
-        if (m_processTree->isObserved.exchange(isObserved, std::memory_order_acq_rel) == isObserved) {
+        const ForegroundObservation previous = m_processTree->observation.exchange(observation, std::memory_order_acq_rel);
+        if (observation <= previous)
             return;
-        }
-        if (isObserved) {
-            m_processTree->dirty.store(true, std::memory_order_relaxed);
-            if (PAL::Waker* waker = m_processTree->waker.load(std::memory_order_acquire)) {
-                waker->wake();
-            }
-        }
+        // A reader that reads more is owed what moved while nobody read it.
+        m_processTree->dirty.store(true, std::memory_order_relaxed);
+        m_processTree->isForegroundProbeOwed.store(true, std::memory_order_relaxed);
+        if (PAL::Waker* waker = m_processTree->waker.load(std::memory_order_acquire))
+            waker->wake();
     }
 
     /// How many process-tree edges have arrived on this session, ever.
@@ -888,9 +920,10 @@ public:
     /// Adopts the waker of the loop that drains this runtime.
     ///
     /// So a process-tree edge, which arrives on the watcher's own thread, can
-    /// cut short an idle park and have the walk run at once instead of at the
-    /// next backstop tick. Without it the edge only sets a flag that nobody
-    /// looks at until a timer fires, which is polling wearing a push's clothes.
+    /// cut short an idle park and have the sample that answers it run once the
+    /// tree holds still instead of at the next backstop tick. Without it the
+    /// edge only sets a flag that nobody looks at until a timer fires, which is
+    /// polling wearing a push's clothes.
     ///
     /// - Parameter waker: The loop's waker, shared for its lifetime.
     void setIngestWaker(std::shared_ptr<PAL::Waker> waker)
@@ -918,7 +951,8 @@ public:
     /// - Returns: Milliseconds between directory samples, or zero for none.
     [[nodiscard]] std::uint32_t directorySampleMilliseconds() const;
 
-    /// Walks the process table now, off any drain.
+    /// Probes the foreground now, off any drain, and walks the process table
+    /// while process state is read.
     ///
     /// The ingest loop's tick, for the case a drain cannot cover: a program
     /// that takes the foreground and writes nothing moves the facts without
@@ -2021,6 +2055,9 @@ private:
     // The walk's bound, shared with the host's walk of a hosted pane.
     static constexpr std::size_t processChainWalkCapacity = Session::processChainWalkCapacity;
 
+    /// What the frontend reads of the foreground, as it last said.
+    [[nodiscard]] ForegroundObservation foregroundObservation() const { return m_processTree->observation.load(std::memory_order_acquire); }
+
     /// Walks the process table and folds the result into the session's state.
     ///
     /// Runs on the ingest thread only: the drain calls it on its probe and the
@@ -2045,6 +2082,12 @@ private:
     ///
     /// - Returns: The holder's name, read with the holder.
     [[nodiscard]] std::string probeForegroundHolder();
+    /// Clears the owed foreground probe before the probe reads the foreground.
+    ///
+    /// An edge raises the flag after the state it reports has moved, so a flag
+    /// cleared ahead of the read leaves any later edge raised for the next
+    /// probe; one cleared after the read would erase it.
+    void takeForegroundProbeOwed();
     // True when the previous drain saw any mouse-tracking mode on: the guard
     // can act then, so the next drain's probe skips the tick budget.
     bool m_mouseTrackingActiveLastDrain = false;

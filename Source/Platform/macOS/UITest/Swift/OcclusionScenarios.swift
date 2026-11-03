@@ -230,7 +230,12 @@ enum OcclusionScenarios {
                 t.pump(0.2)
                 t.expect(window.title == originalTitle, desc: "covered output does not change the native title")
                 t.expect(shell.windowTitleWeavesForTesting == originalWeaves, desc: "covered title changes do not weave or lay out a title")
+                t.expect(
+                    surface.title == "VISIBLE-TITLE",
+                    desc: "the app does not ask for a covered pane's title, so the surface holds it (\(surface.title))"
+                )
                 report(surface, covered: false, pumpingWith: t)
+                t.expect(surface.title == "HIDDEN-LATEST", desc: "reveal hands the held title over (\(surface.title))")
                 t.expect(window.title.contains("HIDDEN-LATEST"), desc: "reveal applies the latest title without more output")
                 t.expect(window.title != originalTitle, desc: "reveal replaces the stale visible title")
                 t.expect(

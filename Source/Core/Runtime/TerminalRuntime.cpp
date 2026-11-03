@@ -195,7 +195,8 @@ bool processTreeChanged(void* context)
     ProcessTreeSignal& signal = **static_cast<std::shared_ptr<ProcessTreeSignal>*>(context);
     signal.edges.fetch_add(1, std::memory_order_relaxed);
     signal.dirty.store(true, std::memory_order_relaxed);
-    if (!signal.isObserved.load(std::memory_order_acquire)) {
+    signal.isForegroundProbeOwed.store(true, std::memory_order_relaxed);
+    if (signal.observation.load(std::memory_order_acquire) == ForegroundObservation::Unread) {
         return false;
     }
     if (PAL::Waker* waker = signal.waker.load(std::memory_order_acquire))
@@ -212,14 +213,14 @@ std::uint32_t TerminalRuntime::walkFallbackMilliseconds() const
 {
     // Out of line because the header only forward-declares the stream, and the
     // answer is the stream's to give.
-    if (!m_stream || !m_processTree->isObserved.load(std::memory_order_acquire))
+    if (!m_stream || foregroundObservation() == ForegroundObservation::Unread)
         return 0;
     return m_stream->process().deliversTreeEdges() ? 0 : Title::walkFallbackMilliseconds;
 }
 
 std::uint32_t TerminalRuntime::directorySampleMilliseconds() const
 {
-    if (!m_stream || !isLocalStreamEnabled() || !m_processTree->isObserved.load(std::memory_order_acquire))
+    if (!m_stream || !isLocalStreamEnabled() || foregroundObservation() == ForegroundObservation::Unread)
         return 0;
     // A shell report already owns the resolved directory. Its next prompt
     // reports any move, so a quiet process-directory probe buys nothing.
@@ -251,6 +252,7 @@ void TerminalRuntime::attachProcessTreeNotifier()
     // session quiet after its first prompt: there is no wall-clock walk behind
     // it to notice.
     m_processTree->dirty.store(true, std::memory_order_relaxed);
+    m_processTree->isForegroundProbeOwed.store(true, std::memory_order_relaxed);
 }
 
 void TerminalRuntime::seedTitleName(const std::string& name)
@@ -657,6 +659,7 @@ void TerminalRuntime::finishDrainPass(DrainHost& host, DrainOutcome& outcome)
     // could name it again or overwrite the exit notification.
     const bool shouldProbeFacts = !outcome.reachedEnd && shouldProbeForegroundFacts(probeTicks, outcome.caughtUp);
     if (shouldProbeFacts) {
+        takeForegroundProbeOwed();
         const bool wasForegroundShell = m_cachedForegroundIsShell;
         std::string probedName = probeForegroundHolder();
         const std::string sampledDirectory = m_stream->process().foregroundCurrentDirectory();
@@ -695,7 +698,7 @@ void TerminalRuntime::finishDrainPass(DrainHost& host, DrainOutcome& outcome)
         m_lastForegroundProbeTicks = probeTicks;
         m_foregroundProbeValid = true;
     } else if (m_term && Ubiquitty::didDrainLeaveAReportUnstamped(*m_term)
-        && m_processTree->isObserved.load(std::memory_order_acquire)) {
+        && foregroundObservation() != ForegroundObservation::Unread) {
         // A drain that set a title or reported a directory names their owner
         // now even when the full probe is throttled. Left to the next probe, a
         // program that reported and exited in between would hand its report to
@@ -1626,7 +1629,7 @@ bool TerminalRuntime::hasForegroundProbeBudgetElapsed(Ticks now) const
 bool TerminalRuntime::shouldProbeForegroundFacts(Ticks now, bool isCaughtUp) const // bool-ok: the drain's own reading of whether it caught up, not a mode this chooses
 {
     return isMouseTrackingActive()
-        || (m_processTree->isObserved.load(std::memory_order_acquire)
+        || (foregroundObservation() != ForegroundObservation::Unread
             && (hasNeverProbedForegroundFacts() || hasForegroundProbeBudgetElapsed(now)
                 || (isCaughtUp && m_stream->process().foregroundProcessGroup().value_or(0) != m_cachedForegroundGroup)));
 }
@@ -1674,9 +1677,10 @@ bool TerminalRuntime::foldColdScrollback(DrainHost& host, int blockBudget)
 DrainOutcome TerminalRuntime::sampleProcessStateOffDrain(DrainHost& host)
 {
     DrainOutcome outcome;
-    if (!m_stream || !isLocalStreamEnabled() || !m_processTree->isObserved.load(std::memory_order_acquire)) {
+    if (!m_stream || !isLocalStreamEnabled() || foregroundObservation() == ForegroundObservation::Unread) {
         return outcome;
     }
+    takeForegroundProbeOwed();
     const bool wasForegroundShell = m_cachedForegroundIsShell;
     std::string probedName = probeForegroundHolder();
     const std::string directory = m_stream->process().foregroundCurrentDirectory();
@@ -1727,7 +1731,7 @@ DrainOutcome TerminalRuntime::sampleProcessStateOffDrain(DrainHost& host)
 DrainOutcome TerminalRuntime::sampleCurrentDirectoryOffDrain(DrainHost& host)
 {
     DrainOutcome outcome;
-    if (!m_stream || !isLocalStreamEnabled() || !m_processTree->isObserved.load(std::memory_order_acquire))
+    if (!m_stream || !isLocalStreamEnabled() || foregroundObservation() == ForegroundObservation::Unread)
         return outcome;
     const std::string directory = m_stream->process().foregroundCurrentDirectory();
     if (directory.empty() || directory == m_cachedForegroundDirectory)
@@ -1753,12 +1757,18 @@ DrainOutcome TerminalRuntime::sampleCurrentDirectoryOffDrain(DrainHost& host)
     return outcome;
 }
 
+void TerminalRuntime::takeForegroundProbeOwed()
+{
+    m_processTree->isForegroundProbeOwed.exchange(false, std::memory_order_acq_rel);
+}
+
 std::string TerminalRuntime::probeForegroundHolder()
 {
     m_cachedForegroundGroup = m_stream->process().foregroundProcessGroup().value_or(0);
-    // The name is read for a sample, which a session nobody observes does not
-    // take; a probe for its mouse guard reads the holder alone.
-    if (!m_processTree->isObserved.load(std::memory_order_acquire)) {
+    // The name is read for a sample, which only a reader of process state
+    // takes; a probe for the mouse guard or the title and directory reads the
+    // holder alone.
+    if (foregroundObservation() != ForegroundObservation::ProcessState) {
         m_cachedForegroundIsShell = m_stream->process().foregroundIsShell();
         return {};
     }
@@ -1773,7 +1783,7 @@ void TerminalRuntime::sampleProcessState(std::string probedName)
     // no stream takes the early return, and a held `true` from the sample
     // before it would raise the event a second time for one move.
     m_didProcessStateMove = false;
-    if (!m_stream || !isLocalStreamEnabled() || !m_processTree->isObserved.load(std::memory_order_acquire))
+    if (!m_stream || !isLocalStreamEnabled() || foregroundObservation() != ForegroundObservation::ProcessState)
         return;
     // No pre-exec special case is needed here, unlike a frontend's own timer:
     // this runs on a drain, and a child that has produced output has exec'd.

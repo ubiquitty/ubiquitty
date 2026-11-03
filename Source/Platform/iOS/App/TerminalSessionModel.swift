@@ -2908,6 +2908,10 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
 
     // MARK: - TerminalSurfaceObserver
 
+    /// The title shown is the active pane's, which arrives when the pane's
+    /// window shows it; a tab weaves its title from its pane's drive.
+    nonisolated func terminalSurfaceNeedsTitleAndDirectory(_ surface: TerminalSurface) -> Bool { false }
+
     nonisolated func terminalSurface(_ surface: TerminalSurface, didChangeTitle title: String) {
         let identity = ObjectIdentifier(surface)
         MainActor.assumeIsolated {
