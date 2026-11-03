@@ -489,4 +489,27 @@ TEST(aConnectionIsNamedByItsOwnerNotItsJumpHelper)
     checkString(formatChain(fromGit), "ssh git.example ◂ git", "and still names the program that started it");
 }
 
+// A program whose file name holds a space is named whole, as its foreground
+// name is, and its arguments are those after its argv[0], however many
+// spaces that holds; the same word in its arguments is an argument.
+TEST(aProgramWhoseNameHoldsASpaceIsNamedWholeInTheChain)
+{
+    using namespace Ubiquitty::PAL::Process;
+    Record records[] = {
+        makeRec(100, 1, "-zsh", false, true),
+        makeRec(200, 100, "my prog", true, false),
+    };
+    const std::span<const Record> chain(records, 2);
+    records[1].commandLine = "/Users/someone/My Tools/my prog 30 my prog";
+    checkString(formatChain(chain), "my prog", "the chain names the program whole");
+    checkString(formatChain(chain, ChainArguments::IncludeArguments), "my prog 30 my prog", "its arguments follow its argv[0]");
+    records[1].commandLine = "my prog";
+    checkString(formatChain(chain, ChainArguments::IncludeArguments), "my prog", "an argv[0] with no path and no arguments");
+    // A rewritten argv[0] is named by its first word, and the rest is its
+    // arguments, as before.
+    records[1].name = "sshd:";
+    records[1].commandLine = "sshd: someone@ttys000";
+    checkString(formatChain(chain, ChainArguments::IncludeArguments), "sshd: someone@ttys000", "a rewritten argv[0]");
+}
+
 UBIQUITTY_TEST_MAIN()

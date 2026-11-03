@@ -3247,6 +3247,9 @@ public:
         applyRemoteTitleParts(parts);
     }
 
+    /// Drives the host's report that the session ended without a transport.
+    void noteHostedSessionEndedForTest() { noteHostedSessionEnded(); }
+
     /// The model's title, for a case asserting what a compose produced.
     ///
     /// - Returns: The title, or empty without a model.
@@ -5794,12 +5797,20 @@ public:
     ///   for a pane running none.
     [[nodiscard]] std::string processIconKey(std::uint8_t reportedProcessIcon) const
     {
-        // A local pane's walk knows whether its shell has the terminal back;
-        // a host's pane names its foreground and its shell, so compare them.
-        const bool isShellForeground = m_remote ? Title::isForegroundTheShell(foregroundProcessName(), shellCommandName()) : m_runtime->isSampledForegroundShell();
-        const auto holder = isShellForeground ? Title::TerminalHolder::Shell : Title::TerminalHolder::Program;
-        const auto* icon = Title::processIconFor(Title::processIconAt(reportedProcessIcon), foregroundProcessName(), holder);
-        return icon ? std::string(icon->key) : std::string();
+        if (!m_remote)
+            return m_runtime->processIconKey(reportedProcessIcon);
+        return std::string(Title::processIconKeyFor(reportedProcessIcon, m_paneFacts.foreground.name, hostedTerminalHolder()));
+    }
+
+    /// Who holds a hosted pane's terminal: the host's own sample, carried in
+    /// its facts. A pane the host has named no foreground for is its shell's,
+    /// as a local pane is before its first sample, so a status record already
+    /// on its screen keys no program.
+    ///
+    /// - Returns: The holder.
+    [[nodiscard]] Title::TerminalHolder hostedTerminalHolder() const
+    {
+        return m_paneFacts.foreground.name.empty() || m_paneFacts.isAtPrompt ? Title::TerminalHolder::Shell : Title::TerminalHolder::Program;
     }
 
     /// The foreground process chain, as a title shows it ("-zsh ▸ vim").
@@ -5818,6 +5829,27 @@ public:
     ///
     /// - Returns: The chain; the launch seed until a walk has resolved one.
     [[nodiscard]] std::string processChainWithArguments() const { return m_remote ? m_paneFacts.processChainWithArguments : m_runtime->processChainWithArguments(); }
+
+    /// The program this pane runs, for chrome drawn around it, from one
+    /// sample: a local pane's runtime reads it under one hold of its facts'
+    /// lock, and a hosted pane's from the host's last whole record.
+    ///
+    /// - Parameter reportedProcessIcon: The snapshot's `reportedProcessIcon`.
+    /// - Returns: The program; every field empty for a session that ended,
+    ///   here or on the host.
+    [[nodiscard]] ForegroundProgram foregroundProgram(std::uint8_t reportedProcessIcon) const
+    {
+        if (!m_remote)
+            return m_runtime->foregroundProgram(reportedProcessIcon);
+        if (m_paneFacts.end.didEnd || m_didHostedSessionEnd)
+            return {};
+        return {
+            .name = m_paneFacts.foreground.name,
+            .key = processIconKey(reportedProcessIcon),
+            .chain = m_paneFacts.processChain,
+            .chainWithArguments = m_paneFacts.processChainWithArguments,
+        };
+    }
 
     /// Where this session's foreground process leads. See
     /// ``TerminalRuntime::remoteTarget``.
@@ -10260,7 +10292,7 @@ private:
             }
 
             /// The host shell exited — flag it; the frontend closes.
-            void onExit() override { session->noteRemoteEvent(EventKind::Exited); }
+            void onExit() override { session->noteHostedSessionEnded(); }
 
             /// The daemon handed back a session this one shared.
             void onReclaimed() override { session->noteReclaimed(); }
@@ -12902,6 +12934,8 @@ private:
         const bool didProcessChange = m_paneFacts.processChain != facts.processChain
             || m_paneFacts.processChainWithArguments != facts.processChainWithArguments
             || m_paneFacts.foreground.name != facts.foreground.name
+            || m_paneFacts.isAtPrompt != facts.isAtPrompt
+            || m_paneFacts.end.didEnd != facts.end.didEnd
             || m_paneFacts.shellCommandName != facts.shellCommandName
             || m_paneFacts.terminalName != facts.terminalName;
         m_paneFacts = facts;
@@ -12915,6 +12949,17 @@ private:
 
     /// The last pane facts the host sent; see ``applyRemoteTitleParts``.
     Ubiquitty::Protocol::Sync::PaneFacts m_paneFacts;
+
+    /// The host said the session ended: its facts frame and its end can
+    /// arrive in either order, and from the end on nothing runs there.
+    void noteHostedSessionEnded()
+    {
+        m_didHostedSessionEnd = true;
+        noteRemoteEvent(EventKind::Exited);
+    }
+
+    /// Whether the host has said the session ended; see ``noteHostedSessionEnded``.
+    bool m_didHostedSessionEnd = false;
 
     // Wall micros at the previous image-frame advance, cyclic; zero when the
     // clock awaits its seed. Main-thread state, like the gesture's.

@@ -83,8 +83,8 @@ struct Record {
 /// One member of the terminal's foreground process group, as the rule that
 /// tells a shell's own work from a job reads it.
 ///
-/// The platform reports these facts; ``Session::isShellOwnedForegroundGroup``
-/// decides over them.
+/// The platform reports these facts; ``Session::foregroundOwner`` decides over
+/// them.
 struct GroupMember {
     uint32_t processID = 0;
     uint32_t parentProcessID = 0;
@@ -95,7 +95,13 @@ struct GroupMember {
     /// when job control is off, as it is inside a subshell, and the disposition
     /// survives the exec.
     bool isInterruptIgnored = false;
+    /// Whether the process has ended and waits to be reaped. A process whose
+    /// first thread has ended while another runs on has not.
     bool isZombie = false;
+    /// When the process was forked, in a unit compared only with another
+    /// member's on the same platform: Darwin's microseconds since the epoch,
+    /// Linux's clock ticks since boot.
+    uint64_t startTime = 0;
 };
 
 bool isLoginShell(std::string_view name, SessionLeaderStatus leaderStatus);

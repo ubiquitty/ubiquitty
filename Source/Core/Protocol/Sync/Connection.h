@@ -2779,6 +2779,10 @@ public:
         /// owned, and it outlives the set's use of it by the lender's word.
         /// What is known of the pane is known of this terminal and no other.
         Ubiquitty::Terminal* lentTerminal = nullptr;
+        /// The status the screen last carried, while a status set the host
+        /// sent for a view that is not live stands in the picture in its
+        /// place: `replica` describes the picture with this status in it.
+        std::optional<OSC::ProgramStatusStore> screenStatus;
 
         /// The terminal the replica describes, owned or lent.
         [[nodiscard]] Ubiquitty::Terminal* picture() const { return terminal ? terminal.get() : lentTerminal; }
@@ -3808,6 +3812,12 @@ private:
         std::optional<PaneFacts> facts;
         std::optional<StatusRecords> status;
         StatusAssembly statusAssembly;
+        /// The status the screen last carried, kept while a status set sent
+        /// for a view that is not live stands in `terminal` in its place: the
+        /// host's next screen goes on from the status it sent the screen. The
+        /// retained set keeps it across connections beside `replica`
+        /// (`ReplicaSet::Held::screenStatus`).
+        std::optional<OSC::ProgramStatusStore> screenStatus;
         std::vector<InputDiscarded> discards;
         /// The stream bytes the host sent the pane.
         std::uint64_t bytesReceived = 0;
@@ -3986,6 +3996,19 @@ private:
     ///   - pane: The pane.
     ///   - reset: The new epoch and where it starts.
     void purgeHistory(PaneReplica& pane, const HistoryReset& reset);
+
+    /// Stands a pane's whole status set in its terminal, for a view the host
+    /// sends no screen: the set is then the pane's status, as the screen's
+    /// records are while it is live. The screen's are kept to put back.
+    ///
+    /// - Parameter pane: The pane, whose `status` is whole.
+    void standStatusSetInTerminal(PaneReplica& pane);
+
+    /// Puts back the status the screen last carried, for a pane live again.
+    ///
+    /// - Parameter pane: The pane.
+    /// - Returns: Whether its terminal's status changed.
+    [[nodiscard]] bool restoreScreenStatus(PaneReplica& pane);
 
     /// Applies a reassembled checkpoint, then the updates buffered behind it.
     ///

@@ -33,6 +33,34 @@ bool isSendable(const InputIntent& intent)
     return false;
 }
 
+/// A held picture as its `replica` describes it, for as long as this lives:
+/// a status set standing in it for a view that is not live is set aside, and
+/// stands again when this ends. What is checkpointed or compared against the
+/// replica is then the screen the host diffs from.
+class ScreenPicture {
+public:
+    explicit ScreenPicture(ReplicaSet::Held& held)
+        : m_held(held)
+    {
+        exchangeStatus();
+    }
+    ~ScreenPicture() { exchangeStatus(); }
+    ScreenPicture(const ScreenPicture&) = delete;
+    ScreenPicture& operator=(const ScreenPicture&) = delete;
+
+    /// The picture.
+    [[nodiscard]] const Ubiquitty::Terminal& terminal() const { return *m_held.picture(); }
+
+private:
+    void exchangeStatus()
+    {
+        if (m_held.screenStatus)
+            std::swap(m_held.picture()->programStatus, *m_held.screenStatus);
+    }
+
+    ReplicaSet::Held& m_held;
+};
+
 } // namespace
 
 ClientAttachment::ClientAttachment(const ClientPolicy& policy, const LivenessPolicy& liveness, ClientIdentity identity, ClientPaneDelegate* delegate, ResumeRecordStore* store, ClientWelcomeSink* identitySink)
@@ -369,13 +397,16 @@ void ClientAttachment::writeRecord(std::optional<std::pair<ID128, EffectReceiptS
         if (pane.hasEnded)
             continue;
         ResumeRecordPane stored { .paneID = pane.paneID, .lastInputSeq = pane.lastInputSeq, .view = pane.view, .checkpoint = {}, .checkpointDigest = {}, .replica = {}, .effects = receipt && receipt->first == pane.paneID ? receipt->second : m_replicas.effectReceipt(pane.paneID) };
-        const ReplicaSet::Held* held = m_replicas.find(pane.paneID);
+        ReplicaSet::Held* held = m_replicas.find(pane.paneID);
         if (held && pane.pictureWithheldAt && held->replica.generation > *pane.pictureWithheldAt)
             pane.pictureWithheldAt.reset();
         if (held && held->hasCheckpoint && !pane.pictureWithheldAt) {
+            // The record keeps the screen `replica` describes, which a resume
+            // from it continues; a status set standing in it is not kept.
+            const ScreenPicture picture(*held);
             ScreenPublisher publisher;
             AttachmentBaseline baseline;
-            if (publisher.capture(*held->picture()) && publisher.checkpoint(*held->picture(), held->replica.generation, stored.checkpoint, baseline)) {
+            if (publisher.capture(picture.terminal()) && publisher.checkpoint(picture.terminal(), held->replica.generation, stored.checkpoint, baseline)) {
                 stored.checkpointDigest = digestOf(stored.checkpoint);
                 stored.replica = held->replica;
                 stored.replica.scratch.reset();
@@ -509,8 +540,13 @@ ClientConnection& ClientAttachment::connect(std::uint64_t now, ResumeCarrier car
                 m_replicas.forget(pane.paneID);
             // A lent terminal is its owner's to write to between connections,
             // and nothing obliges the owner to say it did: the terminal is
-            // read, and what no longer describes it is forgotten.
-            if (const ReplicaSet::Held* kept = m_replicas.find(pane.paneID); kept && kept->lentTerminal && kept->hasCheckpoint && !isPictureOf(pane.restoredPictureDigest.value_or(replicaDigest(kept->replica)), *kept->lentTerminal))
+            // read, and what no longer describes it is forgotten. It is read
+            // as the replica describes it, a status set standing in it aside.
+            const auto describes = [](ReplicaSet::Held& kept, Digest128 digest) {
+                const ScreenPicture picture(kept);
+                return isPictureOf(digest, picture.terminal());
+            };
+            if (ReplicaSet::Held* kept = m_replicas.find(pane.paneID); kept && kept->lentTerminal && kept->hasCheckpoint && !describes(*kept, pane.restoredPictureDigest.value_or(replicaDigest(kept->replica))))
                 m_replicas.forget(pane.paneID);
             pane.restoredPictureDigest.reset();
             // A replica that never took a checkpoint describes nothing: the

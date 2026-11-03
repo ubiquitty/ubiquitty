@@ -17,6 +17,7 @@
 #include "Core/Runtime/DrainPass.h"
 #include "Core/Screen/Addressing.h"
 #include "Core/Screen/Scrollback.h"
+#include "Core/Session/ShellForeground.h"
 #include "Core/Session/WalkedProcessFacts.h"
 #include "Core/Tek/Tek4014.h"
 #include "Core/Title/ProcessIcons.h"
@@ -657,8 +658,7 @@ void TerminalRuntime::finishDrainPass(DrainHost& host, DrainOutcome& outcome)
     const bool shouldProbeFacts = !outcome.reachedEnd && shouldProbeForegroundFacts(probeTicks, outcome.caughtUp);
     if (shouldProbeFacts) {
         const bool wasForegroundShell = m_cachedForegroundIsShell;
-        m_cachedForegroundGroup = m_stream->process().foregroundProcessGroup().value_or(0);
-        m_cachedForegroundIsShell = m_stream->process().foregroundIsShell();
+        std::string probedName = probeForegroundHolder();
         const std::string sampledDirectory = m_stream->process().foregroundCurrentDirectory();
         if (m_term) {
             // The shell has the terminal back: where it marks no prompt,
@@ -690,7 +690,7 @@ void TerminalRuntime::finishDrainPass(DrainHost& host, DrainOutcome& outcome)
         // Outside the Terminal guard above: the process facts a title is made
         // of belong to the session, not to the grid, and a pane whose Terminal
         // has not been built still has a child worth naming.
-        sampleProcessState();
+        sampleProcessState(std::move(probedName));
         outcome.processStateChanged = m_didProcessStateMove;
         m_lastForegroundProbeTicks = probeTicks;
         m_foregroundProbeValid = true;
@@ -1541,6 +1541,35 @@ void TerminalRuntime::updatePaneHostFacts(Protocol::Sync::PaneHostFacts& facts) 
     facts.end = { .didEnd = end.didEnd, .hasStatus = end.hasStatus, .wasSignalled = end.wasSignalled, .code = end.code };
 }
 
+ForegroundProgram TerminalRuntime::foregroundProgram(std::uint8_t reportedProcessIcon) const
+{
+    ForegroundProgram program;
+    Title::TerminalHolder holder = Title::TerminalHolder::Shell;
+    {
+        const std::scoped_lock factsLock(m_processFactsMutex);
+        // Read under the lock: the end is marked before the facts are cleared
+        // under it, so a reader holding it sees either the end or the facts
+        // from before it.
+        if (m_sessionDidEnd.load(std::memory_order_acquire))
+            return {};
+        const auto resolve = [&](const std::string& sampled) { return sampled.empty() ? m_processState.launchSeed : sampled; };
+        program.name = resolve(m_processState.foregroundName);
+        program.chain = resolve(m_processState.processChain);
+        program.chainWithArguments = resolve(m_processState.processChainWithArguments);
+        holder = m_isSampledForegroundShell ? Title::TerminalHolder::Shell : Title::TerminalHolder::Program;
+    }
+    program.key = Title::processIconKeyFor(reportedProcessIcon, program.name, holder);
+    return program;
+}
+
+std::string TerminalRuntime::processIconKey(std::uint8_t reportedProcessIcon) const
+{
+    const std::scoped_lock factsLock(m_processFactsMutex);
+    const std::string& name = m_processState.foregroundName.empty() ? m_processState.launchSeed : m_processState.foregroundName;
+    const auto holder = m_isSampledForegroundShell ? Title::TerminalHolder::Shell : Title::TerminalHolder::Program;
+    return std::string(Title::processIconKeyFor(reportedProcessIcon, name, holder));
+}
+
 std::string TerminalRuntime::ttyName() const
 {
     // The walk's answer when there is one: it names the tty the PTY's session
@@ -1649,8 +1678,7 @@ DrainOutcome TerminalRuntime::sampleProcessStateOffDrain(DrainHost& host)
         return outcome;
     }
     const bool wasForegroundShell = m_cachedForegroundIsShell;
-    m_cachedForegroundGroup = m_stream->process().foregroundProcessGroup().value_or(0);
-    m_cachedForegroundIsShell = m_stream->process().foregroundIsShell();
+    std::string probedName = probeForegroundHolder();
     const std::string directory = m_stream->process().foregroundCurrentDirectory();
     host.lockModel();
     if (m_term) {
@@ -1689,7 +1717,7 @@ DrainOutcome TerminalRuntime::sampleProcessStateOffDrain(DrainHost& host)
     if (outcome.currentDirectoryChanged) {
         emit(EventKind::DirectoryChanged);
     }
-    sampleProcessState();
+    sampleProcessState(std::move(probedName));
     outcome.processStateChanged = outcome.processStateChanged || m_didProcessStateMove;
     m_lastForegroundProbeTicks = PAL::monotonicTicks();
     m_foregroundProbeValid = true;
@@ -1725,7 +1753,21 @@ DrainOutcome TerminalRuntime::sampleCurrentDirectoryOffDrain(DrainHost& host)
     return outcome;
 }
 
-void TerminalRuntime::sampleProcessState()
+std::string TerminalRuntime::probeForegroundHolder()
+{
+    m_cachedForegroundGroup = m_stream->process().foregroundProcessGroup().value_or(0);
+    // The name is read for a sample, which a session nobody observes does not
+    // take; a probe for its mouse guard reads the holder alone.
+    if (!m_processTree->isObserved.load(std::memory_order_acquire)) {
+        m_cachedForegroundIsShell = m_stream->process().foregroundIsShell();
+        return {};
+    }
+    PAL::ForegroundHolder holder = m_stream->process().foregroundHolder();
+    m_cachedForegroundIsShell = holder.isShell;
+    return std::move(holder.name);
+}
+
+void TerminalRuntime::sampleProcessState(std::string probedName)
 {
     // Cleared first so the flag always describes this sample. A session with
     // no stream takes the early return, and a held `true` from the sample
@@ -1745,18 +1787,42 @@ void TerminalRuntime::sampleProcessState()
     bool didWalk = false;
     std::string nextShellCommandName = m_shellCommandName;
     std::string nextLeaderTTYName = m_leaderTTYName;
-    std::string foregroundName = m_stream->process().foregroundName();
     // A just-forked child still reads as this application's own image until
     // it execs the shell. Naming the window after the terminal for that
     // window is worse than naming it nothing.
-    if (foregroundName == PAL::Process::hostProcessName())
-        foregroundName.clear();
+    const auto withoutHostName = [](std::string name) {
+        if (name == PAL::Process::hostProcessName())
+            name.clear();
+        return name;
+    };
+    const auto readHolder = [&] {
+        PAL::ForegroundHolder holder = m_stream->process().foregroundHolder();
+        holder.name = withoutHostName(std::move(holder.name));
+        return holder;
+    };
+    // The probe read the group, then the holder and its name from one reading
+    // of the owner; the reading is settled against the one after it, so a
+    // foreground that moved, or a name read in the moment a program execs, is
+    // read again rather than published (`Session::settleForegroundReading`). A
+    // reading equal to the last settled sample publishes nothing new, and is
+    // not read again; one still moving is published unsettled, and the next
+    // sample reads it again. One that names nothing publishes the last
+    // published name beside the holder it read (`Session::holdUnnamedReading`).
+    std::string firstName = withoutHostName(std::move(probedName));
+    const bool isPublishedReading = m_isForegroundSampleSettled && firstName == m_cachedForegroundName && m_cachedForegroundIsShell == m_isSampledForegroundShell;
+    Session::ForegroundReading reading = Session::settleForegroundReading(m_stream->process(),
+        { .name = std::move(firstName), .processGroup = m_cachedForegroundGroup, .isShell = m_cachedForegroundIsShell, .isSettled = isPublishedReading }, readHolder);
+    Session::holdUnnamedReading(reading, m_cachedForegroundName);
+    m_isForegroundSampleSettled = reading.isSettled;
+    std::string foregroundName = std::move(reading.name);
+    const int foregroundGroup = reading.processGroup;
+    const bool isForegroundShell = reading.isShell;
     const bool didNameChange = foregroundName != m_cachedForegroundName;
     m_cachedForegroundName = foregroundName;
 
     Session::ProcessEvent event;
     event.kind = Session::ProcessEventKind::PollResult;
-    event.foregroundProcessGroup = static_cast<std::uint32_t>(m_cachedForegroundGroup);
+    event.foregroundProcessGroup = static_cast<std::uint32_t>(foregroundGroup);
     event.foregroundName = foregroundName;
     event.currentDirectory = m_cachedForegroundDirectory;
     event.processChain = m_processState.processChain;
@@ -1842,9 +1908,12 @@ void TerminalRuntime::sampleProcessState()
         // Who holds the terminal is a fact of its own: the close button's
         // marker reads it from here, and a shell that takes the terminal back
         // without the walk seeing any process come or go must still redraw it.
-        const bool didForegroundOwnerMove = m_cachedForegroundIsShell != m_isSampledForegroundShell;
-        m_isSampledForegroundShell = m_cachedForegroundIsShell;
-        m_didProcessStateMove = didChainMove || didForegroundOwnerMove || nextShellCommandName != m_shellCommandName;
+        const bool didForegroundOwnerMove = isForegroundShell != m_isSampledForegroundShell;
+        m_isSampledForegroundShell = isForegroundShell;
+        // The name is a fact of its own as well: a program's name and key
+        // are read beside this edge, and a job that came and went between
+        // two reads moves the name alone, and then moves it back.
+        m_didProcessStateMove = didChainMove || didForegroundOwnerMove || didNameChange || nextShellCommandName != m_shellCommandName;
         m_shellCommandName = std::move(nextShellCommandName);
         m_leaderTTYName = std::move(nextLeaderTTYName);
         if (didWalk) {
@@ -1862,7 +1931,7 @@ void TerminalRuntime::sampleProcessState()
     // A takeover's first re-send goes out with the sample that saw it; the
     // ingest loop's tick sends the rest.
     const std::uint32_t nowMicros = PAL::monotonicMicros();
-    m_windowSizeReassert.noteSample({ .processGroup = event.foregroundProcessGroup, .isShell = m_cachedForegroundIsShell }, nowMicros);
+    m_windowSizeReassert.noteSample({ .processGroup = event.foregroundProcessGroup, .isShell = isForegroundShell }, nowMicros);
     reassertWindowSizeIfDue(nowMicros);
 }
 

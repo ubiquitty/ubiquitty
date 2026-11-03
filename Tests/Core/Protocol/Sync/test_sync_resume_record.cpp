@@ -15,6 +15,7 @@
 #include "ScreenPlaneFixture.h"
 #include "SyncLink.h"
 
+#include "Core/OSC/Activity.h"
 #include "Core/Protocol/Sync/Attachment.h"
 #include "Core/Protocol/Sync/ClientAttachment.h"
 #include "Core/Protocol/Sync/Connection.h"
@@ -172,6 +173,26 @@ void hostWrites(Host& host, std::string_view bytes, std::uint64_t now)
     UbiquittyTest::feed(host.pane.terminal, bytes);
     host.pane.source->publish(FrameClass::Settled, now);
 }
+
+/// The host's program posts a status record, and the host publishes the
+/// screen that carries it and the records a hidden pane is sent.
+void hostPosts(Host& host, std::string_view record, std::uint64_t now)
+{
+    UbiquittyTest::feed(host.pane.terminal, record);
+    host.pane.source->noteTerminalChanged();
+    host.pane.source->setStatus(statusRecordsOf(host.pane.terminal));
+    host.pane.source->publish(FrameClass::Settled, now);
+}
+
+/// The state a terminal's primary status record shows.
+Ubiquitty::OSC::ProgramState shownState(const Ubiquitty::Terminal& terminal)
+{
+    const Ubiquitty::OSC::ProgramStatus* primary = terminal.programStatus.primary();
+    return primary ? primary->state : Ubiquitty::OSC::ProgramState::None;
+}
+
+constexpr std::string_view postsWorking = "\033]7501;id=job:state=working\033\\";
+constexpr std::string_view postsBlocked = "\033]7501;id=job:state=blocked:kind=question\033\\";
 
 /// A stable representation of a terminal for before/after refusal checks.
 std::vector<std::uint8_t> pictureOf(const Ubiquitty::Terminal& terminal)
@@ -1540,6 +1561,124 @@ TEST(aKillAndRelaunchDrawsThePersistedPictureFirstAndResumesDiffed)
     hostWrites(host, "and after\r\n", now);
     pumpFor(host, second, now, 100'000);
     CHECK_STR_EQ(UbiquittyTest::firstDisagreement(host.pane.terminal, *drawn), "");
+    CHECK_EQ(second.connection()->counters().checkpointsApplied, 0u);
+}
+
+// A hidden pane's status set stands in its picture, while what is known of the
+// picture is the screen the host diffs from. The two carry across a dropped
+// connection together: resumed hidden and then shown, or shown while no
+// connection carried it, the pane holds the status of the screen the host
+// goes on from, so a host whose status went back to it while the pane was
+// hidden is shown as it is, with no checkpoint.
+TEST(aStatusSetStandingInAHiddenPictureGivesWayToTheScreenAcrossAResume)
+{
+    for (const bool isShownWhileAway : { false, true }) {
+        Host host({ 41, 42 });
+        ClientAttachment client(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity());
+        std::uint64_t now = 1;
+        attachFresh(host, client, now);
+        hostPosts(host, postsWorking, now);
+        pumpFor(host, client, now, 100'000);
+        const Ubiquitty::Terminal* picture = client.paneTerminal(paneID);
+        REQUIRE(picture != nullptr);
+        CHECK(shownState(*picture) == Ubiquitty::OSC::ProgramState::Working);
+        client.setView(paneID, ViewState::Dormant);
+        pumpFor(host, client, now, 50'000);
+        hostPosts(host, postsBlocked, now);
+        pumpFor(host, client, now, 100'000);
+        CHECK(shownState(*picture) == Ubiquitty::OSC::ProgramState::Blocked);
+
+        drop(host, client, now);
+        if (isShownWhileAway)
+            client.setView(paneID, ViewState::Live);
+        hostPosts(host, postsWorking, now);
+        reconnect(host, client, now);
+        REQUIRE(client.connection() && client.connection()->welcome());
+        REQUIRE(client.connection()->welcome()->resumed.size() == 1);
+        CHECK(client.connection()->welcome()->resumed[0].outcome == ResumeOutcome::Diffed);
+        CHECK(client.paneTerminal(paneID) == picture);
+        client.setView(paneID, ViewState::Live);
+        pumpFor(host, client, now, 200'000);
+        CHECK_MSG(shownState(*picture) == Ubiquitty::OSC::ProgramState::Working, isShownWhileAway ? "shown while away" : "resumed hidden, then shown");
+        CHECK(picture->programStatus == host.pane.terminal.programStatus);
+        CHECK_EQ(client.connection()->counters().checkpointsApplied, 0u);
+    }
+}
+
+// The same for a picture drawn into the frontend's own terminal, which a
+// resume reads to see that it still is what the replica describes: read as
+// the screen left it, the status set standing in it aside, it still is, and
+// the host continues it with a diff.
+TEST(aStatusSetStandingInALentPictureLeavesItResumable)
+{
+    struct Frontend final : ClientPaneDelegate {
+        Ubiquitty::Terminal terminal;
+        Ubiquitty::Terminal* terminalForPane(ID128 id) override { return id == paneID ? &terminal : nullptr; }
+    } frontend;
+    Host host({ 41, 42 });
+    ClientAttachment client(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), &frontend);
+    std::uint64_t now = 1;
+    attachFresh(host, client, now);
+    REQUIRE(client.paneTerminal(paneID) == &frontend.terminal);
+    hostPosts(host, postsWorking, now);
+    pumpFor(host, client, now, 100'000);
+    client.setView(paneID, ViewState::Dormant);
+    pumpFor(host, client, now, 50'000);
+    hostPosts(host, postsBlocked, now);
+    pumpFor(host, client, now, 100'000);
+    CHECK(shownState(frontend.terminal) == Ubiquitty::OSC::ProgramState::Blocked);
+
+    drop(host, client, now);
+    hostPosts(host, postsWorking, now);
+    reconnect(host, client, now);
+    REQUIRE(client.connection() && client.connection()->welcome());
+    REQUIRE(client.connection()->welcome()->resumed.size() == 1);
+    CHECK(client.connection()->welcome()->resumed[0].outcome == ResumeOutcome::Diffed);
+    client.setView(paneID, ViewState::Live);
+    pumpFor(host, client, now, 200'000);
+    CHECK(frontend.terminal.programStatus == host.pane.terminal.programStatus);
+    CHECK_EQ(client.connection()->counters().checkpointsApplied, 0u);
+}
+
+// A record written while a status set stands in a hidden pane's picture keeps
+// the screen the replica describes, so a relaunch that resumes from it is
+// shown the status the host goes on from.
+TEST(aRecordKeepsTheScreensStatusNotTheSetStandingInIt)
+{
+    Host host({ 41, 42 });
+    ObservedStore store;
+    std::uint64_t now = 1;
+    {
+        ClientAttachment first(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), nullptr, &store);
+        attachFresh(host, first, now);
+        hostPosts(host, postsWorking, now);
+        pumpFor(host, first, now, 100'000);
+        first.setView(paneID, ViewState::Dormant);
+        pumpFor(host, first, now, 50'000);
+        hostPosts(host, postsBlocked, now);
+        pumpFor(host, first, now, 100'000);
+        REQUIRE(first.paneTerminal(paneID) != nullptr);
+        CHECK(shownState(*first.paneTerminal(paneID)) == Ubiquitty::OSC::ProgramState::Blocked);
+        first.persist();
+        // The set still stands once the record is written.
+        CHECK(shownState(*first.paneTerminal(paneID)) == Ubiquitty::OSC::ProgramState::Blocked);
+        host.lose(now);
+    }
+    REQUIRE(store.record.has_value());
+    hostPosts(host, postsWorking, now);
+
+    ClientAttachment second(UbiquittyTest::syncClientPolicy, measuredLivenessPolicy(), clientIdentity(), nullptr, &store);
+    REQUIRE(second.restoreFromStore());
+    const Ubiquitty::Terminal* drawn = second.paneTerminal(paneID);
+    REQUIRE(drawn != nullptr);
+    CHECK(shownState(*drawn) == Ubiquitty::OSC::ProgramState::Working);
+    reconnect(host, second, now);
+    REQUIRE(second.connection() && second.connection()->welcome());
+    REQUIRE(second.connection()->welcome()->resumed.size() == 1);
+    CHECK(second.connection()->welcome()->resumed[0].outcome == ResumeOutcome::Diffed);
+    second.setView(paneID, ViewState::Live);
+    pumpFor(host, second, now, 200'000);
+    CHECK(drawn->programStatus == host.pane.terminal.programStatus);
     CHECK_EQ(second.connection()->counters().checkpointsApplied, 0u);
 }
 

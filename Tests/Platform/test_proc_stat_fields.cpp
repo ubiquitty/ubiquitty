@@ -131,6 +131,17 @@ TEST(theIgnoredInterruptIsBitOneOfSigIgn)
     CHECK(!parseStatusIgnoresInterrupt("Name:\tsleep\nSigIgn:\tzz\n").has_value());
 }
 
+TEST(theThreadCountIsReadFromStatus)
+{
+    // A process whose first thread ended reads Z with its others running on;
+    // the count is what tells it from one that has ended.
+    using Ubiquitty::PAL::parseStatusThreadCount;
+    CHECK(parseStatusThreadCount("Name:\tthreadexit\nState:\tZ (zombie)\nTgid:\t37\nThreads:\t2\nSigQ:\t0/1\n") == std::optional<std::uint32_t> { 2 });
+    CHECK(parseStatusThreadCount("Name:\tsleep\nState:\tZ (zombie)\nThreads:\t1\n") == std::optional<std::uint32_t> { 1 });
+    CHECK(!parseStatusThreadCount("Name:\tsleep\nState:\tS (sleeping)\n").has_value());
+    CHECK(!parseStatusThreadCount("Name:\tsleep\nThreads:\t-\n").has_value());
+}
+
 TEST(processBirthTicksAreExactAndIgnoreParenthesesInNames)
 {
     using Ubiquitty::PAL::parseProcStatBirthTicks;

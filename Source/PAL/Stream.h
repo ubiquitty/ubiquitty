@@ -95,6 +95,16 @@ struct LineDiscipline {
     friend bool operator==(const LineDiscipline&, const LineDiscipline&) = default;
 };
 
+/// Who holds a terminal and what it is named, from one reading of its
+/// foreground group.
+struct ForegroundHolder {
+    /// Whether the shell, rather than a job, holds the terminal.
+    bool isShell = true;
+    /// The name of what holds it: the program that makes a foreground job
+    /// one, or the shell for its own work. Empty when it could not be read.
+    std::string name;
+};
+
 // Foreground-process introspection over a session PTY. Lifetime == the Stream's.
 // Non-const: foregroundIsShell()/hasRunningChild() reap a dead child (mutating
 // the owning Stream's processID state), so this is a live handle, not a snapshot.
@@ -104,12 +114,24 @@ public:
     ProcessFacts(const ProcessFacts&) = delete;
     ProcessFacts& operator=(const ProcessFacts&) = delete;
 
-    // Foreground process's executable basename (a login shell keeps its "-zsh").
+    // The name of what holds the terminal, as foregroundIsShell answers who
+    // does: the program that makes a foreground job one, or the shell for its
+    // own work.
     virtual std::string foregroundName() = 0;
     // Whether the shell, rather than a job, holds the terminal. A foreground
     // group that is the shell's own work, such as a prompt hook's subshell,
-    // reads as the shell; Session::isShellOwnedForegroundGroup draws that line.
+    // reads as the shell; Session::foregroundOwner draws that line.
     virtual bool foregroundIsShell() = 0;
+    /// Who holds the terminal and its name, as `foregroundIsShell` and
+    /// `foregroundName` answer them, from one reading of the foreground group,
+    /// so the name is always the holder's.
+    ///
+    /// - Returns: The holder.
+    virtual ForegroundHolder foregroundHolder()
+    {
+        const bool isShell = foregroundIsShell();
+        return { .isShell = isShell, .name = foregroundName() };
+    }
     // Cheap change-detector. Empty when no foreground group resolves; a held
     // value is always a live group, so callers test only for presence. Optional
     // rather than a sentinel because every consumer stores the group as an

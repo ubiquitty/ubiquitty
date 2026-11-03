@@ -40,7 +40,10 @@ struct ForegroundSample {
 /// its own clock.
 ///
 /// A takeover is a sampled group that is neither zero nor the group already
-/// recorded. A takeover by the shell opens no window: a shell reads the size
+/// recorded, or the recorded group read again as a job after it read as the
+/// shell's: a fork that has not exec'd runs the shell's code, and the job it
+/// becomes in the same group is the takeover. A takeover by the shell opens no
+/// window: a shell reads the size
 /// itself as it draws its prompt, and bash redraws a multi-line prompt on every
 /// SIGWINCH, printing its upper lines again. Times are the runtime's 32-bit
 /// monotonic microseconds, compared by unsigned difference so a wrap inside the
@@ -54,9 +57,13 @@ public:
     ///   - nowMicros: When it was read.
     void noteSample(ForegroundSample sample, std::uint32_t nowMicros)
     {
-        if (sample.processGroup == 0 || sample.processGroup == m_foregroundProcessGroup)
+        if (sample.processGroup == 0)
+            return;
+        const bool isSameGroup = sample.processGroup == m_foregroundProcessGroup;
+        if (isSameGroup && !(m_isRecordedShell && !sample.isShell))
             return;
         m_foregroundProcessGroup = sample.processGroup;
+        m_isRecordedShell = sample.isShell;
         m_isReasserting = !sample.isShell;
         m_takeoverMicros = nowMicros;
         m_hasSent = false;
@@ -106,6 +113,7 @@ private:
     std::uint32_t m_foregroundProcessGroup = 0;
     std::uint32_t m_takeoverMicros = 0;
     std::uint32_t m_sentMicros = 0;
+    bool m_isRecordedShell = false;
     bool m_isReasserting = false;
     bool m_hasSent = false;
 };

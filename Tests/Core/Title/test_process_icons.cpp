@@ -11,6 +11,7 @@
 #include "Core/OSC/Activity.h"
 #include "Core/Title/ProcessIcons.h"
 
+#include <cstdint>
 #include <set>
 #include <string>
 #include <string_view>
@@ -84,17 +85,16 @@ TEST(aRecordThatOutlivesItsProgramNamesNoOneOnceTheShellIsBack)
     CHECK(keyFor(store, "codex", TerminalHolder::Shell) == "codex");
 }
 
-TEST(aHostedPanesShellIsKnownByItsName)
+TEST(aPublishedOrdinalKeysTheProgramAsItsRecordWould)
 {
-    using Ubiquitty::Title::isForegroundTheShell;
-    CHECK(isForegroundTheShell("zsh", "zsh"));
-    CHECK(isForegroundTheShell("-zsh", "zsh"));
-    CHECK(isForegroundTheShell("zsh", "/bin/zsh"));
-    CHECK(isForegroundTheShell("-bash", "/usr/local/bin/bash"));
-    CHECK(!isForegroundTheShell("claude", "zsh"));
-    CHECK(!isForegroundTheShell("", "zsh"));
-    CHECK(!isForegroundTheShell("zsh", ""));
-    CHECK(!isForegroundTheShell("-", "-"));
+    using Ubiquitty::Title::processIconKeyFor;
+    using Ubiquitty::Title::processIconOrdinal;
+    const std::uint8_t codex = processIconOrdinal(processIconWithKey("codex"));
+    CHECK(processIconKeyFor(codex, "node", TerminalHolder::Program) == "codex");
+    CHECK(processIconKeyFor(codex, "bash", TerminalHolder::Shell).empty());
+    CHECK(processIconKeyFor(codex, "claude", TerminalHolder::Shell) == "claude-code");
+    CHECK(processIconKeyFor(0, "claude", TerminalHolder::Program) == "claude-code");
+    CHECK(processIconKeyFor(0, "", TerminalHolder::Program).empty());
 }
 
 TEST(aRecordNamingNoCatalogedProgramLeavesItToTheProcess)

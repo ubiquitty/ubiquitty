@@ -734,8 +734,9 @@ private:
         // twin): the records reuse the cached foreground answer between
         // probes, re-probing when the cheap foregroundProcessGroup() sample moves,
         // when the budget elapses, or while the last probe was unsettled (no real
-        // foreground resolved yet — the pre-exec window), so an early empty answer
-        // never pins for a full budget window.
+        // foreground resolved yet — the pre-exec window — or one moving around
+        // its name), so an early empty or torn answer never pins for a full
+        // budget window.
         std::uint64_t lastForegroundProbeMilliseconds = 0;
         int lastForegroundProbeGroup = 0; // PAL::ProcessID (Stream.h is not included here)
         bool foregroundProbeSettled = false;

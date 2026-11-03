@@ -48,6 +48,7 @@
 #include "Core/Themes/Themes.h"
 #include "Core/Title/Directory.h"
 #include "Core/Title/Format.h"
+#include "Core/Title/ProcessIcons.h"
 #include "Core/Transport/Channel.h"
 #include "PAL/Stream.h"
 #include "Platform/Linux/PaneViewport.h"
@@ -2477,6 +2478,67 @@ TEST(anEmbedderFactoryIsTheOneTheSessionAsks)
     CHECK_MSG(attached, "the delegated attach did not start");
     CHECK_MSG(session->isRemoteAttached(), "the session is not a thin client after attaching");
     CHECK_MSG(factory.createCount > 0, "the session built a carrier without asking the embedder's factory");
+
+    releaseTerminalSession(session);
+}
+
+// A hosted pane names its program from the host's record, and the host's own
+// sample of who holds the terminal decides whether a status record keys it:
+// names alone cannot tell a nested shell running a script from the shell at
+// its prompt. Once the host says the session ended, nothing is named, whether
+// or not its last facts arrived first.
+TEST(aHostedPaneNamesItsProgramFromTheHostsSample)
+{
+    namespace Sync = Ubiquitty::Protocol::Sync;
+    using Ubiquitty::Runtime::EventKind;
+    using Ubiquitty::Runtime::ForegroundProgram;
+    TerminalSession* session = makeStartedSession();
+    if (session == nullptr)
+        return;
+    CountingFactory factory;
+    REQUIRE(session->attachRemoteOverCarrier(reinterpret_cast<std::uintptr_t>(static_cast<Ubiquitty::Session::ChannelFactory*>(&factory)), 0, queueingLoop()));
+    const std::uint8_t codex = Ubiquitty::Title::processIconOrdinal(Ubiquitty::Title::processIconWithKey("codex"));
+    constexpr auto processChanged = 1u << static_cast<unsigned>(EventKind::ProcessStateChanged);
+
+    // The screen can land before the host's facts: its record keys nothing yet.
+    CHECK(session->processIconKey(codex).empty());
+    CHECK(session->foregroundProgram(codex).name.empty());
+
+    Sync::PaneFacts facts;
+    facts.revision = 1;
+    facts.foreground.name = "bash";
+    facts.shellCommandName = "bash";
+    facts.processChain = "bash ◂ -bash";
+    facts.processChainWithArguments = "bash deploy.sh ◂ -bash";
+    facts.isAtPrompt = false;
+    session->applyRemoteTitlePartsForTest(facts);
+    const ForegroundProgram script = session->foregroundProgram(codex);
+    CHECK_STR_EQ(script.name, "bash");
+    CHECK_STR_EQ(script.key, "codex");
+    CHECK_STR_EQ(script.chain, "bash ◂ -bash");
+    CHECK_STR_EQ(script.chainWithArguments, "bash deploy.sh ◂ -bash");
+    CHECK_STR_EQ(session->processIconKey(codex), "codex");
+
+    // The host's shell has the terminal back: only who holds it moved.
+    (void)session->takeEventFlags();
+    facts.revision = 2;
+    facts.isAtPrompt = true;
+    session->applyRemoteTitlePartsForTest(facts);
+    CHECK((session->takeEventFlags() & processChanged) != 0);
+    CHECK(session->processIconKey(codex).empty());
+    CHECK(session->foregroundProgram(codex).key.empty());
+
+    // A host that never resolved its shell's name still says who holds it.
+    facts.revision = 3;
+    facts.shellCommandName.clear();
+    session->applyRemoteTitlePartsForTest(facts);
+    CHECK(session->processIconKey(codex).empty());
+
+    // The end arrives ahead of the facts that would clear the names.
+    session->noteHostedSessionEndedForTest();
+    CHECK((session->takeEventFlags() & (1u << static_cast<unsigned>(EventKind::Exited))) != 0);
+    const ForegroundProgram ended = session->foregroundProgram(codex);
+    CHECK(ended.name.empty() && ended.key.empty() && ended.chain.empty() && ended.chainWithArguments.empty());
 
     releaseTerminalSession(session);
 }

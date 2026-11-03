@@ -290,6 +290,73 @@ extension TerminalSurface {
     }
 }
 
+extension TerminalSurface {
+    /// What the program in a pane says about itself, as a host drawing its own
+    /// tabs shows it beside the program's name and icon.
+    ///
+    /// A Kit value carrying Core's published status across the module wall,
+    /// for the reason ``BellReaction`` is one; every field is Core's decision.
+    /// The kind, the label and the colour come from the pane's primary OSC 7501
+    /// record, the colour under the pane's theme; with no record, the colour
+    /// and the label are an OSC 21337 tab status the program set. The program
+    /// a record names reaches a host as ``TerminalSurface/foregroundProgramKey``.
+    public struct ProgramStatus: Sendable, Equatable {
+        /// What a program reports it is doing, numbered as Core's `App::StatusKind`.
+        public enum Kind: UInt8, Sendable {
+            case idle = 1
+            case running = 2
+            case working = 3
+            case done = 4
+            case attention = 5
+            case blocked = 6
+            case failed = 7
+        }
+
+        /// What a blocked program waits for, numbered as Core's `OSC::ProgramBlockKind`.
+        public enum BlockKind: UInt8, Sendable {
+            case permission = 1
+            case question = 2
+            case authentication = 3
+        }
+
+        /// The theme status a colour stands for, numbered as Core's
+        /// `Themes::StatusColorSlot`, so a host with a palette of its own
+        /// colours the status the way it colours that status elsewhere.
+        public enum ColorSlot: UInt8, Sendable {
+            case failed = 0
+            case blocked = 1
+            case attention = 2
+            case done = 3
+            case working = 4
+            case neutral = 5
+            case progress = 6
+        }
+
+        /// An sRGB colour, one byte a channel.
+        public struct Color: Sendable, Equatable {
+            public let red: UInt8
+            public let green: UInt8
+            public let blue: UInt8
+        }
+
+        /// The primary record's kind; nil when no program has posted a record.
+        public let kind: Kind?
+        /// What a blocked program waits for; nil unless ``kind`` is ``Kind/blocked``.
+        public let blockKind: BlockKind?
+        /// A working program's percent, 0 through 100; nil when it reports
+        /// none, or is not working.
+        public let progress: Int?
+        /// The status in words, such as `codex: Waiting for input`; empty when
+        /// there is none. The first words of a longer text, at most 48 bytes.
+        public let label: String
+        /// The colour to draw the status in; nil when none is set.
+        public let color: Color?
+        /// The theme status ``color`` stands for; nil when the program chose
+        /// the colour itself, and when none is set.
+        public let colorSlot: ColorSlot?
+    }
+}
+
 public protocol TerminalSurfaceObserver: AnyObject {
     /// Resolves the pane displaying the surface in its current host arrangement.
     ///
@@ -298,6 +365,13 @@ public protocol TerminalSurfaceObserver: AnyObject {
     func terminalSurfacePaneIdentifier(_ surface: TerminalSurface) -> Int?
 
     /// Reports whether a displayed title consumes sampled process facts.
+    ///
+    /// Asked when the surface's presentation moves and whenever an observer
+    /// is assigned, so assigning the same one again asks again. While it
+    /// answers true a local session samples its processes, and
+    /// ``terminalSurfaceDidChangeProcessState(_:)`` fires whether or not the
+    /// surface is in a window: the answer for a host that draws a tab for a
+    /// surface it keeps out of the window.
     ///
     /// - Parameter surface: The pane whose metadata would be sampled.
     /// - Returns: Whether any displayed title needs process facts.
@@ -328,9 +402,18 @@ public protocol TerminalSurfaceObserver: AnyObject {
     /// session-leader shell resolved for the first time.
     ///
     /// The facts are read beside this rather than carried in it, the shape
-    /// every list-valued report takes here: ``RuntimeDrive/processChain`` and
-    /// the properties next to it. A title woven from those segments has no
-    /// other edge to redraw on.
+    /// every list-valued report takes here:
+    /// ``TerminalSurface/foregroundProgramName``,
+    /// ``TerminalSurface/foregroundProgramKey``,
+    /// ``TerminalSurface/foregroundProcessChain``, and
+    /// ``TerminalSurface/foregroundProcessChainWithArguments``, each current
+    /// when this fires and read inside it from one sample. A title woven from
+    /// those segments has no other edge to redraw on.
+    ///
+    /// Fires while the surface's window shows its title, and while
+    /// ``terminalSurfaceNeedsProcessState(_:)`` answers true, in a window or
+    /// out of one. A surface that has never been in a window counts as shown.
+    /// Otherwise the move is held and fires once either holds again.
     ///
     /// - Parameter surface: The surface whose process sample moved.
     func terminalSurfaceDidChangeProcessState(_ surface: TerminalSurface)
@@ -551,14 +634,22 @@ public protocol TerminalSurfaceObserver: AnyObject {
     /// - Parameter surface: The surface whose search status changed.
     func terminalSurfaceDidChangeSearch(_ surface: TerminalSurface)
 
-    /// The session's own tab status colour moved (OSC 21337).
+    /// The program's status moved: its OSC 7501 record, or the session's own
+    /// tab status colour (OSC 21337).
     ///
     /// Its own callback for the reason the progress report has one, and one
     /// sharper: the escape exists to speak for a session nobody is looking at,
     /// so a host that heard about it only on the next screen update would show
-    /// "waiting" at the moment the waiting ended.
+    /// "waiting" at the moment the waiting ended. Never held for a surface
+    /// nobody sees, for the same reason.
     ///
-    /// - Parameter surface: The surface whose colour moved.
+    /// The status is read beside this: ``TerminalSurface/programStatus`` is
+    /// current when this fires, and so is
+    /// ``TerminalSurface/foregroundProgramKey``, which a record can move; both
+    /// read inside it answer for one snapshot. A pane `ubiquitty-host` serves
+    /// that is not on screen hears its program's status as the host sends it.
+    ///
+    /// - Parameter surface: The surface whose status moved.
     func terminalSurfaceDidChangeTabStatus(_ surface: TerminalSurface)
 
     /// The selection changed — began, grew, cleared or was replaced.
@@ -1245,7 +1336,13 @@ private func surfaceDrainSignal(_ context: UInt) {
 /// the same title without the terminal knowing any of them exist.
 public final class TerminalSurface: PlatformView {
     /// Receives what the session reports. Held weakly: a host owns the surface.
-    public weak var observer: TerminalSurfaceObserver?
+    ///
+    /// Assigning one asks it at once whether it needs process facts, so a host
+    /// that observes a surface already on screen is not left waiting for the
+    /// next presentation edge to learn what the pane runs.
+    public weak var observer: TerminalSurfaceObserver? {
+        didSet { publishProcessStateObservation() }
+    }
     var lastSearchRevealGeneration: UInt64 = 0
     var lastSearchRevealEpoch: UInt32 = 0
 
@@ -1266,6 +1363,124 @@ public final class TerminalSurface: PlatformView {
     /// Readable at any time, as ``title`` is, so a host attaching late does
     /// not wait for the next `cd` to learn where the shell already is.
     public private(set) var currentDirectory: String = ""
+
+    /// The foreground process's own name, without its ancestors: `vim`, `claude`.
+    ///
+    /// Core's sample of the pane, so a host names the program without walking
+    /// the process table itself. A local session reads this machine's walk; a
+    /// pane `ubiquitty-host` serves reads the host's report of its own pane,
+    /// where the program runs.
+    ///
+    /// Current whenever
+    /// ``TerminalSurfaceObserver/terminalSurfaceDidChangeProcessState(_:)``
+    /// fires, and readable at any time. The callbacks of one delivery of what
+    /// the session reported (process state, tab status, title, screen update,
+    /// exit and the rest) read this, the other values that name the program
+    /// and ``programStatus`` from one sample; a read outside them takes the
+    /// newest. A local session samples only while the observer's
+    /// ``TerminalSurfaceObserver/terminalSurfaceNeedsProcessState(_:)``
+    /// answers true, and otherwise keeps its last sample; before the first one
+    /// it answers with the command it launched.
+    ///
+    /// Empty for a session that never launched, for one that has ended, and
+    /// for a hosted pane the host has not yet described.
+    public var foregroundProgramName: String { String(programSample.program.name) }
+
+    /// The program catalog's key for what the pane runs, such as `claude-code`
+    /// or `codex`, so a host chooses an icon without a catalog of its own.
+    ///
+    /// Core resolves it as a title's program icon is resolved: the program an
+    /// OSC 7501 status record names while a program holds the terminal, and
+    /// failing that ``foregroundProgramName``. The key is not the name: Claude
+    /// Code runs as `claude` and answers `claude-code`. Who holds the terminal
+    /// and the name come from one reading of the foreground, which is kept
+    /// when the reading after it finds the same group, holder and name, and
+    /// read again while they move, on this machine for a local session and on
+    /// the host for a hosted pane. A foreground still moving after three
+    /// readings is kept as last read until the next sample reads it again. A
+    /// sample that moves the name or the holder fires
+    /// ``TerminalSurfaceObserver/terminalSurfaceDidChangeProcessState(_:)``.
+    ///
+    /// Current whenever
+    /// ``TerminalSurfaceObserver/terminalSurfaceDidChangeProcessState(_:)``
+    /// fires. A status record can change it with no process moving, and that
+    /// arrives as ``TerminalSurfaceObserver/terminalSurfaceDidChangeTabStatus(_:)``.
+    ///
+    /// Nil when the catalog holds no entry for the program, as for a shell at
+    /// its prompt; for a session that has ended; and for a hosted pane the
+    /// host has not yet described, whatever status record its screen carries.
+    public var foregroundProgramKey: String? {
+        let key = String(programSample.program.key)
+        return key.isEmpty ? nil : key
+    }
+
+    /// The foreground process chain a title shows, such as `-zsh` at a prompt
+    /// or `vi ◂ claude` for an editor a program started.
+    ///
+    /// The same sample as ``foregroundProgramName``, from the same side of
+    /// the connection, current whenever
+    /// ``TerminalSurfaceObserver/terminalSurfaceDidChangeProcessState(_:)``
+    /// fires. Each program is named by its first argument, so a login shell
+    /// reads `-zsh` where the name reads `zsh`. A local session answers with
+    /// the command it launched until a walk resolves a chain.
+    ///
+    /// Empty in the same cases as ``foregroundProgramName``.
+    public var foregroundProcessChain: String { String(programSample.program.chain) }
+
+    /// ``foregroundProcessChain`` with each program's arguments, as a title
+    /// that shows arguments spells it.
+    ///
+    /// Current whenever
+    /// ``TerminalSurfaceObserver/terminalSurfaceDidChangeProcessState(_:)``
+    /// fires; empty in the same cases as the chain.
+    public var foregroundProcessChainWithArguments: String { String(programSample.program.chainWithArguments) }
+
+    /// What the pane's program says about itself; see ``ProgramStatus``.
+    ///
+    /// Current whenever
+    /// ``TerminalSurfaceObserver/terminalSurfaceDidChangeTabStatus(_:)`` fires,
+    /// and readable at any time; read inside the callbacks of one delivery, it
+    /// answers for the sample ``foregroundProgramKey`` does. A pane `ubiquitty-host` serves
+    /// carries the status its program posted on the host, shown or not.
+    public var programStatus: ProgramStatus {
+        let published = programSample.snapshot
+        let color = published.tabStatusColor(drive.statusColors())
+        return ProgramStatus(
+            kind: ProgramStatus.Kind(rawValue: published.programStatusKind),
+            blockKind: ProgramStatus.BlockKind(rawValue: published.programBlockKind),
+            progress: published.programProgress >= 0 ? Int(published.programProgress) : nil,
+            label: String(published.tabStatusLabel()),
+            color: color.isSet ? ProgramStatus.Color(red: color.red, green: color.green, blue: color.blue) : nil,
+            colorSlot: color.isSet ? ProgramStatus.ColorSlot(rawValue: published.tabStatusSlot) : nil
+        )
+    }
+
+    /// One snapshot and the program Core names from it.
+    private struct ProgramSample {
+        let snapshot: Ubiquitty.Runtime.RuntimeSnapshot
+        let program: Ubiquitty.Runtime.ForegroundProgram
+    }
+
+    /// The sample the callbacks of the delivery under way read, taken at the
+    /// first read inside it; nil before that read and outside a delivery.
+    private var deliveredProgramSample: ProgramSample?
+
+    /// Whether a delivery is under way, so the reads its callbacks make share
+    /// one sample.
+    private var isDeliveringProgramSample = false
+
+    /// The delivery's sample, or a fresh one for each read outside a delivery.
+    private var programSample: ProgramSample {
+        if let delivered = deliveredProgramSample {
+            return delivered
+        }
+        let snapshot = drive.readSnapshot()
+        let sample = ProgramSample(snapshot: snapshot, program: drive.foregroundProgram(snapshot))
+        if isDeliveringProgramSample {
+            deliveredProgramSample = sample
+        }
+        return sample
+    }
 
     /// The session this surface owns.
     ///
@@ -3805,8 +4020,28 @@ public final class TerminalSurface: PlatformView {
 
     private var deferredPresentationEvents: RuntimeEvents = []
     private var isMetadataPresented = true
+    /// The observer's last answer to whether it needs process facts, which
+    /// keeps the process-state callback live for a surface no window shows.
+    private var isProcessStateObserved = false
     private var processInspectors: Set<ObjectIdentifier> = []
     package var hasProcessInspector: Bool { !processInspectors.isEmpty }
+
+    /// Whether a process-state move reaches the observer now rather than on
+    /// the next reveal.
+    private var isProcessStateDelivered: Bool { isMetadataPresented || isProcessStateObserved }
+
+    /// Asks the observer whether it needs process facts, turns Core's sampling
+    /// to match, and hands over a process-state move held while nobody did.
+    private func publishProcessStateObservation() {
+        let wasDelivered = isProcessStateDelivered
+        isProcessStateObserved = observer?.terminalSurfaceNeedsProcessState(self) ?? hasProcessInspector
+        drive.setProcessStatePresentation(isProcessStateObserved ? .Presented : .Hidden)
+        let processStateChanged = RuntimeEvents(.processStateChanged)
+        if isProcessStateDelivered && !wasDelivered && deferredPresentationEvents.contains(processStateChanged) {
+            deferredPresentationEvents.subtract(processStateChanged)
+            deliver(processStateChanged)
+        }
+    }
 
     /// Registers whether an inspector consumes this pane's metadata.
     ///
@@ -4355,8 +4590,7 @@ public final class TerminalSurface: PlatformView {
         drive.setPresentation(presentation)
         let wasMetadataPresented = isMetadataPresented
         isMetadataPresented = isTitlePresentationVisible || !processInspectors.isEmpty
-        let needsProcessState = observer?.terminalSurfaceNeedsProcessState(self) ?? hasProcessInspector
-        drive.setProcessStatePresentation(needsProcessState ? .Presented : .Hidden)
+        publishProcessStateObservation()
         if isMetadataPresented && !wasMetadataPresented {
             let metadata = deferredPresentationEvents.subtracting(.screenDirty)
             deferredPresentationEvents.subtract(metadata)
@@ -5515,6 +5749,17 @@ public final class TerminalSurface: PlatformView {
     ///
     /// - Parameter events: The flags this poll produced.
     package func deliver(_ incomingEvents: RuntimeEvents) {
+        // Every callback this delivery makes reads the program from one
+        // sample, taken at the first read; a delivery a callback starts takes
+        // its own.
+        let outerProgramSample = deliveredProgramSample
+        let wasDeliveringProgramSample = isDeliveringProgramSample
+        deliveredProgramSample = nil
+        isDeliveringProgramSample = true
+        defer {
+            deliveredProgramSample = outerProgramSample
+            isDeliveringProgramSample = wasDeliveringProgramSample
+        }
         var events = incomingEvents
         if frameDelivery == .Withhold || !isMetadataPresented {
             var presentationEvents: RuntimeEvents = []
@@ -5522,7 +5767,10 @@ public final class TerminalSurface: PlatformView {
                 presentationEvents.insert(.screenDirty)
             }
             if !isMetadataPresented {
-                presentationEvents.formUnion([.titleChanged, RuntimeEvents(.directoryChanged), RuntimeEvents(.processStateChanged)])
+                presentationEvents.formUnion([.titleChanged, RuntimeEvents(.directoryChanged)])
+            }
+            if !isProcessStateDelivered {
+                presentationEvents.formUnion(RuntimeEvents(.processStateChanged))
             }
             deferredPresentationEvents.formUnion(events.intersection(presentationEvents))
             if frameDelivery == .Withhold && events.contains(.screenDirty) {

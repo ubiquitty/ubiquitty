@@ -4084,6 +4084,16 @@ public final class RuntimeDrive {
         String(session.processIconKey(published.reportedProcessIcon))
     }
 
+    /// The program the pane runs, named for chrome drawn around it from one
+    /// process sample, and nothing once the session has ended. Takes no model
+    /// lock, as ``processIconKey(_:)`` takes none.
+    ///
+    /// - Parameter published: The pane's published snapshot.
+    /// - Returns: Core's answer; every field empty for a session that ended.
+    public func foregroundProgram(_ published: Ubiquitty.Runtime.RuntimeSnapshot) -> Ubiquitty.Runtime.ForegroundProgram {
+        session.foregroundProgram(published.reportedProcessIcon)
+    }
+
     /// Every source on this side that can say where the session is — the
     /// transport stamp, the process walk and the far side's report — for
     /// Core's `Session::resolvePaneHost` to rank.

@@ -202,8 +202,32 @@ public:
     // tests exercise no title/proc walk).
     /// The foreground process's name, empty unless a case scripts one.
     std::string scriptedForegroundName;
-    std::string foregroundName() override { return scriptedForegroundName; }
-    bool foregroundIsShell() override { return foregroundShell; }
+    /// A foreground that takes the terminal once a name is read: the edge
+    /// landing between the probe of the group and its holder and the read of
+    /// the name after them, which still answers for what stood before it.
+    struct ForegroundMove {
+        std::optional<ProcessID> group;
+        bool isShell = true;
+        std::string name;
+    };
+    std::vector<ForegroundMove> movesAsNamesAreRead;
+    std::string foregroundName() override
+    {
+        std::string name = scriptedForegroundName;
+        if (!movesAsNamesAreRead.empty()) {
+            foregroundGroup = movesAsNamesAreRead.front().group;
+            foregroundShell = movesAsNamesAreRead.front().isShell;
+            scriptedForegroundName = movesAsNamesAreRead.front().name;
+            movesAsNamesAreRead.erase(movesAsNamesAreRead.begin());
+        }
+        return name;
+    }
+    int foregroundShellCalls { 0 };
+    bool foregroundIsShell() override
+    {
+        ++foregroundShellCalls;
+        return foregroundShell;
+    }
     int foregroundGroupCalls { 0 };
     std::optional<ProcessID> foregroundProcessGroup() override
     {
@@ -3812,6 +3836,257 @@ TEST(theShellTakingTheTerminalBackIsAProcessStateMove)
     CHECK_MSG(runtime.sampleProcessStateOffDrain(host).processStateChanged, "the shell reclaiming is announced");
     CHECK(runtime.isSampledForegroundShell());
     CHECK_MSG(!runtime.sampleProcessStateOffDrain(host).processStateChanged, "a sample that finds the same owner is quiet");
+}
+
+// A program's catalog key is decided by who holds the terminal and named by the
+// foreground process, so a published name and holder must come from one
+// foreground. The probe reads the group, then the holder and its name; a
+// foreground that moves before the reading after it is read again until two
+// readings find the same group, holder and name.
+TEST(aSampleKeepsANameOnlyWithTheGroupAndHolderReadAroundIt)
+{
+    using namespace Ubiquitty::Runtime;
+    using ForegroundMove = Ubiquitty::PAL::StreamTestPipe::ForegroundMove;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    Ubiquitty::PAL::StreamTestPipe* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    CountingDrainHost host;
+
+    pipe->foregroundGroup = 600;
+    pipe->foregroundShell = false;
+    pipe->scriptedForegroundName = "claude";
+    (void)runtime.sampleProcessStateOffDrain(host);
+    REQUIRE(runtime.foregroundProcessName() == "claude");
+    REQUIRE(!runtime.isSampledForegroundShell());
+
+    // ^C: the probe still sees the program, and the shell has the terminal
+    // back by the time the name is read.
+    pipe->scriptedForegroundName = "bash";
+    pipe->movesAsNamesAreRead = { ForegroundMove { .group = 500, .isShell = true, .name = "bash" } };
+    CHECK(runtime.sampleProcessStateOffDrain(host).processStateChanged);
+    CHECK_STR_EQ(runtime.foregroundProcessName(), "bash");
+    CHECK_MSG(runtime.isSampledForegroundShell(), "the shell's name is published with the shell as its holder");
+    CHECK_EQ(runtime.foregroundProcessGroup(), 500u);
+
+    // A sample that finds the published name and holder reads them once.
+    const int shellReads = pipe->foregroundShellCalls;
+    CHECK_MSG(!runtime.sampleProcessStateOffDrain(host).processStateChanged, "the next sample finds the same foreground");
+    CHECK_EQ(pipe->foregroundShellCalls - shellReads, 1);
+
+    // The reverse edge: the probe finds the shell, and a program has the
+    // terminal by the time the name is read.
+    pipe->scriptedForegroundName = "codex";
+    pipe->movesAsNamesAreRead = { ForegroundMove { .group = 700, .isShell = false, .name = "codex" } };
+    CHECK(runtime.sampleProcessStateOffDrain(host).processStateChanged);
+    CHECK_STR_EQ(runtime.foregroundProcessName(), "codex");
+    CHECK_MSG(!runtime.isSampledForegroundShell(), "the program's name is published with the program as its holder");
+    CHECK_EQ(runtime.foregroundProcessGroup(), 700u);
+
+    // One job ends and the next begins between the probe and the name read:
+    // both reads of the holder see a program, and the name is the shell's,
+    // read in the moment between them. The group read after the name is the
+    // second job's, so the name is read again.
+    pipe->scriptedForegroundName = "claude";
+    (void)runtime.sampleProcessStateOffDrain(host);
+    REQUIRE(runtime.foregroundProcessName() == "claude");
+    pipe->foregroundGroup = 800;
+    pipe->foregroundShell = false;
+    pipe->scriptedForegroundName = "bash";
+    pipe->movesAsNamesAreRead = { ForegroundMove { .group = 801, .isShell = false, .name = "claude" } };
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_STR_EQ(runtime.foregroundProcessName(), "claude");
+    CHECK(!runtime.isSampledForegroundShell());
+    CHECK_EQ(runtime.foregroundProcessGroup(), 801u);
+}
+
+// A program that execs another in its place moves the name alone, the group
+// and the holder standing still. That is a process-state move: a reader hears
+// the new name.
+TEST(aNameThatMovesAloneIsAProcessStateMove)
+{
+    using namespace Ubiquitty::Runtime;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    Ubiquitty::PAL::StreamTestPipe* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    CountingDrainHost host;
+
+    pipe->foregroundGroup = 600;
+    pipe->foregroundShell = false;
+    pipe->scriptedForegroundName = "make";
+    (void)runtime.sampleProcessStateOffDrain(host);
+    REQUIRE(runtime.foregroundProcessName() == "make");
+
+    pipe->scriptedForegroundName = "cc";
+    CHECK_MSG(runtime.sampleProcessStateOffDrain(host).processStateChanged, "the new name is announced");
+    CHECK_STR_EQ(runtime.foregroundProcessName(), "cc");
+    CHECK(!runtime.isSampledForegroundShell());
+    CHECK_MSG(!runtime.sampleProcessStateOffDrain(host).processStateChanged, "a sample that finds the same name is quiet");
+}
+
+// A program that execs in the foreground reads as having exec'd a moment before
+// the kernel gives it its own name, and in that moment carries its parent's: a
+// reading pairs a job's hold with the shell's name. The group and the holder
+// stand still across it, so only the name tells it from the reading after it,
+// and a reading is settled only when the next one finds the same name.
+TEST(aNameTheNextReadingDoesNotFindIsReadAgain)
+{
+    using namespace Ubiquitty::Runtime;
+    using ForegroundMove = Ubiquitty::PAL::StreamTestPipe::ForegroundMove;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    Ubiquitty::PAL::StreamTestPipe* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    CountingDrainHost host;
+
+    pipe->foregroundGroup = 500;
+    pipe->foregroundShell = true;
+    pipe->scriptedForegroundName = "bash";
+    (void)runtime.sampleProcessStateOffDrain(host);
+    REQUIRE(runtime.foregroundProcessName() == "bash");
+
+    pipe->foregroundGroup = 700;
+    pipe->foregroundShell = false;
+    pipe->scriptedForegroundName = "bash";
+    pipe->movesAsNamesAreRead = { ForegroundMove { .group = 700, .isShell = false, .name = "sleep" } };
+    CHECK(runtime.sampleProcessStateOffDrain(host).processStateChanged);
+    CHECK_STR_EQ(runtime.foregroundProcessName(), "sleep");
+    CHECK(!runtime.isSampledForegroundShell());
+    CHECK_EQ(runtime.foregroundProcessGroup(), 700u);
+}
+
+// A reading whose name did not read has nothing to settle against: the member
+// that named it left before its name was read. It is published unsettled, and
+// the next sample reads it again rather than taking it as standing.
+TEST(aReadingWithNoNameIsNotSettled)
+{
+    using namespace Ubiquitty::Runtime;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    Ubiquitty::PAL::StreamTestPipe* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    CountingDrainHost host;
+
+    pipe->foregroundGroup = 700;
+    pipe->foregroundShell = false;
+    pipe->scriptedForegroundName = {};
+    (void)runtime.sampleProcessStateOffDrain(host);
+    REQUIRE(runtime.foregroundProcessName().empty());
+    const int shellReads = pipe->foregroundShellCalls;
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_EQ(pipe->foregroundShellCalls - shellReads, 2);
+}
+
+// A foreground that moves on every read is read again a bounded number of
+// times, and the reading it publishes unsettled is read again by the next
+// sample even when that sample finds the same name and holder.
+TEST(aForegroundStillMovingIsPublishedUnsettledAndReadAgain)
+{
+    using namespace Ubiquitty::Runtime;
+    using ForegroundMove = Ubiquitty::PAL::StreamTestPipe::ForegroundMove;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    Ubiquitty::PAL::StreamTestPipe* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    CountingDrainHost host;
+
+    pipe->foregroundGroup = 600;
+    pipe->foregroundShell = false;
+    pipe->scriptedForegroundName = "claude";
+    for (int move = 0; move < 8; ++move)
+        pipe->movesAsNamesAreRead.push_back(ForegroundMove { .group = 601 + move, .isShell = false, .name = "claude" });
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_STR_EQ(runtime.foregroundProcessName(), "claude");
+    CHECK_MSG(pipe->movesAsNamesAreRead.size() == 4, "one name read, then three more, and no further");
+
+    // Still the same name and holder, but the reading was never settled: the
+    // next sample reads the group and holder again after its name.
+    pipe->movesAsNamesAreRead.clear();
+    const int shellReads = pipe->foregroundShellCalls;
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_EQ(pipe->foregroundShellCalls - shellReads, 2);
+    CHECK_EQ(runtime.foregroundProcessGroup(), 604u);
+}
+
+// A job still moving whose last reading named nothing is no news about its
+// name: publishing it would leave a program with no name, which a reader
+// resolves to the session's launch name. The name last published stands, and
+// the next reading that has a name replaces it. The holder is not held: a job
+// that took the terminal is a job whatever its name reads, so the pane is not
+// at its prompt, the running-job marker is up, and the size is re-sent to it
+// through its first second, the named sample after it included.
+TEST(aMovingForegroundThatNamesNothingKeepsThePublishedNameAndTakesTheHolderRead)
+{
+    using namespace Ubiquitty::Runtime;
+    using ForegroundMove = Ubiquitty::PAL::StreamTestPipe::ForegroundMove;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    Ubiquitty::PAL::StreamTestPipe* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    CountingDrainHost host;
+    runtime.setWindowSize(100, 30, 800, 600);
+
+    pipe->foregroundGroup = 500;
+    pipe->foregroundShell = true;
+    pipe->scriptedForegroundName = "bash";
+    (void)runtime.sampleProcessStateOffDrain(host);
+    REQUIRE(runtime.foregroundProcessName() == "bash");
+    REQUIRE(runtime.isSampledForegroundShell());
+    CHECK_EQ(pipe->reassertCount, 0);
+
+    // A job takes the terminal and every reading of it finds another group
+    // with no name, past the rereads that would have settled it.
+    pipe->foregroundGroup = 700;
+    pipe->foregroundShell = false;
+    pipe->scriptedForegroundName = {};
+    for (int move = 0; move < 8; ++move)
+        pipe->movesAsNamesAreRead.push_back(ForegroundMove { .group = 701 + move, .isShell = false, .name = {} });
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_STR_EQ(runtime.foregroundProcessName(), "bash");
+    CHECK_MSG(!runtime.isSampledForegroundShell(), "the job holds the terminal whatever its name reads");
+    CHECK_MSG(pipe->reassertCount == 1, "the takeover is re-sent its size with the sample that saw it");
+    const ForegroundProgram held = runtime.foregroundProgram(0);
+    CHECK_STR_EQ(held.name, "bash");
+
+    // The next reading has a name and publishes it with its holder; the group
+    // it names is the one already recorded, and its window is not reopened.
+    pipe->movesAsNamesAreRead.clear();
+    pipe->foregroundGroup = 704;
+    pipe->scriptedForegroundName = "sleep";
+    CHECK(runtime.sampleProcessStateOffDrain(host).processStateChanged);
+    CHECK_STR_EQ(runtime.foregroundProcessName(), "sleep");
+    CHECK(!runtime.isSampledForegroundShell());
+}
+
+// A fork the shell made reads as the shell's until it execs. The job it
+// becomes holds the same group, and it is the takeover: the window opens when
+// the holder turns into a job, not only when the group changes.
+TEST(aGroupReadAsTheShellsThenAsAJobIsATakeover)
+{
+    using namespace Ubiquitty::Runtime;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    Ubiquitty::PAL::StreamTestPipe* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    CountingDrainHost host;
+    runtime.setWindowSize(100, 30, 800, 600);
+
+    pipe->foregroundGroup = 500;
+    pipe->foregroundShell = true;
+    pipe->scriptedForegroundName = "bash";
+    (void)runtime.sampleProcessStateOffDrain(host);
+
+    pipe->foregroundGroup = 700;
+    pipe->foregroundShell = true;
+    pipe->scriptedForegroundName = "bash";
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_MSG(pipe->reassertCount == 0, "a fork that has not exec'd runs the shell's code");
+
+    pipe->foregroundShell = false;
+    pipe->scriptedForegroundName = "vim";
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_MSG(pipe->reassertCount == 1, "the job it became is re-sent its size");
 }
 
 // A reported host names where the shell that sent it is, and outranks the walk

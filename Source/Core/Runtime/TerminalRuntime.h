@@ -413,6 +413,22 @@ struct ProcessTreeSignal {
     std::atomic<PAL::Waker*> waker { nullptr };
 };
 
+/// The program a pane runs, as chrome drawn around the pane names it.
+///
+/// Every field is empty for a session that has ended: nothing runs there, and
+/// a name left standing would label a dead pane with a process that is gone,
+/// as a title would if it kept its process parts.
+struct ForegroundProgram {
+    /// The foreground process's own name, without its ancestors ("claude").
+    std::string name;
+    /// The program's catalog key (`Title::processIconCatalog`), empty for none.
+    std::string key;
+    /// The foreground process chain, as a title shows it.
+    std::string chain;
+    /// The same chain spelled with each program's arguments.
+    std::string chainWithArguments;
+};
+
 class TerminalRuntime {
     friend class TerminalSession;
 
@@ -745,6 +761,24 @@ public:
         const std::scoped_lock factsLock(m_processFactsMutex);
         return m_processState.foregroundName.empty() ? m_processState.launchSeed : m_processState.foregroundName;
     }
+
+    /// The program this session runs, as one process sample published it.
+    ///
+    /// The name, who holds the terminal, both chains and whether the session
+    /// has ended are copied under one hold of the lock a sample publishes them
+    /// under, so no field answers for a different sample than another. The
+    /// key is resolved from that name and holder.
+    ///
+    /// - Parameter reportedProcessIcon: The snapshot's `reportedProcessIcon`.
+    /// - Returns: The program; every field empty for a session that ended.
+    [[nodiscard]] ForegroundProgram foregroundProgram(std::uint8_t reportedProcessIcon) const;
+
+    /// The catalog key of the program this session runs, from a name and a
+    /// holder read under one hold of the lock; see ``Title::processIconKeyFor``.
+    ///
+    /// - Parameter reportedProcessIcon: The snapshot's `reportedProcessIcon`.
+    /// - Returns: The key, empty for a session running none.
+    [[nodiscard]] std::string processIconKey(std::uint8_t reportedProcessIcon) const;
 
     /// Whether control-mode tmux holds the terminal, as of the last walk.
     ///
@@ -1934,6 +1968,9 @@ private:
     bool m_foregroundProbeValid = false;
     std::string m_cachedForegroundDirectory;
     std::string m_cachedForegroundName;
+    /// Whether the reading after the last sample's found the same group,
+    /// holder and name; see `sampleProcessState`.
+    bool m_isForegroundSampleSettled = true;
     // Written by the ingest thread, read wherever a title is composed. These
     // are std::strings rewritten in place, so an unguarded reader does not get
     // a stale answer — it walks a buffer the writer may have freed. The lock is
@@ -1990,7 +2027,16 @@ private:
     // kernel either named a new process or delivered a tree edge. An enum would rename
     // a reading without removing a decision.
     [[nodiscard]] bool foregroundChainCouldHaveMoved(std::uint32_t foregroundProcessGroup, bool didNameChange, bool didTreeChange) const; // bool-ok: kernel readings, not caller decisions
-    void sampleProcessState();
+    /// Samples the session's process facts, settling the probe's reading of
+    /// the foreground.
+    ///
+    /// - Parameter probedName: The name the probe read beside the holder it
+    ///   cached, from the same reading of the foreground's owner.
+    void sampleProcessState(std::string probedName);
+    /// Reads the foreground's group and holder into the probe's cache.
+    ///
+    /// - Returns: The holder's name, read with the holder.
+    [[nodiscard]] std::string probeForegroundHolder();
     // True when the previous drain saw any mouse-tracking mode on: the guard
     // can act then, so the next drain's probe skips the tick budget.
     bool m_mouseTrackingActiveLastDrain = false;

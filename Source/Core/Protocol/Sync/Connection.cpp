@@ -13,6 +13,7 @@
 #include "Core/Codec/ZlibDeflate.h"
 #include "Core/Crypto/SHA256.h"
 #include "Core/LineStore.h"
+#include "Core/OSC/Activity.h"
 
 #include "Core/Protocol/Sync/Wire.h"
 #include "Core/Screen/Scrollback.h"
@@ -4454,6 +4455,7 @@ void ClientConnection::storeReplicas()
             continue;
         held->replica = pane.replica;
         held->hasCheckpoint = pane.hasCheckpoint;
+        held->screenStatus = pane.screenStatus;
     }
 }
 
@@ -4578,14 +4580,14 @@ void ReplicaSet::forgetHistory(ID128 paneID)
 ReplicaSet::Held& ReplicaSet::hold(ID128 paneID, std::unique_ptr<Ubiquitty::Terminal> terminal)
 {
     forget(paneID);
-    m_held.emplace_back(paneID, std::make_unique<Held>(Held { .terminal = std::move(terminal), .replica = {}, .hasCheckpoint = false, .lentTerminal = nullptr }));
+    m_held.emplace_back(paneID, std::make_unique<Held>(Held { .terminal = std::move(terminal), .replica = {}, .hasCheckpoint = false, .lentTerminal = nullptr, .screenStatus = std::nullopt }));
     return *m_held.back().second;
 }
 
 ReplicaSet::Held& ReplicaSet::holdLent(ID128 paneID, Ubiquitty::Terminal& terminal)
 {
     forget(paneID);
-    m_held.emplace_back(paneID, std::make_unique<Held>(Held { .terminal = nullptr, .replica = {}, .hasCheckpoint = false, .lentTerminal = &terminal }));
+    m_held.emplace_back(paneID, std::make_unique<Held>(Held { .terminal = nullptr, .replica = {}, .hasCheckpoint = false, .lentTerminal = &terminal, .screenStatus = std::nullopt }));
     return *m_held.back().second;
 }
 
@@ -5006,6 +5008,7 @@ void ClientConnection::handleFrame(const Frame& frame, Carrier carrier, std::uin
             replica.terminal = held->picture();
             replica.replica = held->replica;
             replica.hasCheckpoint = held->hasCheckpoint;
+            replica.screenStatus = held->screenStatus;
         } else if (held && replica.terminal && held->terminal && held->hasCheckpoint
             && copyPicture(*held->terminal, *replica.terminal, { .maxDecodedScreenCellBytes = m_policy.maxDecodedScreenCellBytes, .maxStorageCost = m_policy.maxCheckpointStorageCost })) {
             // A pane restored into a terminal the set owned, before the
@@ -5016,6 +5019,7 @@ void ClientConnection::handleFrame(const Frame& frame, Carrier carrier, std::uin
             held->terminal.reset();
             replica.replica = held->replica;
             replica.hasCheckpoint = true;
+            replica.screenStatus = held->screenStatus;
         } else if (replica.terminal && m_replicas) {
             (void)m_replicas->holdLent(bind->paneID, *replica.terminal);
         }
@@ -5063,6 +5067,10 @@ void ClientConnection::handleFrame(const Frame& frame, Carrier carrier, std::uin
         const ViewState hostView = resumed ? resumed->view : startView;
         const ViewState shownView = resumed ? resumed->view : (m_identity.kind == ClientKind::Agent ? ViewState::RecordsOnly : ViewState::Live);
         replica.view = hostView;
+        // A pane bound live has its status in its screen, so a status set
+        // that stood in its picture while it was hidden, on this connection
+        // or the one before it, gives way to the screen's.
+        const bool didRestoreScreenStatus = replica.view == ViewState::Live && restoreScreenStatus(replica);
         m_panes.push_back(std::move(replica));
         ++m_counters.paneBindings;
         const std::optional<ViewState> chosen = m_delegate ? m_delegate->viewOnBind(bind->handle, bind->paneID) : std::nullopt;
@@ -5078,6 +5086,8 @@ void ClientConnection::handleFrame(const Frame& frame, Carrier carrier, std::uin
             setView(bind->handle, view);
         if (m_delegate)
             m_delegate->paneBound(bind->handle, bind->paneID);
+        if (didRestoreScreenStatus && m_delegate)
+            m_delegate->paneChanged(bind->handle, bind->paneID);
         return;
     }
     case FrameKind::PaneListed: {
@@ -5547,6 +5557,8 @@ void ClientConnection::handleFrame(const Frame& frame, Carrier carrier, std::uin
             break;
         }
         replica->status = replica->statusAssembly.take();
+        if (replica->view != ViewState::Live)
+            standStatusSetInTerminal(*replica);
         ++m_counters.recordsApplied;
         if (m_delegate)
             m_delegate->paneRecordsChanged(replica->handle, replica->paneID);
@@ -6605,6 +6617,7 @@ void ClientConnection::applyUpdate(PaneReplica& replica, const DecodedUpdateHead
     }
     std::vector<std::uint64_t> refusedRowHashes;
     const std::span<const std::uint8_t> rowUpdate = body.subspan(decoded.bytes);
+    const std::uint64_t activityGeneration = replica.terminal->activityGeneration;
     const ApplyOutcome outcome = applyRowUpdate(*replica.terminal, rowUpdate, replica.replica, &refusedRowHashes);
     if (replica.fixture && !replica.fixture->hasDiverged && (outcome == ApplyOutcome::Applied || outcome == ApplyOutcome::DigestMismatch)) {
         DivergenceFixture& fixture = *replica.fixture;
@@ -6622,6 +6635,9 @@ void ClientConnection::applyUpdate(PaneReplica& replica, const DecodedUpdateHead
     }
     switch (outcome) {
     case ApplyOutcome::Applied:
+        // An update that carried the status put the screen's in the terminal.
+        if (replica.terminal->activityGeneration != activityGeneration)
+            replica.screenStatus.reset();
         replica.replica.generation = header.generation;
         replica.replica.historyHead = header.historyHead;
         replica.lagMicroseconds = header.lagMicroseconds;
@@ -6731,6 +6747,7 @@ void ClientConnection::applyCheckpointBody(PaneReplica& replica, std::span<const
     replica.history->invalidateProjection();
     replica.history->project(*replica.terminal, replica.terminal->columns);
     replica.replica = std::move(candidate);
+    replica.screenStatus.reset();
     replica.hasCheckpoint = true;
     replica.isResyncOutstanding = false;
     replica.frameClass = FrameClass::Structural;
@@ -7650,12 +7667,41 @@ void ClientConnection::setView(std::uint32_t handle, ViewState state)
         return;
     replica->view = state;
     // A pane received live has its status in its screen; the set a host sent
-    // for another view is not kept beside it. A set still arriving stays in
-    // assembly: the host stops it where it stands when it learns the pane is
-    // shown, and begins again from the first record when it is hidden.
-    if (state == ViewState::Live)
+    // for another view is not kept beside it, and the screen's status stands
+    // in the terminal again. A set still arriving stays in assembly: the host
+    // stops it where it stands when it learns the pane is shown, and begins
+    // again from the first record when it is hidden.
+    bool didRestoreScreenStatus = false;
+    if (state == ViewState::Live) {
         replica->status.reset();
+        didRestoreScreenStatus = restoreScreenStatus(*replica);
+    }
+    const ID128 paneID = replica->paneID;
     sendView(handle, state);
+    if (didRestoreScreenStatus && m_delegate)
+        m_delegate->paneChanged(handle, paneID);
+}
+
+void ClientConnection::standStatusSetInTerminal(PaneReplica& replica)
+{
+    if (!replica.status)
+        return;
+    if (!replica.screenStatus)
+        replica.screenStatus = replica.terminal->programStatus;
+    if (replica.terminal->programStatus == replica.status->store)
+        return;
+    replica.terminal->programStatus = replica.status->store;
+    OSC::activityChanged(*replica.terminal);
+}
+
+bool ClientConnection::restoreScreenStatus(PaneReplica& replica)
+{
+    std::optional<OSC::ProgramStatusStore> screen = std::exchange(replica.screenStatus, std::nullopt);
+    if (!screen || replica.terminal->programStatus == *screen)
+        return false;
+    replica.terminal->programStatus = std::move(*screen);
+    OSC::activityChanged(*replica.terminal);
+    return true;
 }
 
 void ClientConnection::sendView(std::uint32_t handle, ViewState state)

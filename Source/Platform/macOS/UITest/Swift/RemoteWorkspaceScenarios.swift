@@ -270,6 +270,10 @@ enum RemoteWorkspaceScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated { run(t, processAttributionOnly: true) }
         }
+        UBUITestRegister("remote_workspace_hidden_pane_holds_its_process_state_until_asked") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { run(t, processStateHoldOnly: true) }
+        }
         UBUITestRegister("remote_workspace_tab_pills_follow_host_reorder") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { run(t, processAttributionOnly: true, reorderHostTabs: true) }
@@ -1443,6 +1447,70 @@ enum RemoteWorkspaceScenarios {
             "exec /usr/bin/perl -e \(quote(relay)) \(delayMilliseconds.lowerBound) \(delayMilliseconds.upperBound) /bin/sh -c \(quote(command))"
     }
 
+    /// A pane no window shows, whose observer declines process facts, holds a
+    /// process-state move the host reports, and hands it over once the
+    /// observer asks again or the pane is shown. Only a pane the host serves
+    /// moves while declined: a local session whose observer declines samples
+    /// nothing, so it has no move to hold.
+    @MainActor
+    private static func verifyHostedProcessStateHold(_ t: UBUITestContext, root: TerminalSurface) {
+        guard t.wait(until: { !root.foregroundProgramName.isEmpty }, timeout: 20) else {
+            t.expect(false, desc: "the host names the pane's shell")
+            return
+        }
+        let shell = root.foregroundProgramName
+        let appObserver = root.observer
+        let probe = ProcessStateProbe()
+        defer {
+            root.observer = appObserver
+            report(root, covered: false, pumpingWith: t)
+        }
+        root.observer = probe
+        report(root, covered: true, pumpingWith: t)
+
+        // Hidden and declined: the host's report moves the pane's facts, read
+        // fresh, and the observer hears nothing of it.
+        let heardBeforeProgram = probe.heard.count
+        root.send("/bin/sleep 30\n")
+        t.expect(
+            t.wait(until: { root.foregroundProgramName == "sleep" }, timeout: 20),
+            desc: "the host reports the program the hidden pane runs: \(root.foregroundProgramName)"
+        )
+        t.pump(0.5)
+        t.expect(
+            probe.heard.count == heardBeforeProgram,
+            desc: "a hidden pane whose observer declines holds the move: heard \(probe.heard.dropFirst(heardBeforeProgram))"
+        )
+        // Asked again, the held move fires, still hidden.
+        probe.needsProcessState = true
+        root.observer = probe
+        t.expect(
+            t.wait(until: { probe.heard.dropFirst(heardBeforeProgram).contains("sleep") }, timeout: 5),
+            desc: "asked again, the observer hears the held move: heard \(probe.heard.dropFirst(heardBeforeProgram))"
+        )
+
+        // Declined again, the shell takes the terminal back unheard, and
+        // showing the pane hands that move over.
+        probe.needsProcessState = false
+        root.observer = probe
+        let heardBeforeInterrupt = probe.heard.count
+        root.send("\u{3}")
+        t.expect(
+            t.wait(until: { root.foregroundProgramName == shell }, timeout: 20),
+            desc: "the host reports the shell \(shell) back: \(root.foregroundProgramName)"
+        )
+        t.pump(0.5)
+        t.expect(
+            probe.heard.count == heardBeforeInterrupt,
+            desc: "declined again, the hidden pane holds the move: heard \(probe.heard.dropFirst(heardBeforeInterrupt))"
+        )
+        report(root, covered: false, pumpingWith: t)
+        t.expect(
+            t.wait(until: { probe.heard.dropFirst(heardBeforeInterrupt).contains(shell) }, timeout: 5),
+            desc: "shown, the pane hands over the held move: heard \(probe.heard.dropFirst(heardBeforeInterrupt))"
+        )
+    }
+
     @MainActor
     private static func verifyHostedProcessAttribution(
         _ t: UBUITestContext,
@@ -1460,6 +1528,9 @@ enum RemoteWorkspaceScenarios {
         }
         let markers = ["ALPHA", "BRAVO", "CHARLIE"]
         let programs = ["alpha-task", "bravo-task", "claude"]
+        // The catalog keys Core resolves the host's programs to; the copy named
+        // `claude` is Claude Code's, and the other two are in no catalog.
+        let programKeys: [String?] = [nil, nil, "claude-code"]
         var members = [controller]
         var sessions: [UInt32] = []
         for index in markers.indices {
@@ -1481,8 +1552,11 @@ enum RemoteWorkspaceScenarios {
                 pane.send("printf '\\033]0;\(markers[index])\\007\(markers[index])\\n'; read -r line\n")
             } else {
                 let executable = root + "/" + programs[index]
+                // Bash itself, not /bin/sh: sh hands its arguments to /bin/bash,
+                // so a copy of it runs as the executable `bash`, which is the
+                // name the host's foreground probe reads.
                 do {
-                    try FileManager.default.copyItem(atPath: "/bin/sh", toPath: executable)
+                    try FileManager.default.copyItem(atPath: "/bin/bash", toPath: executable)
                 } catch {
                     t.expect(false, desc: "the named foreground fixture is copied (\(error))")
                     return
@@ -1503,7 +1577,7 @@ enum RemoteWorkspaceScenarios {
             guard
                 t.wait(
                     until: {
-                        (reorderHostTabs || pane.drive.foregroundProcessName == programs[index])
+                        (reorderHostTabs || pane.foregroundProgramName == programs[index])
                             && pane.gridTextForTesting().contains(markers[index])
                             && members[index].window?.tab.title.contains(markers[index]) == true
                     },
@@ -1513,10 +1587,27 @@ enum RemoteWorkspaceScenarios {
                 t.expect(
                     false,
                     desc: "session \(pane.remoteSessionID) publishes \(programs[index]) and \(markers[index]); "
-                        + "foreground \(pane.drive.foregroundProcessName), grid \(pane.gridTextForTesting().contains(markers[index])), "
+                        + "foreground \(pane.foregroundProgramName), grid \(pane.gridTextForTesting().contains(markers[index])), "
                         + "tab \(members[index].window?.tab.title ?? "missing")"
                 )
                 return
+            }
+            // The Kit's public values for a pane the host serves: the program
+            // runs on the host, so nothing on this side could name it but the
+            // host's report.
+            if !reorderHostTabs {
+                t.expect(pane.isRemoteAttached, desc: "tab \(index + 1)'s pane is served by the host")
+                t.expect(
+                    pane.foregroundProgramKey == programKeys[index],
+                    desc: "the Kit keys tab \(index + 1)'s program as Core resolves the host's report: "
+                        + "\(pane.foregroundProgramKey ?? "nil"), expected \(programKeys[index] ?? "nil")"
+                )
+                t.expect(
+                    pane.foregroundProcessChain.contains(programs[index])
+                        && pane.foregroundProcessChainWithArguments.contains(programs[index]),
+                    desc: "the Kit's chains for tab \(index + 1) name the host's program: "
+                        + "\(pane.foregroundProcessChain) / \(pane.foregroundProcessChainWithArguments)"
+                )
             }
         }
         func icons(_ title: NSAttributedString?) -> [String] {
@@ -1556,8 +1647,12 @@ enum RemoteWorkspaceScenarios {
                 )
                 if !reorderHostTabs {
                     t.expect(
-                        member.remoteSurface?.drive.foregroundProcessName == programs[hostOrder[index]],
+                        member.remoteSurface?.foregroundProgramName == programs[hostOrder[index]],
                         desc: "the process belongs to tab \(index + 1) \(phase)"
+                    )
+                    t.expect(
+                        member.remoteSurface?.foregroundProgramKey == programKeys[hostOrder[index]],
+                        desc: "the program's catalog key belongs to tab \(index + 1) \(phase)"
                     )
                 }
                 t.expect(baked?.string.contains(markers[hostOrder[index]]) == true, desc: "tab \(index + 1) bakes its own title \(phase)")
@@ -1707,6 +1802,7 @@ enum RemoteWorkspaceScenarios {
         fullScreenOnly: Bool = false,
         titleBarsOnly: Bool = false,
         processAttributionOnly: Bool = false,
+        processStateHoldOnly: Bool = false,
         reorderHostTabs: Bool = false,
         detachHostTab: Bool = false,
         linkDelayMilliseconds: ClosedRange<Int>? = nil
@@ -1874,6 +1970,10 @@ enum RemoteWorkspaceScenarios {
         }
         if titleBarsOnly {
             verifyHostedPaneTitleBars(t, controller: window)
+            return
+        }
+        if processStateHoldOnly {
+            verifyHostedProcessStateHold(t, root: rootSurface)
             return
         }
         if processAttributionOnly {
@@ -2706,5 +2806,22 @@ enum RemoteWorkspaceScenarios {
             ),
             desc: "the shared owner receives host replies after its initial window closes (\(remainingWindowState()))"
         )
+    }
+}
+
+/// Records the foreground program each process-state move a surface announces
+/// names, and answers whether it needs process facts as `needsProcessState`
+/// says.
+@MainActor
+private final class ProcessStateProbe: TerminalSurfaceObserver {
+    private(set) var heard: [String] = []
+    var needsProcessState = false
+
+    nonisolated func terminalSurfaceNeedsProcessState(_ surface: TerminalSurface) -> Bool {
+        MainActor.assumeIsolated { needsProcessState }
+    }
+
+    nonisolated func terminalSurfaceDidChangeProcessState(_ surface: TerminalSurface) {
+        MainActor.assumeIsolated { heard.append(surface.foregroundProgramName) }
     }
 }

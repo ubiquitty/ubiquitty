@@ -77,6 +77,22 @@ TEST(testTheShellTakingTheTerminalBackOpensNothing)
     CHECK_MSG(reassert.shouldSendNow(30), "the next program opens a window of its own");
 }
 
+// A fork that has not exec'd runs the shell's code and reads as the shell's;
+// the job it becomes keeps the group, and is the takeover. A job read again
+// opens nothing more.
+TEST(testAGroupReadAsTheShellsThenAsAJobIsATakeover)
+{
+    WindowSizeReassert reassert;
+    reassert.noteSample(shell(100), 0);
+    reassert.noteSample(shell(200), 10);
+    CHECK_MSG(!reassert.shouldSendNow(10), "the fork before its exec opens nothing");
+    reassert.noteSample(program(200), 20);
+    CHECK_MSG(reassert.shouldSendNow(20), "the job it became opens a window");
+    CHECK(!reassert.shouldSendNow(21));
+    reassert.noteSample(program(200), 22);
+    CHECK_MSG(!reassert.microsUntilDue(20 + windowSizeReassertWindowMicros).has_value(), "and the same job read again does not extend its window");
+}
+
 // No resolved group is no takeover: a sample that could not read the
 // foreground says nothing about who holds the terminal.
 TEST(testAnUnresolvedGroupOpensNothing)
