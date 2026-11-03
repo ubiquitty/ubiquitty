@@ -125,6 +125,83 @@ surfaces can share glyph resources and remains alive until its last owner
 releases it. Prefer the surface initializer that creates and installs a renderer;
 use separate construction when sharing one renderer between surfaces.
 
+A surface names the program its pane runs, so a host that draws its own tab
+or pane chrome reads Core's answer instead of walking the process table:
+
+| Property | Value |
+| --- | --- |
+| `foregroundProgramName` | The foreground process's own name, such as `claude` |
+| `foregroundProgramKey` | The process catalog's key for the program, such as `claude-code`; nil when the catalog holds no entry |
+| `foregroundProcessChain` | The chain a title shows, such as `vi ◂ claude` |
+| `foregroundProcessChainWithArguments` | The same chain with each program's arguments |
+
+Each is current whenever the observer's
+`terminalSurfaceDidChangeProcessState(_:)` fires and is read on the main
+thread, as the surface is. The callbacks of one delivery of what the session
+reported (process state, tab status, title, screen update, exit and the rest)
+read the four and `programStatus` from one sample; a read outside them takes
+the newest. The key is Core's resolution, the one a title's program icon uses:
+the program an OSC 7501 status record names while a program holds the
+terminal, then the foreground process. A status record can move the key
+without a process moving; that arrives as
+`terminalSurfaceDidChangeTabStatus(_:)`.
+
+Who holds the terminal and the name come from one reading of the foreground,
+and the name is the holder's: a job is named by the program that makes it
+one, such as the `sleep` in `( sleep 30; true )`, and the shell's own work,
+such as a prompt hook's subshell, by the shell. A job several programs make,
+such as `( make ) | tee log`, is named by the one that has held it longest, so
+the programs that come and go inside it do not rename it. A nested shell's
+subshell or prompt hook is that shell's work, so it holds the terminal as a
+program and is named by the nested shell. A reading is kept when the one after
+it finds the same group, holder and name, and read again while they move, at
+most three times: on this machine for a local session, and on the host for a
+pane `ubiquitty-host` serves. A foreground still moving after that is kept as
+last read until the next sample reads it again. On macOS a program is named by
+its executable's file name, and one whose executable no longer reads, as one
+that is exiting or whose file was deleted, by the name the kernel keeps for
+it, cut at 16 bytes. On Linux, local or on a host, a program is named by the
+name it was run by, so `vi` run through a link to `vim.basic` reads `vi` and
+tmux, which renames itself `tmux: client`, reads `tmux`; one that is exiting
+is named by the name the kernel keeps for it, cut at 15 bytes. A sample that
+moves the name or the holder fires the process-state callback.
+
+A local session reports this machine's process walk while the observer's
+`terminalSurfaceNeedsProcessState(_:)` answers true. The surface asks when its
+presentation moves and whenever an observer is assigned, so a host whose answer
+changes assigns its observer again. The process-state callback fires while the
+surface's window shows it, and also while that answer is true when no window
+shows the surface. A surface that has never been in a window counts as shown.
+A host that keeps background tabs' surfaces out of the window keeps hearing
+them by answering true. With neither, the move is held until one holds again.
+
+A pane that `ubiquitty-host` serves reports the host's own facts, so the
+program running on the host is the one named, and who holds its terminal is
+the host's own sample. Before the host has described the pane, the name and
+chains are empty and the key is nil, even when the pane's screen already
+carries a status record. Once the session has ended, here or on the host, the
+name and chains are empty and the key is nil: nothing runs there.
+
+The program's status sits beside its name. `programStatus` is a
+`TerminalSurface.ProgramStatus`, current whenever
+`terminalSurfaceDidChangeTabStatus(_:)` fires, which is never held for a
+surface nobody sees. A pane that `ubiquitty-host` serves carries the status its
+program posted on the host whether or not it is on screen:
+
+| Field | Value |
+| --- | --- |
+| `kind` | `idle`, `running`, `working`, `done`, `attention`, `blocked` or `failed`; nil without a record |
+| `blockKind` | What a blocked program waits for: `permission`, `question` or `authentication` |
+| `progress` | A working program's percent, 0 through 100, when it reports one |
+| `label` | The status in words, such as `codex: Waiting for input`; at most 48 bytes |
+| `color` | The colour to draw it in, under the pane's theme |
+| `colorSlot` | The theme status that colour stands for; nil for a colour the program chose itself |
+
+The kind, label and colour come from the pane's primary OSC 7501 record. A
+pane with no record carries the OSC 21337 tab status a program set, as a colour
+and a label with no kind. The program a record names is
+`foregroundProgramKey`, not a field here.
+
 ### Theme colors
 
 A host that paints its own chrome around a surface reads the terminal's colors
@@ -329,4 +406,9 @@ headers are not a separate compatibility promise.
   through the observer, with nothing heard for a write that moves nothing or
   inside a synchronized update, whether the bytes are fed, the surface is
   hidden, or a program writes them to the surface's pseudo-terminal, among
-  them a program writing updates back to back.
+  them a program writing updates back to back. A further consumer launches a
+  shell in a surface taken out of its window, runs a program, and reads its
+  name, catalog key and chains; hears nothing while its observer declines
+  process facts and the move once it asks again; reads the status a record
+  posts and the colour a program sets; and reads nothing named once the shell
+  exits.

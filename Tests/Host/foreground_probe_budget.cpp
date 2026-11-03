@@ -203,9 +203,9 @@ int main()
             A::broadcast(d, s);
         const std::uint64_t elapsed = nowMillisecondsSteady() - start;
 
-        // First probe + one per elapsed budget window (+1 boundary slack) —
-        // never one per broadcast.
-        const int allowedProbes = 2 + static_cast<int>(elapsed / probeBudgetMilliseconds);
+        // The first probe and the reading that settles it, then one per
+        // elapsed budget window (+1 boundary slack) — never one per broadcast.
+        const int allowedProbes = 3 + static_cast<int>(elapsed / probeBudgetMilliseconds);
         CHECK(facts.nameProbeCount >= 1);
         CHECK(facts.nameProbeCount <= allowedProbes);
         // The directory that stands in for a silent OSC 7 is the same kind of
@@ -219,13 +219,14 @@ int main()
         CHECK(initial.isAtPrompt);
 
         // ---- 2. change-detector: a moved foreground group re-probes now,
-        // inside the budget window, and PaneFacts reflects the change.
+        // inside the budget window, and PaneFacts reflects the change. A
+        // reading that moved is read once more to settle it.
         const int probesBeforeChange = facts.nameProbeCount;
         facts.group = 200;
         facts.name = "vim";
         facts.isShell = false;
         A::broadcast(d, s);
-        CHECK(facts.nameProbeCount == probesBeforeChange + 1);
+        CHECK(facts.nameProbeCount == probesBeforeChange + 2);
         const auto changed = A::records(d, s);
         CHECK(changed.revision > initial.revision);
         CHECK(changed.foreground.name == "vim");
@@ -246,14 +247,16 @@ int main()
 
         for (int i = 0; i < 3; ++i)
             A::broadcast(d, s);
-        CHECK(facts.nameProbeCount == 3); // unsettled: probed every frame
+        // Unsettled: probed every frame, each probe read twice — a reading
+        // with no name is not read a third time once it stands still.
+        CHECK(facts.nameProbeCount == 6);
         CHECK(A::records(d, s).foreground.name.empty()); // nothing real to report yet
 
         // The shell execs: the next broadcast probes, reports it, and settles.
         facts.group = 300;
         facts.name = "zsh";
         A::broadcast(d, s);
-        CHECK(facts.nameProbeCount == 4);
+        CHECK(facts.nameProbeCount == 8);
         CHECK(A::records(d, s).foreground.name == "zsh");
 
         // Settled now: further tight-loop broadcasts ride the budget.
@@ -261,7 +264,36 @@ int main()
         for (int i = 0; i < 50; ++i)
             A::broadcast(d, s);
         const std::uint64_t elapsed = nowMillisecondsSteady() - start;
-        CHECK(facts.nameProbeCount <= 4 + 1 + static_cast<int>(elapsed / probeBudgetMilliseconds));
+        CHECK(facts.nameProbeCount <= 8 + 1 + static_cast<int>(elapsed / probeBudgetMilliseconds));
+    }
+
+    // ---- A job whose name did not read is no news about who holds the
+    // terminal: the pane keeps the name it published, takes the holder it read,
+    // and the probe stays unsettled until a reading has a name.
+    {
+        Daemon d;
+        auto stream = std::make_unique<CountingStream>();
+        CountingStream::Facts& facts = stream->facts;
+        facts.group = 100;
+        facts.name = "zsh";
+        facts.isShell = true;
+        auto& s = A::makeSession(d, std::move(stream), 2, 8);
+        A::addListingReader(d);
+        A::broadcast(d, s);
+        CHECK(A::records(d, s).foreground.name == "zsh");
+
+        facts.group = 200;
+        facts.name = {};
+        facts.isShell = false;
+        A::broadcast(d, s);
+        CHECK_MSG(A::records(d, s).foreground.name == "zsh", "a job with no name replaced the published name");
+        CHECK_MSG(!A::records(d, s).isAtPrompt, "a job with no name left the pane at its prompt");
+        CHECK(!s.foregroundProbeSettled);
+
+        facts.name = "sleep";
+        A::broadcast(d, s);
+        CHECK(A::records(d, s).foreground.name == "sleep");
+        CHECK(!A::records(d, s).isAtPrompt);
     }
 
     if (failures == 0)
@@ -405,7 +437,7 @@ int main()
 
         A::addListingReader(d);
         A::broadcast(d, s);
-        CHECK(facts.nameProbeCount == 1);
+        CHECK(facts.nameProbeCount == 2); // the first probe, and the reading that settles it
         CHECK(A::records(d, s).foreground.name == "zsh");
     }
 

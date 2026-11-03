@@ -39,6 +39,13 @@
 # never a raise, while the display link delivers them, and handed a drawable
 # again once the link stands down. Last, a thread asks on its own schedule
 # through a second flood, while the surface starts and stops its link under it.
+#
+# A further consumer launches a shell in a surface taken out of its window,
+# runs a program the process catalog names, and reads the program's name,
+# catalog key and chains as the public observer hears the process sample move;
+# hears nothing while the observer declines process facts, and the move once it
+# asks again; reads the status a record posts and the colour a program sets as
+# the status callback fires; and reads nothing named after the shell exits.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
@@ -1435,6 +1442,266 @@ xcrun swiftc "$CLEAR_DIR/main.swift" \
 
 run_consumer "$CLEAR_DIR/clear-consumer" "$CLEAR_DIR/pane-program" "$CLEAR_DIR/input"
 echo "check-ubiquittykit: ok (external consumer ran Clear Buffer, Clear Scrollback and Clear Screen)"
+
+# The foreground program and its status, from a host that has only the public
+# interface. A shell runs in a surface taken out of its window; the program it
+# runs is a stock binary copied under a name the process catalog
+# (Source/Core/Title/ProcessIconCatalog.h) holds, since nothing the catalog
+# names ships with macOS: `sleep` as `claude`, which the catalog keys
+# `claude-code`, a key that is not the name, so the consumer cannot pass by
+# reading the name back. macOS kills a copied platform binary at exec; an ad hoc
+# signature makes the copy an ordinary program under its own name. The shell is
+# $SHELL, started as a login shell, and run_consumer's empty HOME leaves it
+# nothing but the stock /etc/profile.
+PROGRAM_DIR="$BUILD/program-consumer"
+rm -rf "$PROGRAM_DIR"
+mkdir -p "$PROGRAM_DIR"
+/bin/cp /bin/sleep "$PROGRAM_DIR/claude"
+if ! /usr/bin/codesign --force --sign - "$PROGRAM_DIR/claude" >>"$LOG" 2>&1; then
+    tail -5 "$LOG" >&2
+    exit 1
+fi
+cat > "$PROGRAM_DIR/main.swift" <<'EOF'
+import AppKit
+import Foundation
+import UbiquittyKit
+
+/// What one process-state callback read, taken inside the callback so the
+/// values are the ones current when it fires.
+struct ProcessReport {
+    let name: String
+    let key: String?
+    let chain: String
+    let chainWithArguments: String
+}
+
+/// What one status callback read, taken inside the callback for the same reason.
+struct StatusReport {
+    let status: TerminalSurface.ProgramStatus
+    let key: String?
+}
+
+/// Records each process-state and status change a surface announces, and
+/// what the surface names when its session ends; answers whether it needs
+/// process facts as `needsProcessState` says.
+@MainActor
+final class ProcessWatch: TerminalSurfaceObserver {
+    private(set) var reports: [ProcessReport] = []
+    private(set) var statuses: [StatusReport] = []
+    private(set) var exitReport: ProcessReport?
+    var needsProcessState = true
+
+    private static func report(_ surface: TerminalSurface) -> ProcessReport {
+        ProcessReport(
+            name: surface.foregroundProgramName,
+            key: surface.foregroundProgramKey,
+            chain: surface.foregroundProcessChain,
+            chainWithArguments: surface.foregroundProcessChainWithArguments
+        )
+    }
+
+    nonisolated func terminalSurfaceNeedsProcessState(_ surface: TerminalSurface) -> Bool {
+        MainActor.assumeIsolated { needsProcessState }
+    }
+
+    nonisolated func terminalSurfaceDidChangeProcessState(_ surface: TerminalSurface) {
+        MainActor.assumeIsolated {
+            reports.append(Self.report(surface))
+        }
+    }
+
+    nonisolated func terminalSurfaceDidChangeTabStatus(_ surface: TerminalSurface) {
+        MainActor.assumeIsolated {
+            statuses.append(StatusReport(status: surface.programStatus, key: surface.foregroundProgramKey))
+        }
+    }
+
+    nonisolated func terminalSurfaceDidExit(_ surface: TerminalSurface) {
+        MainActor.assumeIsolated {
+            exitReport = Self.report(surface)
+        }
+    }
+}
+
+func refuse(_ message: String) -> Bool {
+    FileHandle.standardError.write(Data("consumer: \(message)\n".utf8))
+    return false
+}
+
+/// Runs the main loop, which carries the surface's deliveries, until the
+/// condition holds or the time is up.
+@MainActor
+func wait(seconds: TimeInterval, until condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while !condition() {
+        guard Date() < deadline else { return false }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    }
+    return true
+}
+
+/// Launches a shell in a surface taken out of its window, runs the program
+/// from it, and reads the program back through the values the process-state
+/// callback announces; hears nothing while the observer declines process
+/// facts, and the move once it asks again; reads the status a record posts
+/// and the colour a program sets through the status callback; and reads
+/// nothing named once the shell has exited.
+@MainActor
+func readsTheForegroundProgram(at path: String, expectedKey: String) -> Bool {
+    let name = URL(fileURLWithPath: path).lastPathComponent
+    guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+        return refuse("no shell surface")
+    }
+    // A window never ordered front shows no title, so the surface leaves it
+    // unpresented: what it hears from here on, it hears because its observer
+    // asks for process facts, which is how a host keeps hearing a background
+    // tab it keeps out of the window.
+    _ = NSApplication.shared
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400), styleMask: [.titled], backing: .buffered, defer: true)
+    window.isReleasedWhenClosed = false
+    window.contentView?.addSubview(surface)
+    surface.removeFromSuperview()
+    // Assigned after the surface has been through a window, so the only
+    // question asked of it is the one the assignment asks.
+    let watch = ProcessWatch()
+    surface.observer = watch
+    guard surface.launchShell() else {
+        return refuse("the shell did not launch")
+    }
+    guard wait(seconds: 20, until: { !watch.reports.isEmpty }) else {
+        return refuse("no process-state change after the shell launched")
+    }
+    let shell = surface.foregroundProgramName
+    surface.send("'\(path)' 30\n")
+    guard wait(seconds: 20, until: { watch.reports.contains { $0.name == name } }),
+        let report = watch.reports.first(where: { $0.name == name })
+    else {
+        return refuse(
+            "no process-state change named \(name): heard \(watch.reports.map(\.name)), chain now \(surface.foregroundProcessChain)"
+        )
+    }
+    guard report.key == expectedKey else {
+        return refuse("\(name) resolved to key \(report.key ?? "nil"), expected \(expectedKey)")
+    }
+    // The chain names the program without its argument, and is the argument
+    // chain with the argument taken out.
+    guard report.chain.contains(name), !report.chain.contains("\(name) 30"), report.chainWithArguments.contains("\(name) 30"),
+        report.chainWithArguments.replacingOccurrences(of: "\(name) 30", with: name) == report.chain
+    else {
+        return refuse("\(name)'s chains read \(report.chain) / \(report.chainWithArguments)")
+    }
+    print("consumer: \(name) runs as key \(expectedKey), chain \(report.chain), with arguments \(report.chainWithArguments)")
+
+    let heardBeforeInterrupt = watch.reports.count
+    surface.send("\u{3}")
+    guard wait(seconds: 20, until: { watch.reports.dropFirst(heardBeforeInterrupt).contains { $0.name == shell } }) else {
+        return refuse("the shell \(shell) did not take the terminal back from \(name): heard \(watch.reports.map(\.name))")
+    }
+
+    // Declined, the surface samples nothing and says nothing: the program
+    // starts unheard, and the name read fresh is still the shell's. Asked
+    // again, it samples and names the program.
+    watch.needsProcessState = false
+    surface.observer = watch
+    let heardWhileDeclined = watch.reports.count
+    surface.send("'\(path)' 30\n")
+    _ = wait(seconds: 2, until: { watch.reports.count != heardWhileDeclined || surface.foregroundProgramName != shell })
+    guard watch.reports.count == heardWhileDeclined else {
+        return refuse("a surface whose observer declines process facts announced \(watch.reports.dropFirst(heardWhileDeclined).map(\.name))")
+    }
+    guard surface.foregroundProgramName == shell else {
+        return refuse("a surface whose observer declines process facts sampled \(surface.foregroundProgramName)")
+    }
+    watch.needsProcessState = true
+    surface.observer = watch
+    guard wait(seconds: 20, until: { watch.reports.dropFirst(heardWhileDeclined).contains { $0.name == name } }) else {
+        return refuse("asked again, the surface did not name \(name): heard \(watch.reports.dropFirst(heardWhileDeclined).map(\.name))")
+    }
+    let heardBeforeSecondInterrupt = watch.reports.count
+    surface.send("\u{3}")
+    guard wait(seconds: 20, until: { watch.reports.dropFirst(heardBeforeSecondInterrupt).contains { $0.name == shell } }) else {
+        return refuse("the shell \(shell) did not take the terminal back a second time: heard \(watch.reports.map(\.name))")
+    }
+    print("consumer: declined, the surface was silent; asked again, it named \(name)")
+
+    // A record names codex while the shell holds the terminal: the status is
+    // the record's, and the key stays the shell's, which the catalog lacks.
+    surface.send("printf '\\033]7501;state=working:progress=40:app=codex\\033\\\\'\n")
+    guard wait(seconds: 20, until: { watch.statuses.contains { $0.status.kind == .working } }),
+        let working = watch.statuses.first(where: { $0.status.kind == .working })?.status
+    else {
+        return refuse("no status change to working: heard \(watch.statuses.map { String(describing: $0.status.kind) })")
+    }
+    guard working.progress == 40, working.blockKind == nil, working.colorSlot == .working, working.color != nil,
+        working.label.contains("Working")
+    else {
+        return refuse("the working record reads as \(working)")
+    }
+    surface.send("printf '\\033]7501;state=blocked:kind=question:app=codex\\033\\\\'\n")
+    guard wait(seconds: 20, until: { watch.statuses.contains { $0.status.kind == .blocked } }),
+        let blocked = watch.statuses.first(where: { $0.status.kind == .blocked })
+    else {
+        return refuse("no status change to blocked: heard \(watch.statuses.map { String(describing: $0.status.kind) })")
+    }
+    guard blocked.status.blockKind == .question, blocked.status.progress == nil, blocked.status.colorSlot == .blocked,
+        blocked.status.color != nil, blocked.status.color != working.color, blocked.status.label.contains("Waiting for input")
+    else {
+        return refuse("the blocked record reads as \(blocked.status) beside working's \(working)")
+    }
+    guard blocked.key == nil else {
+        return refuse("the shell holds the terminal, yet the record keys it \(blocked.key ?? "nil")")
+    }
+    print("consumer: a blocked record reads as \(blocked.status.label)")
+
+    // With the record cleared, the colour is the one the program chose, each
+    // channel its own, and stands for no theme status.
+    surface.send("printf '\\033]7501;state=clear\\033\\\\\\033]21337;indicator=#123456;status=deploying\\007'\n")
+    guard wait(seconds: 20, until: { watch.statuses.contains { $0.status.kind == nil && $0.status.color != nil } }),
+        let indicated = watch.statuses.last(where: { $0.status.kind == nil && $0.status.color != nil })?.status
+    else {
+        return refuse("no status change to the program's own colour: heard \(watch.statuses.map(\.status))")
+    }
+    guard let color = indicated.color, color.red == 0x12, color.green == 0x34, color.blue == 0x56,
+        indicated.colorSlot == nil, indicated.label == "deploying", indicated.progress == nil
+    else {
+        return refuse("the program's own colour reads as \(indicated)")
+    }
+    print("consumer: the program's own colour reads as \(indicated.label)")
+
+    // The session ends: nothing runs there, so nothing is named.
+    surface.send("exit\n")
+    guard wait(seconds: 20, until: { watch.exitReport != nil }), let ended = watch.exitReport else {
+        return refuse("the shell did not exit")
+    }
+    guard ended.name.isEmpty, ended.key == nil, ended.chain.isEmpty, ended.chainWithArguments.isEmpty else {
+        return refuse("an ended session still names \(ended)")
+    }
+    guard let last = watch.reports.last, last.name.isEmpty, last.chain.isEmpty else {
+        return refuse("the process-state change at the end names \(String(describing: watch.reports.last))")
+    }
+    print("consumer: the ended session names nothing")
+    return true
+}
+
+let arguments = CommandLine.arguments
+guard arguments.count == 3 else {
+    _ = refuse("usage: program-consumer <program> <catalog key>")
+    exit(2)
+}
+let passed = MainActor.assumeIsolated {
+    readsTheForegroundProgram(at: arguments[1], expectedKey: arguments[2])
+}
+exit(passed ? 0 : 1)
+EOF
+
+xcrun swiftc "$PROGRAM_DIR/main.swift" \
+    -o "$PROGRAM_DIR/program-consumer" \
+    -F "$FRAMEWORK_DIR" \
+    -framework UbiquittyKit \
+    -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
+
+run_consumer "$PROGRAM_DIR/program-consumer" "$PROGRAM_DIR/claude" claude-code
+echo "check-ubiquittykit: ok (external consumer read a shell's foreground program and its status out of a window, heard nothing while declining, and read nothing named after exit)"
 
 # The generated header and archive this build just produced are the only place a
 # Swift export naming a C++ interop type can silently vanish -- swiftc prints no

@@ -7850,8 +7850,8 @@ if wanted lost_drop_says_why && command -v cmake >/dev/null 2>&1; then
     fi
 fi
 
-# foreground_probe_budget — probeForegroundIfDue's foregroundIsShell/
-# foregroundName probes (tty ioctls + process sysctls + string allocations) run
+# foreground_probe_budget — probeForegroundIfDue's foregroundHolder probes
+# (tty ioctls + process sysctls + string allocations) run
 # on a ~50 ms tick budget per session, never per broadcast frame. A
 # foreground-group change (one cheap ioctl, the change-detector) forces an
 # immediate re-probe whose Status frame reaches CommandEvents clients; an

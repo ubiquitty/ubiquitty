@@ -937,6 +937,65 @@ TEST(aPaneLeavingLiveIsOwedItsStatusSetAndOneReturningIsNot)
     CHECK(link.host().state() == ConnectionState::Attached && link.client().state() == ConnectionState::Attached);
 }
 
+// A pane not live is sent no screen, so the set its host sends is its status:
+// the set stands in the replica's terminal, where a frontend reads it, and
+// moves the tab status a frontend redraws on. Shown again, the terminal holds
+// the status the screen last carried, which the host's next screen goes on
+// from, so a host whose status returned to it while the pane was hidden is
+// shown as it is although its screen sends nothing for it.
+TEST(aStatusSetStandsInTheTerminalOfAPaneNotShown)
+{
+    SyncLink link(0, 24);
+    link.settleAttach();
+    const std::uint32_t pane = link.handle();
+    const Terminal& terminal = link.clientTerminal(pane);
+    const auto settle = [&] {
+        for (int steps = 0; steps < 16 && link.held(pane) != link.newest(pane); ++steps)
+            link.step();
+    };
+    const auto shownState = [&] { return terminal.programStatus.records.empty() ? OSC::ProgramState::None : terminal.programStatus.records[0].state; };
+    link.write("\033]7501;id=job:state=working\033\\");
+    setRecords(link, pane);
+    settle();
+    CHECK(shownState() == OSC::ProgramState::Working);
+
+    link.client().setView(pane, ViewState::Dormant);
+    link.step();
+    link.step();
+    const std::uint32_t generation = terminal.tabStatusGeneration;
+    link.write("\033]7501;id=job:state=blocked:kind=question\033\\");
+    setRecords(link, pane);
+    link.step();
+    link.step();
+    CHECK(shownState() == OSC::ProgramState::Blocked);
+    CHECK(terminal.tabStatusGeneration != generation);
+
+    // Shown: the screen's status first, then the screen catches up.
+    link.client().setView(pane, ViewState::Live);
+    CHECK(shownState() == OSC::ProgramState::Working);
+    settle();
+    CHECK(terminal.programStatus == link.source(pane).status().store);
+    CHECK(shownState() == OSC::ProgramState::Blocked);
+
+    // Hidden, the host posts a record, and is back to what the screen last
+    // carried by the time the pane is shown: no screen carries the change.
+    link.client().setView(pane, ViewState::Dormant);
+    link.step();
+    link.step();
+    link.write("\033]7501;id=job:state=done\033\\");
+    setRecords(link, pane);
+    link.step();
+    link.step();
+    CHECK(shownState() == OSC::ProgramState::Done);
+    link.client().setView(pane, ViewState::Live);
+    link.write("\033]7501;id=job:state=blocked:kind=question\033\\");
+    setRecords(link, pane);
+    settle();
+    CHECK(terminal.programStatus == link.source(pane).status().store);
+    CHECK(shownState() == OSC::ProgramState::Blocked);
+    CHECK(link.host().state() == ConnectionState::Attached && link.client().state() == ConnectionState::Attached);
+}
+
 TEST(aPaneReturningToLiveAbandonsAStatusSetStillLeaving)
 {
     SyncLink link(0, 24);

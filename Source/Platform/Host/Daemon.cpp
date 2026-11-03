@@ -82,6 +82,7 @@
 #include "Core/Session/SessionTree.h"
 #include "Core/Session/SessionTreeWire.h"
 #include "Core/Session/ShareTerminalLimits.h"
+#include "Core/Session/ShellForeground.h"
 #include "Core/Session/WalkedProcessFacts.h"
 #include "Core/Session/WorkspaceCapture.h"
 #include "Core/Session/WorkspaceWire.h"
@@ -11504,14 +11505,15 @@ void Daemon::probeForegroundIfDue(Session& s)
     if (!s.stream)
         return;
     PAL::ProcessFacts& process = s.stream->process();
-    // Probe budget: foregroundIsShell() + foregroundName() cost several tty
+    // Probe budget: foregroundHolder() costs several tty
     // ioctls + process sysctls + string allocations per call — too heavy per
     // frame on the PTY-read loop. One cheap foregroundProcessGroup() ioctl is
     // the change-detector: a moved group re-probes immediately, otherwise the
     // cached answer stands until the budget elapses. An unsettled probe (no
     // resolvable foreground group, or an empty name — the window right after
-    // forkpty before the child execs) never latches the budget, so the next
-    // frame probes again until a real foreground shows.
+    // forkpty before the child execs — or a foreground still moving around
+    // its name) never latches the budget, so the next frame probes again
+    // until a real foreground shows.
     const std::optional<PAL::ProcessID> resolvedForegroundGroup = process.foregroundProcessGroup();
     const PAL::ProcessID foregroundGroup = resolvedForegroundGroup.value_or(0);
     if (s.term && Ubiquitty::retireTitleIfStale(*s.term, foregroundGroup)) {
@@ -11527,16 +11529,27 @@ void Daemon::probeForegroundIfDue(Session& s)
         return;
     }
     s.foregroundProbeOwedAtMilliseconds = 0;
-    s.isProbedForegroundShell = process.foregroundIsShell();
-    if (s.term && Mouse::retireTrackingIfStale(*s.term, s.mouseTrackingProcessGroup, foregroundGroup, s.isProbedForegroundShell))
+    // Who holds the terminal is published beside the name, and a client keys
+    // the pane's program by the pair, so both come from one reading of the
+    // owner and are settled against the reading after them, as a local pane's
+    // sample settles them. A reading that finds the pair the last settled
+    // probe published moves nothing and is not read again; one still moving
+    // leaves the probe unsettled, and the next frame probes again.
+    PAL::ForegroundHolder holder = process.foregroundHolder();
+    Ubiquitty::Session::ForegroundReading reading { .name = std::move(holder.name), .processGroup = foregroundGroup, .isShell = holder.isShell, .isSettled = false };
+    reading.isSettled = s.foregroundProbeSettled && reading.isShell == s.lastForegroundIsShell && reading.name == s.lastForegroundName;
+    reading = Ubiquitty::Session::settleForegroundReading(process, std::move(reading), [&process] { return process.foregroundHolder(); });
+    Ubiquitty::Session::holdUnnamedReading(reading, s.lastForegroundName);
+    s.isProbedForegroundShell = reading.isShell;
+    s.probedForegroundName = std::move(reading.name);
+    if (s.term && Mouse::retireTrackingIfStale(*s.term, s.mouseTrackingProcessGroup, reading.processGroup, s.isProbedForegroundShell))
         s.isFrameDue = true;
-    s.probedForegroundName = process.foregroundName();
     // The directory stands in only while the shell reports none (OSC 7), so
     // it is read only then, and on this budget like the name beside it.
     s.probedForegroundDirectory = s.term && s.term->currentDirectory.empty() ? process.foregroundCurrentDirectory() : std::string {};
     s.lastForegroundProbeMilliseconds = now;
-    s.lastForegroundProbeGroup = foregroundGroup;
-    s.foregroundProbeSettled = resolvedForegroundGroup.has_value() && !s.probedForegroundName.empty();
+    s.lastForegroundProbeGroup = reading.processGroup;
+    s.foregroundProbeSettled = reading.processGroup != 0 && !s.probedForegroundName.empty() && reading.isSettled;
     if (s.isProbedForegroundShell != s.lastForegroundIsShell || s.probedForegroundName != s.lastForegroundName) {
         // The shell has the terminal back: where it marks no prompt, that is
         // where a program's working or blocked record ends.

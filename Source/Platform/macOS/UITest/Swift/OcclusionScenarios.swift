@@ -46,7 +46,7 @@ private func terminalSurface(under view: NSView) -> TerminalSurface? {
 ///   - isCovered: Whether nothing of the window is on screen.
 ///   - t: The running scenario, for pumping the report's delivery.
 @MainActor
-private func report(_ surface: TerminalSurface, covered isCovered: Bool, pumpingWith t: UBUITestContext) {
+func report(_ surface: TerminalSurface, covered isCovered: Bool, pumpingWith t: UBUITestContext) {
     surface.isFullyOccludedForTesting = isCovered
     NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: surface.window)
     t.pump(0.1)

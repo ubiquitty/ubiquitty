@@ -92,6 +92,10 @@ struct ProcStatFields {
 /// The kernel's `PF_FORKNOEXEC`: set by fork, cleared by exec.
 inline constexpr std::uint32_t processFlagForkedWithoutExec = 0x00000040;
 
+/// The kernel's `PF_EXITING`: set as a process begins to exit, before it lets
+/// go of its memory.
+inline constexpr std::uint32_t processFlagExiting = 0x00000004;
+
 /// Reads the kernel birth ticks (field 22) without trusting the process name.
 ///
 /// - Parameter line: One complete `/proc/<pid>/stat` line.
@@ -177,6 +181,32 @@ inline constexpr std::uint32_t processFlagForkedWithoutExec = 0x00000040;
         return std::nullopt;
     constexpr int interruptSignal = 2;
     return (mask & (std::uint64_t { 1 } << (interruptSignal - 1))) != 0;
+}
+
+/// How many threads a process has, from the text of `/proc/<pid>/status`.
+///
+/// A process whose first thread has ended reads `Z` in its state for as long
+/// as another thread runs the program on; one that has ended keeps the one
+/// thread until it is reaped.
+///
+/// - Parameter status: The file's text, or a prefix holding the line.
+/// - Returns: The count, or empty when the line is absent or malformed.
+[[nodiscard]] inline std::optional<std::uint32_t> parseStatusThreadCount(std::string_view status)
+{
+    constexpr std::string_view key = "\nThreads:";
+    const std::size_t found = status.find(key);
+    if (found == std::string_view::npos)
+        return std::nullopt;
+    std::string_view value = status.substr(found + key.size());
+    const std::size_t start = value.find_first_not_of(" \t");
+    if (start == std::string_view::npos)
+        return std::nullopt;
+    value.remove_prefix(start);
+    std::uint32_t count = 0;
+    const auto [next, error] = std::from_chars(value.data(), value.data() + value.size(), count);
+    if (error != std::errc {} || next == value.data())
+        return std::nullopt;
+    return count;
 }
 
 } // namespace Ubiquitty::PAL

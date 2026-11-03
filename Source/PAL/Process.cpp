@@ -8,6 +8,7 @@
 #include "PAL/RemoteTarget.h"
 
 #include <array>
+#include <optional>
 #if defined(__GLIBC__)
 #include <errno.h>
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
@@ -201,6 +202,25 @@ std::string_view nextToken(std::string_view line, std::size_t& cursor)
     return line.substr(start, cursor - start);
 }
 
+// Where argv[0] ends in a command line that joins argv with single spaces,
+// for a name holding a space. Such a name is argv[0]'s basename kept whole
+// (PTYFacts.cpp), so argv[0] runs to where that name first ends a path
+// component before a space or the line's end, not to the first space.
+//
+// - Returns: The offset past argv[0]; nothing for a name with no space, whose
+//   argv[0] is the line's first token, or a line that spells no such name.
+std::optional<std::size_t> spacedArgumentZeroEnd(std::string_view name, std::string_view commandLine)
+{
+    if (name.find(' ') == std::string_view::npos)
+        return std::nullopt;
+    for (std::size_t at = commandLine.find(name); at != std::string_view::npos; at = commandLine.find(name, at + 1)) {
+        const std::size_t end = at + name.size();
+        if ((at == 0 || commandLine[at - 1] == '/') && (end == commandLine.size() || commandLine[end] == ' '))
+            return end;
+    }
+    return std::nullopt;
+}
+
 std::string_view displayName(const Record& record)
 {
     return scriptDisplayName(record.name, record.commandLine);
@@ -228,7 +248,7 @@ static void appendLeafCommand(std::string& out, const Record& record, ChainArgum
     out.append(shown);
 
     const std::string_view commandLine = record.commandLine;
-    const std::size_t space = commandLine.find(' ');
+    const std::size_t space = spacedArgumentZeroEnd(record.name, commandLine).value_or(commandLine.find(' '));
     if (space == std::string_view::npos || space + 1 >= commandLine.size())
         return;
 
@@ -375,7 +395,11 @@ std::string_view scriptDisplayName(std::string_view name, std::string_view comma
         return name;
 
     std::size_t cursor = 0;
-    const std::string_view program = nextToken(commandLine, cursor);
+    std::string_view program = nextToken(commandLine, cursor);
+    if (const std::optional<std::size_t> end = spacedArgumentZeroEnd(name, commandLine)) {
+        program = commandLine.substr(0, *end);
+        cursor = *end;
+    }
     if (program.empty())
         return name;
 

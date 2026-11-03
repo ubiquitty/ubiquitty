@@ -24,6 +24,15 @@
 //   - child environment defaults the character locale to UTF-8 only when unset
 //   - process().foregroundProcessGroup() resolves a live job and is stable
 //   - an adopted master reads its shell at the prompt as the shell, a job as a job
+//   - a job whose executable no longer reads is named by its command, not the shell
+//   - a shell whose executable no longer reads is named by its command in a subshell
+//   - a foreground group too large to list is named by a program in it, and
+//     is listed no further than one member past the buffer
+//   - a job led by a fork is named by its oldest program, a nested shell's
+//     subshell by that shell
+//   - on Linux, a job whose first thread ended still holds the terminal, and a
+//     program that renames itself is named by the name it was run by
+//   - a running job is named by the program that makes it one, a hook by the shell
 //   - a program this process forked delivers fork/exec/exit edges to a notifier
 
 #include "Core/Screen/Addressing.h"
@@ -44,6 +53,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <optional>
 
 #include <chrono>
@@ -57,6 +67,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -67,6 +78,7 @@
 #if defined(__linux__)
 #include <dirent.h>
 #include <pty.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #elif defined(__FreeBSD__) || defined(__DragonFly__)
 #include <libutil.h>
@@ -783,6 +795,13 @@ TEST(testProcessTrackerFollowsSubtree)
 }
 
 static constexpr const char* reportArgument0Marker = "--ubiquitty-report-argument-zero";
+// The arms below run this binary as a program a test's shell starts, standing
+// in for one whose behaviour no system program has.
+static constexpr const char* sleepsMarker = "--ubiquitty-sleeps";
+static constexpr const char* mainThreadExitsMarker = "--ubiquitty-main-thread-exits";
+#if defined(__linux__)
+static constexpr const char* renamesItselfMarker = "--ubiquitty-renames-itself";
+#endif
 // This binary's path, absolute. The cases below relaunch it in a PTY, whose
 // child does not start in this process's directory, so a relative argv[0]
 // names nothing there.
@@ -1347,6 +1366,387 @@ TEST(testForegroundQueriesTrackTheJob)
     CHECK(s->process().foregroundIsShell());
 }
 
+// Copies `source` to `path` as a program the shell can run under that name.
+// Darwin kills a copied platform binary at exec, so the copy is signed ad hoc
+// there, which makes it an ordinary program under its own name.
+static bool makeRunnableCopy(const std::string& source, const std::string& path)
+{
+    std::error_code copyError;
+    if (!std::filesystem::copy_file(source, path, std::filesystem::copy_options::overwrite_existing, copyError))
+        return false;
+#if defined(__APPLE__)
+    UbiquittyTest::OwnedChildProcess<> signer;
+    if (!signer.canOwnChildren())
+        return false;
+    const pid_t signing = ::fork();
+    if (signing == 0) {
+        const int quiet = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (quiet >= 0)
+            ::dup2(quiet, STDERR_FILENO);
+        ::execl("/usr/bin/codesign", "codesign", "--force", "--sign", "-", path.c_str(), nullptr);
+        ::_exit(127);
+    }
+    if (!signer.adoptForkResult(signing))
+        return false;
+    int signingStatus = -1;
+    return signer.reap(0, &signingStatus) == signing && WIFEXITED(signingStatus) && !WEXITSTATUS(signingStatus);
+#else
+    std::filesystem::permissions(path, std::filesystem::perms::owner_all, copyError);
+    return !copyError;
+#endif
+}
+
+// A job whose executable no longer reads still holds the terminal, and is named
+// by the kernel's name for it, never by the shell's or by another member's: a
+// job that is exiting lets go of its file before it is a zombie, and a program
+// whose file was deleted has none to read. The deleted file holds the state
+// still. The program is a copy of sleep on Darwin, and on Linux a copy of this
+// binary in its sleeping arm: the system's sleep there is a multicall binary
+// that answers to the name it is run by, which a copy changes.
+TEST(aJobWhoseExecutableNoLongerReadsIsNamedByItsCommandNotTheShell)
+{
+    char directoryTemplate[] = "/tmp/ubq-pty-unlinked.XXXXXX";
+    const char* directory = ::mkdtemp(directoryTemplate);
+    REQUIRE(directory);
+    const std::string program = std::string(directory) + "/vanishing";
+#if defined(__APPLE__)
+    const std::string source = "/bin/sleep";
+    const std::string arguments = " 30";
+#else
+    const std::string source = executablePath;
+    const std::string arguments = std::string(" ") + sleepsMarker + " 30";
+#endif
+
+    auto stream = openArguments({ "/bin/sh" });
+    REQUIRE(stream != nullptr);
+    PAL::ProcessFacts& process = stream->process();
+    char sink[4096];
+    const auto drainUntil = [&](auto&& condition) {
+        for (int tick = 0; tick < 2000 && !condition(); ++tick) {
+            int finalStatus = 0;
+            drainWithBudget(stream.get(), sink, sizeof(sink), 5, &finalStatus);
+        }
+        return condition();
+    };
+    REQUIRE(drainUntil([&] { return process.foregroundIsShell() && process.foregroundProcessGroup().has_value(); }));
+    // Alone, and leading a pipeline whose other member's file still reads.
+    for (const std::string& command : { program + arguments + "\n", program + arguments + " | /bin/cat\n" }) {
+        REQUIRE_MSG(makeRunnableCopy(source, program), "premise: the copy runs");
+        REQUIRE(stream->writeAll(std::span(command.data(), command.size())) == 0);
+        REQUIRE_MSG(drainUntil([&] { return process.foregroundName() == "vanishing"; }), command.c_str());
+        REQUIRE(::unlink(program.c_str()) == 0);
+        const std::optional<PAL::ProcessID> job = process.foregroundProcessGroup();
+        REQUIRE(job.has_value());
+#if defined(__APPLE__)
+        CHECK_MSG(PAL::processExecutableName(*job).empty(), "premise: a job whose file was deleted has no executable to read");
+#endif
+        CHECK_STR_EQ(PAL::processCommandName(*job), "vanishing");
+        CHECK(!process.foregroundIsShell());
+        CHECK_STR_EQ(process.foregroundName(), "vanishing");
+
+        REQUIRE(stream->writeAll(std::span("\x03", 1)) == 0);
+        CHECK(drainUntil([&] { return process.foregroundIsShell(); }));
+    }
+    (void)::rmdir(directory);
+}
+
+// The shell's own work is named by the shell, and by the kernel's name for it
+// once its file no longer reads, as an upgrade leaves a shell that is running:
+// at its prompt and while a subshell of it holds the terminal alike, never by
+// the session's leader or by nothing.
+TEST(aShellWhoseExecutableNoLongerReadsIsNamedByItsCommandInASubshell)
+{
+    char directoryTemplate[] = "/tmp/ubq-pty-unlinked-shell.XXXXXX";
+    const char* directory = ::mkdtemp(directoryTemplate);
+    REQUIRE(directory);
+    const std::string shellPath = std::string(directory) + "/myshell";
+    REQUIRE_MSG(makeRunnableCopy("/bin/bash", shellPath), "premise: the copy runs");
+
+    auto stream = openArguments({ shellPath, "--norc", "--noprofile", "-i" });
+    REQUIRE(stream != nullptr);
+    PAL::ProcessFacts& process = stream->process();
+    char sink[4096];
+    const auto drainUntil = [&](auto&& condition) {
+        for (int tick = 0; tick < 2000 && !condition(); ++tick) {
+            int finalStatus = 0;
+            drainWithBudget(stream.get(), sink, sizeof(sink), 5, &finalStatus);
+        }
+        return condition();
+    };
+    // macOS ends a shell whose file is gone with SIGKILL when it then forks, so
+    // the subshell is started while the file stands, and the file is unlinked
+    // once the subshell holds the terminal. A shell the system ended is a
+    // premise that did not hold, never a failure of the naming.
+    const auto wasKilled = [&] {
+        (void)process.hasRunningChild();
+        const PAL::ChildExit exit = stream->childExit();
+        return exit.didExit && exit.wasSignalled && exit.code == SIGKILL;
+    };
+    constexpr const char* killedPremise = "premise: the system ended the shell with SIGKILL after its file was unlinked";
+    const auto isNamedByTheShell = [&] {
+        const bool isNamed = process.foregroundName() == "myshell";
+        return isNamed || !wasKilled();
+    };
+    REQUIRE_MSG(drainUntil([&] { return process.foregroundIsShell() && process.foregroundName() == "myshell" && process.foregroundProcessGroup().has_value(); }),
+        "premise: the shell reaches its prompt");
+    const std::optional<PAL::ProcessID> shellGroup = process.foregroundProcessGroup();
+    REQUIRE(shellGroup.has_value());
+
+    // A subshell running a builtin: a fork of the shell, waiting on the terminal.
+    REQUIRE(stream->writeAll(std::span("( read line )\n", 14)) == 0);
+    REQUIRE_MSG(drainUntil([&] { return process.foregroundProcessGroup().value_or(0) != *shellGroup; }), "premise: the subshell holds the terminal");
+    REQUIRE(::unlink(shellPath.c_str()) == 0);
+#if defined(__APPLE__)
+    CHECK_MSG(PAL::processExecutableName(*shellGroup).empty(), "premise: a shell whose file was deleted has no executable to read");
+#endif
+    CHECK(process.foregroundIsShell());
+    REQUIRE_MSG(isNamedByTheShell(), killedPremise);
+    CHECK_STR_EQ(process.foregroundName(), "myshell");
+
+    REQUIRE(stream->writeAll(std::span("\n", 1)) == 0);
+    const bool didReturnToPrompt = drainUntil([&] { return process.foregroundProcessGroup() == shellGroup; });
+    REQUIRE_MSG(didReturnToPrompt || !wasKilled(), killedPremise);
+    CHECK(didReturnToPrompt);
+    REQUIRE_MSG(isNamedByTheShell(), killedPremise);
+    CHECK_STR_EQ(process.foregroundName(), "myshell");
+    (void)::rmdir(directory);
+}
+
+// A foreground group too large to list in full is a job, and is named by a
+// program in it, never by the shell. Its leader has gone: the pipeline's first
+// commands end and are reaped, leaving xargs and the sleeps it started.
+TEST(aForegroundGroupTooLargeToListIsNamedByAProgramInIt)
+{
+    auto stream = openArguments({ "/bin/sh" });
+    REQUIRE(stream != nullptr);
+    PAL::ProcessFacts& process = stream->process();
+    char sink[4096];
+    const auto drainUntil = [&](auto&& condition) {
+        for (int tick = 0; tick < 2000 && !condition(); ++tick) {
+            int finalStatus = 0;
+            drainWithBudget(stream.get(), sink, sizeof(sink), 5, &finalStatus);
+        }
+        return condition();
+    };
+    REQUIRE(drainUntil([&] { return process.foregroundIsShell() && process.foregroundProcessGroup().has_value(); }));
+    const std::optional<PAL::ProcessID> shellGroup = process.foregroundProcessGroup();
+    constexpr std::string_view command = "/usr/bin/yes 30 | /usr/bin/head -n 60 | /usr/bin/xargs -P 60 -n 1 /bin/sleep\n";
+    REQUIRE(stream->writeAll(command) == 0);
+    std::array<PAL::Process::GroupMember, 32> members;
+    std::optional<std::size_t> count;
+    const auto isLargeAndLeaderless = [&] {
+        const std::optional<PAL::ProcessID> group = process.foregroundProcessGroup();
+        if (!group || group == shellGroup || PAL::processGroupMember(*group))
+            return false;
+        members = {};
+        count = PAL::processGroupMembers(*group, members);
+        return count && *count > members.size();
+    };
+    REQUIRE_MSG(drainUntil(isLargeAndLeaderless), "premise: xargs and its sleeps hold the terminal without their leader");
+    CHECK_MSG(std::ranges::none_of(members, [](const PAL::Process::GroupMember& member) { return member.processID == 0; }), "a group the buffer cannot hold fills it");
+    // The listing stops at the first member past the buffer, so the cost of a
+    // read is bounded by the caller's buffer, not by the group.
+    CHECK_EQ(*count, members.size() + 1);
+    CHECK(!process.foregroundIsShell());
+    const std::string name = process.foregroundName();
+    CHECK_MSG(name == "sleep" || name == "xargs", ("named by a program in the group (named \"" + name + "\")").c_str());
+
+    REQUIRE(stream->writeAll(std::span("\x03", 1)) == 0);
+    CHECK(drainUntil([&] { return process.foregroundProcessGroup() == shellGroup; }));
+}
+
+// A job whose group a fork of the shell leads is named by the oldest member
+// that makes it a job, so the programs that come and go inside it do not
+// rename it, whatever order the platform lists the group in: Darwin lists
+// newest first, Linux by process ID.
+TEST(aJobLedByAForkIsNamedByItsOldestProgram)
+{
+    auto stream = openArguments({ "/bin/sh" });
+    REQUIRE(stream != nullptr);
+    PAL::ProcessFacts& process = stream->process();
+    char sink[4096];
+    const auto drainUntil = [&](auto&& condition) {
+        for (int tick = 0; tick < 2000 && !condition(); ++tick) {
+            int finalStatus = 0;
+            drainWithBudget(stream.get(), sink, sizeof(sink), 5, &finalStatus);
+        }
+        return condition();
+    };
+    REQUIRE(drainUntil([&] { return process.foregroundIsShell() && process.foregroundProcessGroup().has_value(); }));
+    const std::optional<PAL::ProcessID> shellGroup = process.foregroundProcessGroup();
+    constexpr std::string_view command = "( cd /tmp && while :; do /bin/sleep 0.05; /bin/ls >/dev/null; /usr/bin/true; done ) | /bin/cat\n";
+    REQUIRE(stream->writeAll(command) == 0);
+    REQUIRE_MSG(drainUntil([&] { return process.foregroundProcessGroup() != shellGroup && !process.foregroundIsShell() && process.foregroundName() == "cat"; }),
+        "premise: the pipeline holds the terminal");
+    int samples = 0;
+    int samplesMisnamed = 0;
+    std::string misnamed;
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(1500)) {
+        int finalStatus = 0;
+        drainWithBudget(stream.get(), sink, sizeof(sink), 1, &finalStatus);
+        const std::string name = process.foregroundName();
+        ++samples;
+        if (name != "cat") {
+            ++samplesMisnamed;
+            misnamed = name;
+        }
+    }
+    std::printf("  a job led by a fork: %d samples, %d misnamed\n", samples, samplesMisnamed);
+    CHECK_MSG(samplesMisnamed == 0, ("named \"" + misnamed + "\" rather than its oldest program").c_str());
+
+    REQUIRE(stream->writeAll(std::span("\x03", 1)) == 0);
+    CHECK(drainUntil([&] { return process.foregroundProcessGroup() == shellGroup; }));
+}
+
+// A nested shell is a job of the session's shell, and so is everything it
+// runs: its subshells and prompt hooks lead groups of their own with forks of
+// that shell, which run its code, not the session shell's. Such a group holds
+// the terminal as a program does and is named by the nested shell.
+TEST(aNestedShellsSubshellIsAJobNamedByThatShell)
+{
+    REQUIRE_MSG(::access("/bin/zsh", X_OK) == 0, "premise: zsh is installed; Scripts/run-linux.sh's recipe installs it");
+    auto stream = openArguments({ "/bin/bash", "--norc", "--noprofile", "-i" });
+    REQUIRE(stream != nullptr);
+    PAL::ProcessFacts& process = stream->process();
+    char sink[4096];
+    const auto drainUntil = [&](auto&& condition) {
+        for (int tick = 0; tick < 2000 && !condition(); ++tick) {
+            int finalStatus = 0;
+            drainWithBudget(stream.get(), sink, sizeof(sink), 5, &finalStatus);
+        }
+        return condition();
+    };
+    REQUIRE(drainUntil([&] { return process.foregroundIsShell() && process.foregroundName() == "bash"; }));
+    const std::optional<PAL::ProcessID> outerGroup = process.foregroundProcessGroup();
+    REQUIRE(outerGroup.has_value());
+
+    REQUIRE(stream->writeAll(std::string_view("/bin/zsh -f\r")) == 0);
+    REQUIRE_MSG(drainUntil([&] { return process.foregroundProcessGroup() != outerGroup && !process.foregroundIsShell() && process.foregroundName() == "zsh"; }),
+        "premise: the nested shell holds the terminal at its prompt");
+    const std::optional<PAL::ProcessID> nestedGroup = process.foregroundProcessGroup();
+
+    REQUIRE(stream->writeAll(std::string_view("( while :; do :; done )\r")) == 0);
+    REQUIRE_MSG(drainUntil([&] {
+        const std::optional<PAL::ProcessID> group = process.foregroundProcessGroup();
+        return group && group != outerGroup && group != nestedGroup;
+    }),
+        "premise: the nested shell's subshell holds the terminal");
+    int samplesAsShell = 0;
+    int samplesMisnamed = 0;
+    std::string misnamed;
+    for (int sample = 0; sample < 200; ++sample) {
+        int finalStatus = 0;
+        drainWithBudget(stream.get(), sink, sizeof(sink), 1, &finalStatus);
+        if (process.foregroundIsShell())
+            ++samplesAsShell;
+        const std::string name = process.foregroundName();
+        if (name != "zsh") {
+            ++samplesMisnamed;
+            misnamed = name;
+        }
+    }
+    CHECK_MSG(samplesAsShell == 0, "a nested shell's subshell read as the session shell's own work");
+    CHECK_MSG(samplesMisnamed == 0, ("named \"" + misnamed + "\" rather than the nested shell").c_str());
+
+    REQUIRE(stream->writeAll(std::span("\x03", 1)) == 0);
+    CHECK(drainUntil([&] { return process.foregroundProcessGroup() == nestedGroup; }));
+    REQUIRE(stream->writeAll(std::string_view("exit\r")) == 0);
+    CHECK(drainUntil([&] { return process.foregroundProcessGroup() == outerGroup; }));
+}
+
+#if defined(__linux__)
+// The run state Linux reports for a process, from /proc/<pid>/stat.
+static char linuxProcessState(PAL::ProcessID processID)
+{
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%d/stat", static_cast<int>(processID));
+    std::FILE* file = std::fopen(path, "r");
+    if (!file)
+        return 0;
+    char line[512] {};
+    const std::size_t length = std::fread(line, 1, sizeof(line) - 1, file);
+    std::fclose(file);
+    const std::string_view text { line, length };
+    const std::size_t commEnd = text.rfind(')');
+    return commEnd != std::string_view::npos && commEnd + 2 < text.size() ? text[commEnd + 2] : 0;
+}
+
+// A program whose first thread has ended runs on in its others, and Linux
+// reports the process as a zombie for as long as they run. It is a job, named
+// by its own name, and not the shell's work.
+TEST(aJobWhoseFirstThreadEndedStillHoldsTheTerminal)
+{
+    auto stream = openArguments({ "/bin/sh" });
+    REQUIRE(stream != nullptr);
+    PAL::ProcessFacts& process = stream->process();
+    char sink[4096];
+    const auto drainUntil = [&](auto&& condition) {
+        for (int tick = 0; tick < 2000 && !condition(); ++tick) {
+            int finalStatus = 0;
+            drainWithBudget(stream.get(), sink, sizeof(sink), 5, &finalStatus);
+        }
+        return condition();
+    };
+    REQUIRE(drainUntil([&] { return process.foregroundIsShell() && process.foregroundProcessGroup().has_value(); }));
+    const std::optional<PAL::ProcessID> shellGroup = process.foregroundProcessGroup();
+    const std::string command = executablePath + " " + mainThreadExitsMarker + " 30\n";
+    REQUIRE(stream->writeAll(command) == 0);
+    REQUIRE_MSG(drainUntil([&] {
+        const std::optional<PAL::ProcessID> group = process.foregroundProcessGroup();
+        return group && group != shellGroup && linuxProcessState(*group) == 'Z';
+    }),
+        "premise: the program runs on with its first thread gone, which Linux reports as Z");
+    const std::size_t slash = executablePath.find_last_of('/');
+    const std::string name = slash == std::string::npos ? executablePath : executablePath.substr(slash + 1);
+    CHECK(!process.foregroundIsShell());
+    CHECK_STR_EQ(process.foregroundName(), name);
+
+    REQUIRE(stream->writeAll(std::span("\x03", 1)) == 0);
+    CHECK(drainUntil([&] { return process.foregroundProcessGroup() == shellGroup; }));
+}
+
+// A program can rename itself through the name the kernel keeps for it, as
+// tmux does on Linux ("tmux: client"). It is named by the name it was run by,
+// which is what a pane's tmux routing and the process chain read.
+TEST(aProgramThatRenamesItselfIsNamedByTheNameItWasRunBy)
+{
+    char directoryTemplate[] = "/tmp/ubq-pty-renamed.XXXXXX";
+    const char* directory = ::mkdtemp(directoryTemplate);
+    REQUIRE(directory);
+    const std::string program = std::string(directory) + "/tmux";
+    REQUIRE(::symlink(executablePath.c_str(), program.c_str()) == 0);
+
+    auto stream = openArguments({ "/bin/sh" });
+    REQUIRE(stream != nullptr);
+    PAL::ProcessFacts& process = stream->process();
+    char sink[4096];
+    const auto drainUntil = [&](auto&& condition) {
+        for (int tick = 0; tick < 2000 && !condition(); ++tick) {
+            int finalStatus = 0;
+            drainWithBudget(stream.get(), sink, sizeof(sink), 5, &finalStatus);
+        }
+        return condition();
+    };
+    REQUIRE(drainUntil([&] { return process.foregroundIsShell() && process.foregroundProcessGroup().has_value(); }));
+    const std::optional<PAL::ProcessID> shellGroup = process.foregroundProcessGroup();
+    const std::string command = program + " " + renamesItselfMarker + " 'tmux: client' 30\n";
+    REQUIRE(stream->writeAll(command) == 0);
+    REQUIRE_MSG(drainUntil([&] {
+        const std::optional<PAL::ProcessID> group = process.foregroundProcessGroup();
+        return group && group != shellGroup && PAL::processCommandName(*group) == "tmux: client";
+    }),
+        "premise: the program renamed itself");
+    CHECK(!process.foregroundIsShell());
+    CHECK_STR_EQ(process.foregroundName(), "tmux");
+
+    REQUIRE(stream->writeAll(std::span("\x03", 1)) == 0);
+    CHECK(drainUntil([&] { return process.foregroundProcessGroup() == shellGroup; }));
+    (void)::unlink(program.c_str());
+    (void)::rmdir(directory);
+}
+#endif
+
 // A master the daemon adopts when a window is shared has no child of the
 // daemon's: the app that spawned the shell stays its parent and reaper. The
 // shell still leads the session the master names, so at its prompt it reads as
@@ -1558,8 +1958,7 @@ private:
 
 TEST(testPromptHooksDoNotAskToCloseTheShell)
 {
-    if (::access("/bin/zsh", X_OK) != 0)
-        return;
+    REQUIRE_MSG(::access("/bin/zsh", X_OK) == 0, "premise: zsh is installed; Scripts/run-linux.sh's recipe installs it");
     HookedShell shell(HookedShell::ForegroundHook::Observable);
     CHECK(shell.isReady());
     if (!shell.isReady())
@@ -1568,9 +1967,10 @@ TEST(testPromptHooksDoNotAskToCloseTheShell)
     // Every Return runs the hooks again. Sampled as fast as the reads go, the
     // samples land inside the hooks' subshells as well as between them, and
     // the count of those that did keeps the run from passing on a shell whose
-    // hooks were never seen.
+    // hooks were never seen. A hook is the shell's work, and is named by it.
     int samplesInsideAHook = 0;
     int samplesAsking = 0;
+    int samplesMisnamed = 0;
     const auto start = std::chrono::steady_clock::now();
     auto lastReturn = start;
     while (std::chrono::steady_clock::now() - start < std::chrono::seconds(3)) {
@@ -1587,25 +1987,30 @@ TEST(testPromptHooksDoNotAskToCloseTheShell)
             ++samplesInsideAHook;
         if (isAsking)
             ++samplesAsking;
+        if (shell.stream().process().foregroundName() != "zsh")
+            ++samplesMisnamed;
     }
-    std::printf("  prompt hooks: %d samples inside a hook, %d asked to close\n", samplesInsideAHook, samplesAsking);
+    std::printf("  prompt hooks: %d samples inside a hook, %d asked to close, %d misnamed\n", samplesInsideAHook, samplesAsking, samplesMisnamed);
     CHECK(samplesInsideAHook > 0);
     CHECK(samplesAsking == 0);
+    CHECK(samplesMisnamed == 0);
 }
 
 TEST(testRunningJobsStillAskToClose)
 {
-    if (::access("/bin/zsh", X_OK) != 0)
-        return;
+    REQUIRE_MSG(::access("/bin/zsh", X_OK) == 0, "premise: zsh is installed; Scripts/run-linux.sh's recipe installs it");
     HookedShell shell;
     CHECK(shell.isReady());
     if (!shell.isReady())
         return;
 
     // The close must ask once each job has started, and keep asking for as
-    // long as it runs.
+    // long as it runs, and the job is named by a program that makes it one.
     struct Job {
         std::string_view command;
+        // The names it may read: the first member listed that is a job names
+        // a group whose leader is not one.
+        std::array<std::string_view, 2> names;
         std::string_view ending = "\x03";
         // Output that says every member of the job has started. Until then
         // the group can be its leader alone, a fork running shell code,
@@ -1613,21 +2018,21 @@ TEST(testRunningJobsStillAskToClose)
         std::string_view started = {};
     };
     const Job jobs[] = {
-        { "/bin/sleep 30\r" },
+        { "/bin/sleep 30\r", { "sleep" } },
         // A program that reads the terminal, standing in for an editor.
-        { "/bin/cat\r" },
+        { "/bin/cat\r", { "cat" } },
         // A nested shell is a program the user started, not the session's
         // shell. It ignores Ctrl-C at its prompt, as the session's does.
-        { "/bin/zsh -f\r", "exit\r" },
-        { "/bin/sleep 30 | /bin/cat\r" },
+        { "/bin/zsh -f\r", { "zsh" }, "exit\r" },
+        { "/bin/sleep 30 | /bin/cat\r", { "sleep" } },
         // The group's leader is a fork of the shell; its other member exec'd.
         // The leader can run `echo` to its end before the shell has forked
         // `cat`, so the job has started once `cat` printed what `echo` wrote;
         // the quotes keep the typed line from saying it first.
-        { "{ /bin/echo pi''ped; /bin/sleep 30 } | /bin/cat\r", "\x03", "piped" },
-        { "for i in 1 2; do /bin/sleep 30; done | /bin/cat\r" },
+        { "{ /bin/echo pi''ped; /bin/sleep 30 } | /bin/cat\r", { "sleep", "cat" }, "\x03", "piped" },
+        { "for i in 1 2; do /bin/sleep 30; done | /bin/cat\r", { "sleep", "cat" } },
         // A subshell whose child exec'd in the foreground.
-        { "( /bin/sleep 30; true )\r" },
+        { "( /bin/sleep 30; true )\r", { "sleep" } },
     };
     for (const Job& job : jobs) {
         const std::string name { job.command };
@@ -1637,12 +2042,20 @@ TEST(testRunningJobsStillAskToClose)
         const bool didAsk = shell.drainUntil([&] { return shell.wouldCloseAsk(); }, 5000);
         CHECK_MSG(didAsk, name.c_str());
         int samplesNotAsking = 0;
+        int samplesMisnamed = 0;
+        std::string misnamed;
         for (int sample = 0; sample < 200; ++sample) {
             shell.drain();
             if (!shell.wouldCloseAsk())
                 ++samplesNotAsking;
+            const std::string foregroundName = shell.stream().process().foregroundName();
+            if (foregroundName.empty() || std::ranges::find(job.names, foregroundName) == job.names.end()) {
+                ++samplesMisnamed;
+                misnamed = foregroundName;
+            }
         }
         CHECK_MSG(samplesNotAsking == 0, name.c_str());
+        CHECK_MSG(samplesMisnamed == 0, (name + " read the name \"" + misnamed + "\"").c_str());
         CHECK_MSG(shell.returnToPrompt(job.ending), name.c_str());
     }
 
@@ -1895,6 +2308,127 @@ TEST(testTheChainFollowsAProgramTheShellStarts)
     }
     CHECK_MSG(followed, ("the chain follows a program the shell started (saw \"" + seen + "\")").c_str());
 }
+
+#if defined(__APPLE__)
+// A program's name is its argv[0], whole when that names the executable, so a
+// program whose file name holds a space is named whole by the walk and by the
+// chain spelled from it; a rewritten argv[0] is named by its first word.
+TEST(testTheChainNamesAProgramWhoseNameHoldsASpaceWhole)
+{
+    char directoryTemplate[] = "/tmp/ubq-pty-spaced.XXXXXX";
+    const char* directory = ::mkdtemp(directoryTemplate);
+    REQUIRE(directory);
+    const std::string program = std::string(directory) + "/a program";
+    REQUIRE(::symlink("/bin/sleep", program.c_str()) == 0);
+    struct Named {
+        std::string name;
+        std::string chainName;
+    };
+    // What the walk names the child once it reads `expected`, and the name
+    // the chain spells from that record, or the last ones it read: a forked
+    // child reads as this test until it execs.
+    const auto nameOf = [](const char* path, const char* argument0, std::string_view expected) {
+        UbiquittyTest::OwnedChildProcess<> childOwner;
+        const pid_t child = childOwner.canOwnChildren() ? ::fork() : -1;
+        if (child == 0) {
+            ::execl(path, argument0, "40", nullptr);
+            ::_exit(127);
+        }
+        Named named;
+        if (child < 0 || !childOwner.adoptForkResult(child))
+            return named;
+        for (int attempt = 0; attempt < 300 && named.name != expected; ++attempt) {
+            PAL::Process::Record records[8];
+            const int count = PAL::gatherSubtree(static_cast<PAL::ProcessID>(child), 0, "", { records, 8 }, nullptr);
+            for (int index = 0; index < count; ++index) {
+                if (records[index].processID == static_cast<std::uint32_t>(child))
+                    named = { .name = records[index].name, .chainName = std::string(PAL::Process::scriptDisplayName(records[index].name, records[index].commandLine)) };
+            }
+            if (named.name != expected)
+                ::usleep(10000);
+        }
+        CHECK(childOwner.stop());
+        return named;
+    };
+    const Named spaced = nameOf(program.c_str(), program.c_str(), "a program");
+    CHECK_STR_EQ(spaced.name, "a program");
+    CHECK_STR_EQ(spaced.chainName, "a program");
+    const Named rewritten = nameOf("/bin/sleep", "sleeper: waiting", "sleeper:");
+    CHECK_STR_EQ(rewritten.name, "sleeper:");
+    CHECK_STR_EQ(rewritten.chainName, "sleeper:");
+    (void)::unlink(program.c_str());
+    (void)::rmdir(directory);
+}
+#endif
+
+#if defined(__linux__)
+// A program's name is its argv[0]'s basename, whole when argv[0] is a file
+// name, so a path or a file name holding a space names the program whole; a
+// rewritten argv[0] is named by its first word, whether or not the program also
+// renamed comm to match it (Node's process.title, setproctitle) and whether or
+// not a long file name leaves comm the head of the title.
+TEST(testTheExecutableNameKeepsASpaceInTheProgramsOwnName)
+{
+    char directoryTemplate[] = "/tmp/ubq-pty-spaced.XXXXXX";
+    const char* directory = ::mkdtemp(directoryTemplate);
+    REQUIRE(directory);
+    const std::string toolsDirectory = std::string(directory) + "/My Tools";
+    REQUIRE(::mkdir(toolsDirectory.c_str(), 0700) == 0);
+    const std::string inSpacedDirectory = toolsDirectory + "/napper";
+    const std::string spacedFile = std::string(directory) + "/nap time";
+    const std::string longSpacedFile = std::string(directory) + "/a program whose name is long";
+    const std::string longNamedFile = std::string(directory) + "/kube-controller-manager";
+    for (const std::string& link : { inSpacedDirectory, spacedFile, longSpacedFile, longNamedFile })
+        REQUIRE_MSG(::symlink(executablePath.c_str(), link.c_str()) == 0, "premise: the link is made");
+
+    // What the executable name reads once the child runs `path` as `argument0`;
+    // a forked child reads as this test until it execs.
+    // `commName` is the name the program gives its comm once it runs, none
+    // when it leaves comm alone.
+    const auto nameOf = [](const std::string& path, const char* argument0, std::string_view expected, const char* commName = nullptr) {
+        UbiquittyTest::OwnedChildProcess<> childOwner;
+        const pid_t child = childOwner.canOwnChildren() ? ::fork() : -1;
+        if (child == 0) {
+            if (commName)
+                ::execl(path.c_str(), argument0, renamesItselfMarker, commName, "40", nullptr);
+            else
+                ::execl(path.c_str(), argument0, sleepsMarker, "40", nullptr);
+            ::_exit(127);
+        }
+        std::string name;
+        if (child < 0 || !childOwner.adoptForkResult(child))
+            return name;
+        // The name read before the program renames comm is the unrenamed
+        // answer, which can agree with the expected one by chance.
+        const std::string renamedComm = commName ? std::string(commName).substr(0, 15) : std::string {};
+        for (int attempt = 0; attempt < 300 && !renamedComm.empty() && PAL::processCommandName(static_cast<PAL::ProcessID>(child)) != renamedComm; ++attempt)
+            ::usleep(10000);
+        for (int attempt = 0; attempt < 300 && name != expected; ++attempt) {
+            name = PAL::processExecutableName(static_cast<PAL::ProcessID>(child));
+            if (name != expected)
+                ::usleep(10000);
+        }
+        CHECK(childOwner.stop());
+        return name;
+    };
+    CHECK_STR_EQ(nameOf(inSpacedDirectory, inSpacedDirectory.c_str(), "napper"), "napper");
+    CHECK_STR_EQ(nameOf(spacedFile, spacedFile.c_str(), "nap time"), "nap time");
+    CHECK_STR_EQ(nameOf(longSpacedFile, longSpacedFile.c_str(), "a program whose name is long"), "a program whose name is long");
+    CHECK_STR_EQ(nameOf(executablePath, "sleeper: waiting", "sleeper:"), "sleeper:");
+    CHECK_STR_EQ(nameOf(executablePath, "sleeper: user@pts/0", "sleeper:"), "sleeper:");
+    // A title whose comm the program renamed to match, and one a long file name
+    // leaves comm the head of, are titles all the same.
+    CHECK_STR_EQ(nameOf(executablePath, "npm run dev", "npm", "npm run dev"), "npm");
+    CHECK_STR_EQ(nameOf(executablePath, "gunicorn: master [app]", "gunicorn:", "gunicorn: master [app]"), "gunicorn:");
+    CHECK_STR_EQ(nameOf(longNamedFile, "kube-controller-manager: leader election", "kube-controller-manager:"), "kube-controller-manager:");
+    (void)::unlink(longNamedFile.c_str());
+    (void)::unlink(inSpacedDirectory.c_str());
+    (void)::unlink(spacedFile.c_str());
+    (void)::unlink(longSpacedFile.c_str());
+    (void)::rmdir(toolsDirectory.c_str());
+    (void)::rmdir(directory);
+}
+#endif
 
 TEST(testProcessArgumentsRefreshWithoutTrackerNotifications)
 {
@@ -3111,6 +3645,27 @@ int main(int argc, char** argv)
         std::printf("[%s]", argv[0]);
         return failures == 0 ? 0 : 1;
     }
+    if (argc == 3 && std::strcmp(argv[1], sleepsMarker) == 0) {
+        std::this_thread::sleep_for(std::chrono::seconds(std::strtoul(argv[2], nullptr, 10)));
+        return 0;
+    }
+    if (argc == 3 && std::strcmp(argv[1], mainThreadExitsMarker) == 0) {
+        // The first thread ends and a second sleeps on, so the process runs
+        // without the thread it started with.
+        const unsigned long seconds = std::strtoul(argv[2], nullptr, 10);
+        std::thread([seconds] {
+            std::this_thread::sleep_for(std::chrono::seconds(seconds));
+            std::_Exit(0);
+        }).detach();
+        ::pthread_exit(nullptr);
+    }
+#if defined(__linux__)
+    if (argc == 4 && std::strcmp(argv[1], renamesItselfMarker) == 0) {
+        ::prctl(PR_SET_NAME, argv[2], 0, 0, 0);
+        std::this_thread::sleep_for(std::chrono::seconds(std::strtoul(argv[3], nullptr, 10)));
+        return 0;
+    }
+#endif
 
     executablePath = absoluteExecutablePath(argv[0]);
     UBIQUITTY_TEST_PIN_PREFERENCES();

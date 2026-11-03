@@ -413,6 +413,7 @@ public:
     // name/currentDirectory/gather delegate to the per-OS seam.
     std::string foregroundName() override;
     bool foregroundIsShell() override;
+    ForegroundHolder foregroundHolder() override;
     std::optional<ProcessID> foregroundProcessGroup() override;
     void setTreeChangeNotifier(bool (*notify)(void*), void* context, void (*releaseContext)(void*)) override
     {
@@ -477,6 +478,19 @@ private:
     // Normally the session's leader, but when that leader is a `login` wrapper the
     // real shell is login's child — see through it. Caches once resolved.
     ProcessID effectiveShellLeader();
+    /// Who owns the terminal's foreground group, by `Session::foregroundOwner`.
+    ///
+    /// - Returns: The shell's own work for a session that has ended or whose
+    ///   group is the shell; a job without a naming member for a group the
+    ///   process table cannot list.
+    [[nodiscard]] Session::ForegroundOwner foregroundOwner();
+    /// The name of a foreground's owner: the member that names a job, or the
+    /// shell, past any `login` wrapper, for its own work and for a job no member
+    /// read can name, as `processForegroundName` names it.
+    ///
+    /// - Parameter owner: The owner, as `foregroundOwner` read it.
+    /// - Returns: The name, empty when the process has gone or is in exec.
+    [[nodiscard]] std::string ownerName(const Session::ForegroundOwner& owner);
     // Best-effort waitpid(WNOHANG) on the shared record.
     void reapIfExited() { m_child->reapIfExited(); }
 
@@ -506,7 +520,7 @@ private:
     std::optional<ProcessBirthIdentity> m_inheritedBirth;
     bool m_isLoginProgram = false;
     ProcessClosePolicy m_processClosePolicy = ProcessClosePolicy::Terminate;
-    ProcessID m_effectiveShellProcessID = 0; // resolved shell-leader cache (see effectiveShellLeader)
+    std::atomic<ProcessID> m_effectiveShellProcessID = 0; // resolved shell-leader cache (see effectiveShellLeader); read by every thread that asks for facts
     /* owned */ ProcessTracker* m_processTracker = nullptr; // kqueue subtree watcher; stopProcessTracker on close
     // The replica this stream wrote a login-session record for, empty when it
     // wrote none. Held so close clears exactly the record open wrote, rather
@@ -577,20 +591,29 @@ ProcessID PTYStream::sessionLeader() const
 
 ProcessID PTYStream::effectiveShellLeader()
 {
-    if (m_effectiveShellProcessID > 0)
-        return m_effectiveShellProcessID; // login's child, resolved once — stable
-    // A `login` wrapper makes the real shell login's child. Cache only on success:
-    // a pre-exec read must never pin the session's leader as the shell (`login`
-    // cached before its shell appeared reads a pristine prompt as busy).
+    if (const ProcessID cached = m_effectiveShellProcessID.load(std::memory_order_relaxed); cached > 0)
+        return cached; // resolved once — stable
+    // A `login` wrapper makes the real shell login's child. Cache only once
+    // resolved: a pre-exec read must never pin the session's leader as the
+    // shell (`login` cached before its shell appeared reads a pristine prompt
+    // as busy). A leader that has exec'd a program other than `login` is the
+    // shell for as long as it runs, which saves every later read its name.
     const ProcessID leader = sessionLeader();
-    if (leader > 0 && processExecutableName(leader) == "login") {
-        ProcessID shell = firstChildProcess(leader);
-        if (shell > 0) {
-            m_effectiveShellProcessID = shell;
-            return shell;
-        }
+    if (leader <= 0)
+        return leader;
+    const std::string leaderName = processExecutableName(leader);
+    if (leaderName == "login") {
+        const ProcessID shell = firstChildProcess(leader);
+        if (shell <= 0)
+            return leader; // login's shell not up yet — don't cache
+        m_effectiveShellProcessID.store(shell, std::memory_order_relaxed);
+        return shell;
     }
-    return leader; // direct shell, or login's shell not up yet — don't cache
+    if (leaderName.empty())
+        return leader;
+    if (const std::optional<PAL::Process::GroupMember> member = processGroupMember(leader); member && member->hasExecuted && !member->isZombie)
+        m_effectiveShellProcessID.store(leader, std::memory_order_relaxed);
+    return leader;
 }
 
 int PTYStream::read(std::span<char> buffer)
@@ -1076,49 +1099,61 @@ void PTYStream::reassertWindowSize(int columns, int rows, int xPixels, int yPixe
 
 std::string PTYStream::foregroundName()
 {
-    if (!m_masterFileDescriptor)
-        return {};
-    // tcgetpgrp's foreground group id equals the leader's processID — the process
-    // to name (vim, ssh, …). Fall back to the session's leader on failure.
-    ProcessID foreground = ::tcgetpgrp(m_masterFileDescriptor.get());
-    if (foreground > 0) {
-        std::string name = processExecutableName(foreground);
-        if (!name.empty())
-            return name;
-    }
-    return processExecutableName(sessionLeader());
+    return foregroundHolder().name;
 }
 
 bool PTYStream::foregroundIsShell()
 {
+    if (m_masterFileDescriptor && !m_child->hasExited())
+        reapIfExited();
+    return !foregroundOwner().isJob;
+}
+
+ForegroundHolder PTYStream::foregroundHolder()
+{
+    if (!m_masterFileDescriptor)
+        return {};
+    if (!m_child->hasExited())
+        reapIfExited();
+    // The name pairs with the holder because both come from this one reading
+    // of the owner.
+    const Session::ForegroundOwner owner = foregroundOwner();
+    return { .isShell = !owner.isJob, .name = ownerName(owner) };
+}
+
+std::string PTYStream::ownerName(const Session::ForegroundOwner& owner)
+{
+    return processForegroundName(owner.namingProcessID ? static_cast<ProcessID>(owner.namingProcessID) : effectiveShellLeader());
+}
+
+Session::ForegroundOwner PTYStream::foregroundOwner()
+{
     if (!m_masterFileDescriptor || m_child->hasExited())
-        return true;
-    reapIfExited();
-    if (m_child->hasExited())
-        return true;
+        return {};
     // At a pristine prompt the foreground group is the shell itself (pgid == its
     // processID). Treat an unresolvable group as the shell. The shell is the
     // session's leader, or login's child.
-    ProcessID foreground = ::tcgetpgrp(m_masterFileDescriptor.get());
+    const ProcessID foreground = ::tcgetpgrp(m_masterFileDescriptor.get());
     if (foreground <= 0 || foreground == sessionLeader())
-        return true;
+        return {};
     const ProcessID shell = effectiveShellLeader();
     if (foreground == shell)
-        return true;
+        return {};
     // Another group may still be the shell's own work: a prompt hook's
     // subshell holds the terminal for as long as it lives. Session decides
-    // from the group's members. The usual job is its group's leader and an
-    // exec'd child of the shell, which one read settles without listing it.
+    // from the group's members. The usual job is its group's leader, an exec'd
+    // child of the shell or a nested shell's fork, which one read settles
+    // without listing it.
     const auto shellProcessID = static_cast<std::uint32_t>(shell);
-    if (const auto leader = processGroupMember(foreground); leader && Session::isJobProcess(*leader, shellProcessID))
-        return false;
+    const auto group = static_cast<std::uint32_t>(foreground);
+    if (const auto leader = processGroupMember(foreground); leader && Session::isJobLeader(*leader, shellProcessID))
+        return { .isJob = true, .namingProcessID = leader->processID };
     std::array<PAL::Process::GroupMember, 32> members;
     const std::optional<std::size_t> count = processGroupMembers(foreground, members);
-    // A group that cannot be read in full is a job: a close that asks is
-    // recoverable, and one that kills a job is not.
-    if (!count || *count > members.size())
-        return false;
-    return Session::isShellOwnedForegroundGroup(std::span(members).first(*count), shellProcessID);
+    // A group that cannot be read at all is a job, as one read in part is.
+    if (!count)
+        return { .isJob = true };
+    return Session::foregroundOwner(std::span(members).first(std::min(*count, members.size())), group, *count <= members.size(), shellProcessID);
 }
 
 std::optional<ProcessID> PTYStream::foregroundProcessGroup()
@@ -1344,7 +1379,7 @@ PTYStream::~PTYStream()
             // and the master's close that follows leaves it to start a shell
             // on a dead pty. With no shell there is nothing to hang up
             // gracefully, so that case gets the signal login cannot ignore.
-            const bool isLoginWithoutShell = m_isLoginProgram && m_effectiveShellProcessID <= 0
+            const bool isLoginWithoutShell = m_isLoginProgram && m_effectiveShellProcessID.load(std::memory_order_relaxed) <= 0
                 && firstChildProcess(childProcess) <= 0;
             ::kill(childProcess, isLoginWithoutShell ? SIGKILL : SIGHUP);
             // One non-blocking probe covers what almost always happens: a shell

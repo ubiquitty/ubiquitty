@@ -70,29 +70,6 @@ namespace Ubiquitty::Title {
     return nullptr;
 }
 
-/// Whether a pane's foreground process is its shell, by name: for a pane a
-/// host serves, whose facts name both and not which holds the terminal. A
-/// login shell's leading `-` and a path are left off either side.
-///
-/// - Parameters:
-///   - foregroundName: The foreground process's name.
-///   - shellName: The pane's shell.
-/// - Returns: Whether they are the same program; false when either is unknown.
-[[nodiscard]] constexpr bool isForegroundTheShell(std::string_view foregroundName, std::string_view shellName)
-{
-    const auto bare = [](std::string_view name) {
-        if (const auto slash = name.rfind('/'); slash != std::string_view::npos) {
-            name.remove_prefix(slash + 1);
-        }
-        if (name.starts_with('-')) {
-            name.remove_prefix(1);
-        }
-        return name;
-    };
-    const std::string_view foreground = bare(foregroundName);
-    return !foreground.empty() && foreground == bare(shellName);
-}
-
 /// The position a snapshot publishes an icon at: its catalog index plus one.
 ///
 /// - Parameter icon: A catalog entry, or nullptr.
@@ -135,6 +112,19 @@ namespace Ubiquitty::Title {
 [[nodiscard]] constexpr const ProcessIcon* processIconFor(const ProcessIcon* reported, std::string_view foregroundName, TerminalHolder holder)
 {
     return reported && holder == TerminalHolder::Program ? reported : processIconNamed(foregroundName);
+}
+
+/// The catalog key of the program a pane runs; see ``processIconFor``.
+///
+/// - Parameters:
+///   - reportedOrdinal: The snapshot's `reportedProcessIcon`.
+///   - foregroundName: The pane's foreground process name.
+///   - holder: Who holds the pane's terminal.
+/// - Returns: The key, empty for a pane running none.
+[[nodiscard]] constexpr std::string_view processIconKeyFor(std::uint8_t reportedOrdinal, std::string_view foregroundName, TerminalHolder holder)
+{
+    const ProcessIcon* icon = processIconFor(processIconAt(reportedOrdinal), foregroundName, holder);
+    return icon ? std::string_view(icon->key) : std::string_view();
 }
 
 /// ``processIconFor`` from a pane's records.

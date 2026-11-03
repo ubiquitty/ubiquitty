@@ -56,6 +56,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -66,6 +67,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace Ubiquitty::PAL {
 
@@ -120,27 +122,33 @@ ProcessArguments readProcessArguments(ProcessID processID, std::vector<char>& ar
     std::memcpy(&argumentCount, argumentBuffer.data(), sizeof(int));
     const char* begin = argumentBuffer.data();
     const char* end = begin + size;
+    const auto basename = [](std::string_view path) {
+        const std::size_t slash = path.rfind('/');
+        return slash == std::string_view::npos ? path : path.substr(slash + 1);
+    };
     // The exec path, then its trailing NULs, then argv[0].
     const char* p = begin + sizeof(int);
     while (p < end && *p != '\0')
         ++p;
+    const std::string_view executableName = basename({ begin + sizeof(int), static_cast<std::size_t>(p - begin) - sizeof(int) });
     while (p < end && *p == '\0')
         ++p;
     if (p >= end)
         return arguments;
 
-    // argv[0]'s basename, keeping a login shell's leading '-'.
+    // argv[0]'s basename, keeping a login shell's leading '-'. Whole when it
+    // names the executable, whose name may hold a space; otherwise up to its
+    // first space, as a program that rewrites its argv[0] ("sshd: user@ttys000")
+    // is named by its first word.
     const char* argument0 = p;
-    const char* slash = nullptr;
-    for (const char* q = argument0; q < end && *q != '\0'; ++q) {
-        if (*q == '/')
-            slash = q;
-    }
-    const char* name = slash ? slash + 1 : argument0;
-    const char* nameEnd = name;
-    while (nameEnd < end && *nameEnd != '\0' && *nameEnd != ' ')
-        ++nameEnd;
-    arguments.argument0Name.assign(name, static_cast<std::size_t>(nameEnd - name));
+    const char* argument0End = argument0;
+    while (argument0End < end && *argument0End != '\0')
+        ++argument0End;
+    std::string_view name = basename({ argument0, static_cast<std::size_t>(argument0End - argument0) });
+    const std::string_view bareName = name.starts_with('-') ? name.substr(1) : name;
+    if (bareName != executableName)
+        name = name.substr(0, name.find(' '));
+    arguments.argument0Name.assign(name);
 
     // argv joined with single spaces.
     for (int argumentIndex = 0; argumentIndex < argumentCount && p < end; ++argumentIndex) {
@@ -206,12 +214,37 @@ PAL::Process::GroupMember groupMemberOf(const struct kinfo_proc& info)
         .hasExecuted = (info.kp_proc.p_flag & P_EXEC) != 0,
         .isInterruptIgnored = (static_cast<std::uint32_t>(info.kp_proc.p_sigignore) & interruptMask) != 0,
         .isZombie = info.kp_proc.p_stat == SZOMB,
+        .startTime = static_cast<std::uint64_t>(info.kp_proc.p_starttime.tv_sec) * 1'000'000 + static_cast<std::uint64_t>(info.kp_proc.p_starttime.tv_usec),
     };
 }
 
 } // anonymous namespace
 
 std::string processExecutableName(ProcessID processID) { return processBasename(processID); }
+
+// p_comm, out of the kernel's process table. exec copies it from the name of
+// the file it ran, and it stays until the process is reaped. The table reads a
+// process of another user, as proc_pidpath does.
+std::string processCommandName(ProcessID processID)
+{
+    if (processID <= 0)
+        return {};
+    std::array mib { CTL_KERN, KERN_PROC, KERN_PROC_PID, processID };
+    struct kinfo_proc info {};
+    size_t size = sizeof(info);
+    if (::sysctl(mib.data(), static_cast<u_int>(mib.size()), &info, &size, nullptr, 0) != 0 || size < sizeof(info)
+        || info.kp_proc.p_pid != processID)
+        return {};
+    const std::span<const char> command { info.kp_proc.p_comm };
+    return { command.begin(), std::ranges::find(command, '\0') };
+}
+
+// The executable's name, or p_comm once that no longer reads.
+std::string processForegroundName(ProcessID processID)
+{
+    std::string name = processExecutableName(processID);
+    return name.empty() ? processCommandName(processID) : name;
+}
 
 std::optional<PTYProcessSnapshot> ptyProcessSnapshot(ProcessID processID)
 {
@@ -252,23 +285,23 @@ std::optional<std::size_t> processGroupMembers(ProcessID group, std::span<PAL::P
     if (group <= 0)
         return std::nullopt;
     std::array mib { CTL_KERN, KERN_PROC, KERN_PROC_PGRP, group };
-    size_t size = 0;
-    if (::sysctl(mib.data(), static_cast<u_int>(mib.size()), nullptr, &size, nullptr, 0) != 0)
+    // One read, into a table the caller's buffer bounds. sysctl(3) fills a
+    // table the group overflows as far as it holds and fails with ENOMEM, and
+    // the length it reports then is not how far (Darwin reports none), so a
+    // refused read keeps the table only when every entry is the group's.
+    std::vector<struct kinfo_proc> infos(std::max<std::size_t>(outputBuffer.size(), 1));
+    size_t size = infos.size() * sizeof(struct kinfo_proc);
+    if (::sysctl(mib.data(), static_cast<u_int>(mib.size()), infos.data(), &size, nullptr, 0) == 0) {
+        const std::size_t count = size / sizeof(struct kinfo_proc);
+        for (std::size_t index = 0; index < count && index < outputBuffer.size(); ++index)
+            outputBuffer[index] = groupMemberOf(infos[index]);
+        return count;
+    }
+    if (errno != ENOMEM || !std::ranges::all_of(infos, [group](const struct kinfo_proc& info) { return info.kp_eproc.e_pgid == group; }))
         return std::nullopt;
-    // The estimate already carries the kernel's slack for processes joining
-    // between the two reads. A group larger than the caller can hold is
-    // reported by its size alone, which bounds the allocation by the caller.
-    const std::size_t estimate = size / sizeof(struct kinfo_proc);
-    if (estimate > outputBuffer.size() + 8)
-        return estimate;
-    std::vector<struct kinfo_proc> infos(estimate + 8);
-    size = infos.size() * sizeof(struct kinfo_proc);
-    if (::sysctl(mib.data(), static_cast<u_int>(mib.size()), infos.data(), &size, nullptr, 0) != 0)
-        return std::nullopt;
-    const std::size_t count = size / sizeof(struct kinfo_proc);
-    for (std::size_t index = 0; index < count && index < outputBuffer.size(); ++index)
+    for (std::size_t index = 0; index < outputBuffer.size(); ++index)
         outputBuffer[index] = groupMemberOf(infos[index]);
-    return count;
+    return outputBuffer.size() + 1;
 }
 
 ProcessID firstChildProcess(ProcessID parent)
@@ -782,35 +815,6 @@ bool isProcessAncestorOfSession(ProcessID claimedOwner, ProcessID sessionLeader)
 namespace Ubiquitty {
 namespace PAL {
 
-// The executable basename, from /proc/<pid>/comm.
-//
-// The kernel truncates comm to 15 characters (TASK_COMM_LEN - 1), so this
-// answers a shorter name than the Darwin arm does for a long executable. Every
-// caller compares against a short literal — effectiveShellLeader against
-// "login" — so the truncation does not reach a decision today; a caller
-// matching something longer would need /proc/<pid>/exe, which needs the
-// permission comm does not.
-std::string processExecutableName(ProcessID processID)
-{
-    if (processID <= 0)
-        return {};
-    std::array<char, 64> path {};
-    std::snprintf(path.data(), path.size(), "/proc/%lld/comm", static_cast<long long>(processID));
-    const int descriptor = ::open(path.data(), O_RDONLY | O_CLOEXEC);
-    if (descriptor < 0)
-        return {};
-    std::array<char, 64> name {};
-    const ssize_t length = ::read(descriptor, name.data(), name.size());
-    ::close(descriptor);
-    if (length <= 0)
-        return {};
-    // comm arrives newline-terminated.
-    std::size_t end = static_cast<std::size_t>(length);
-    while (end > 0 && (name[end - 1] == '\n' || name[end - 1] == '\0'))
-        --end;
-    return std::string(name.data(), end);
-}
-
 // The working directory, from readlink(/proc/<pid>/cwd).
 //
 // Callers tolerate an empty result: OSC 7 is the primary source and this is the
@@ -1116,6 +1120,159 @@ struct ProcessEntry {
 
 } // namespace
 
+namespace {
+
+// Whether argv[0] is a file name rather than a title the program wrote over it.
+//
+// comm cannot say: a program renames it (prctl PR_SET_NAME, as Node's
+// process.title and setproctitle do beside rewriting argv[0]), and a file name
+// of 15 bytes or more has a comm that is the head of any title beginning with
+// it. What the program cannot rewrite is the file it was run from. A path that
+// resolves is a file; so is a bare name equal to the executable's own name.
+// The executable's name resolves symbolic links, so only a name no link
+// explains is refused by it. An executable that cannot be read, as another
+// user's cannot, leaves comm to answer.
+[[nodiscard]] bool argument0NamesAFile(std::string_view argument0, std::string_view whole, ProcessID processID)
+{
+    constexpr std::size_t commandNameLength = 15;
+    std::string path;
+    if (argument0.starts_with('/'))
+        path = std::string(argument0);
+    else {
+        path = procPath(processID, "cwd").data();
+        path += '/';
+        path += argument0;
+    }
+    struct stat fileStat {};
+    if (::lstat(path.c_str(), &fileStat) == 0)
+        return true;
+    std::array<char, PATH_MAX> executable {};
+    const ssize_t length = ::readlink(procPath(processID, "exe").data(), executable.data(), executable.size());
+    if (length <= 0)
+        return whole.substr(0, commandNameLength) == processCommandName(processID);
+    std::string_view executablePath { executable.data(), static_cast<std::size_t>(length) };
+    constexpr std::string_view deletedSuffix = " (deleted)";
+    if (executablePath.ends_with(deletedSuffix))
+        executablePath.remove_suffix(deletedSuffix.size());
+    return executablePath.substr(executablePath.rfind('/') + 1) == whole;
+}
+
+// The name the program was run by, out of the text of /proc/<pid>/cmdline:
+// argv[0]'s basename, without a login shell's leading dash, as Darwin's
+// executable name has none. Whole when argv[0] is a file name
+// (argument0NamesAFile), so a program whose file name holds a space is named
+// whole. Otherwise argv[0] is a title the program rewrote ("sshd: user@pts/0",
+// "npm run dev"), named by its first word.
+[[nodiscard]] std::string argument0Name(std::string_view arguments, ProcessID processID)
+{
+    const std::string_view argument0 = arguments.substr(0, arguments.find('\0'));
+    const auto bareBasename = [](std::string_view path) {
+        path.remove_prefix(path.rfind('/') + 1);
+        if (path.starts_with('-'))
+            path.remove_prefix(1);
+        return path;
+    };
+    if (argument0.find(' ') == std::string_view::npos)
+        return std::string(bareBasename(argument0));
+    const std::string_view whole = bareBasename(argument0);
+    if (argument0NamesAFile(argument0, whole, processID))
+        return std::string(whole);
+    return std::string(bareBasename(argument0.substr(0, argument0.find(' '))));
+}
+
+// A process's argv[0], from the start of /proc/<pid>/cmdline.
+struct Argument0 {
+    /// Whether the arguments read anything; they read nothing for a process
+    /// without memory of its own.
+    bool isPresent = false;
+    /// Its name (argument0Name).
+    std::string name;
+};
+
+// argv[0] alone, which a path bounds; nothing for a process that is gone.
+[[nodiscard]] std::optional<Argument0> readArgument0(ProcessID processID)
+{
+    const UnixFileDescriptor descriptor { ::open(procPath(processID, "cmdline").data(), O_RDONLY | O_CLOEXEC) };
+    if (!descriptor)
+        return std::nullopt;
+    std::array<char, PATH_MAX> arguments {};
+    const ssize_t length = ::read(descriptor.get(), arguments.data(), arguments.size());
+    if (length < 0)
+        return std::nullopt;
+    return Argument0 { .isPresent = length > 0, .name = argument0Name({ arguments.data(), static_cast<std::size_t>(length) }, processID) };
+}
+
+} // namespace
+
+// The name the program was run by, argv[0]'s (argument0Name).
+//
+// Neither of the kernel's own names will do for a program that runs. The
+// executable's path (/proc/<pid>/exe) resolves symbolic links, so `vi` run
+// through a link to `vim.basic` would read `vim.basic`, and it needs the
+// permission to trace the process. comm is cut at 15 bytes and the process can
+// rename it: tmux names its client `tmux: client`. argv[0] is empty for a
+// process that is exiting, a zombie, a kernel thread, and one in exec before
+// its new image has its arguments; processCommandName answers for those.
+std::string processExecutableName(ProcessID processID)
+{
+    if (processID <= 0)
+        return {};
+    std::optional<Argument0> argument0 = readArgument0(processID);
+    return argument0 ? std::move(argument0->name) : std::string {};
+}
+
+// comm, the kernel's own name for the process: the last part of the path exec
+// ran, cut at 15 bytes, until the process renames it.
+std::string processCommandName(ProcessID processID)
+{
+    if (processID <= 0)
+        return {};
+    const UnixFileDescriptor descriptor { ::open(procPath(processID, "comm").data(), O_RDONLY | O_CLOEXEC) };
+    if (!descriptor)
+        return {};
+    std::array<char, 64> name {};
+    const ssize_t length = ::read(descriptor.get(), name.data(), name.size());
+    if (length <= 0)
+        return {};
+    // comm arrives newline-terminated.
+    std::size_t end = static_cast<std::size_t>(length);
+    while (end > 0 && (name[end - 1] == '\n' || name[end - 1] == '\0'))
+        --end;
+    return std::string(name.data(), end);
+}
+
+// argv[0] reads nothing for a process that has let go of its memory, exiting
+// or a zombie, whose comm still names it; and for one in exec, from the moment
+// its new image is mapped until its arguments are. That stretch holds the
+// moment exec has cleared PF_FORKNOEXEC, so the process reads as exec'd, while
+// comm still names the program it replaces. Such a process names nothing, and
+// the reading after it names the program.
+std::string processForegroundName(ProcessID processID)
+{
+    if (processID <= 0)
+        return {};
+    std::optional<Argument0> argument0 = readArgument0(processID);
+    if (!argument0)
+        return {};
+    if (argument0->isPresent)
+        return argument0->name.empty() ? processCommandName(processID) : std::move(argument0->name);
+    const UnixFileDescriptor statDescriptor { ::open(procPath(processID, "stat").data(), O_RDONLY | O_CLOEXEC) };
+    if (!statDescriptor)
+        return {};
+    std::array<char, 512> line {};
+    const ssize_t lineLength = ::read(statDescriptor.get(), line.data(), line.size());
+    if (lineLength <= 0)
+        return {};
+    const std::string_view lineText { line.data(), static_cast<std::size_t>(lineLength) };
+    ProcStatFields fields {};
+    const std::optional<std::uint32_t> flags = parseProcStatFlags(lineText);
+    if (!parseProcStatFields(lineText, fields) || !flags)
+        return {};
+    if (fields.state != 'Z' && (*flags & processFlagExiting) == 0)
+        return {};
+    return processCommandName(processID);
+}
+
 // The live subtree a title bar and the inspector sample.
 //
 // The classification is the shared Ubiquitty::Session::Process::gatherSubtree,
@@ -1143,7 +1300,7 @@ int gatherSubtree(ProcessID leader, ProcessID foregroundGroup, const std::string
         record.commandLine = processCommandLineFromProc(processID);
         record.name = displayNameFromCommandLine(record.commandLine);
         if (record.name.empty())
-            record.name = processExecutableName(static_cast<ProcessID>(processID)); // comm, for a kernel thread
+            record.name = processCommandName(static_cast<ProcessID>(processID)); // comm, for a kernel thread
         if (record.commandLine.empty())
             record.commandLine = record.name;
         // The uid and the state come from the entry this walk already read, so
@@ -1162,12 +1319,18 @@ int gatherSubtree(ProcessID leader, ProcessID foregroundGroup, const std::string
 
 namespace {
 
-// One process's foreground-owner facts, read through its directory so the stat
-// and status files describe the same process even if the pid recycles. With a
-// group given, a process outside it is passed over before its status is read.
-[[nodiscard]] std::optional<PAL::Process::GroupMember> readGroupMember(long processID, std::optional<std::uint32_t> group)
+// The stat half of one process's foreground-owner facts, and the directory it
+// was read through, so a status read after it describes the same process even
+// if the pid recycles. With a group given, a process outside it reads as none.
+struct GroupMemberStat {
+    UnixFileDescriptor directory;
+    PAL::Process::GroupMember member;
+    char state = 0;
+};
+
+[[nodiscard]] std::optional<GroupMemberStat> readGroupMemberStat(long processID, std::optional<std::uint32_t> group)
 {
-    const UnixFileDescriptor directory { ::open(procPath(processID, "").data(), O_RDONLY | O_DIRECTORY | O_CLOEXEC) };
+    UnixFileDescriptor directory { ::open(procPath(processID, "").data(), O_RDONLY | O_DIRECTORY | O_CLOEXEC) };
     if (!directory)
         return std::nullopt;
     const UnixFileDescriptor statDescriptor { ::openat(directory.get(), "stat", O_RDONLY | O_CLOEXEC) };
@@ -1184,24 +1347,46 @@ namespace {
         return std::nullopt;
     if (group && fields.processGroupID != *group)
         return std::nullopt;
+    return GroupMemberStat {
+        .directory = std::move(directory),
+        .member = {
+            .processID = static_cast<std::uint32_t>(processID),
+            .parentProcessID = fields.parentProcessID,
+            .hasExecuted = (*flags & processFlagForkedWithoutExec) == 0,
+            .isInterruptIgnored = false,
+            .isZombie = false,
+            .startTime = parseProcStatBirthTicks(lineText).value_or(0),
+        },
+        .state = fields.state,
+    };
+}
 
+// One process's foreground-owner facts: the stat half, then the status file
+// through the same directory.
+[[nodiscard]] std::optional<PAL::Process::GroupMember> readGroupMember(long processID, std::optional<std::uint32_t> group)
+{
+    std::optional<GroupMemberStat> stat = readGroupMemberStat(processID, group);
+    if (!stat)
+        return std::nullopt;
     // An unreadable mask reads as not ignoring, which makes an exec'd member a
     // job: the answer that asks before a close. The mask sits past the groups
     // line, which grows with the user's groups, hence the room.
-    bool isInterruptIgnored = false;
-    if (const UnixFileDescriptor statusDescriptor { ::openat(directory.get(), "status", O_RDONLY | O_CLOEXEC) }) {
+    //
+    // The state is the first thread's, which reads `Z` once that thread has
+    // ended even while others run the program on; the thread count tells such a
+    // process from one that has ended, which keeps a thread until it is reaped.
+    std::optional<std::uint32_t> threadCount;
+    if (const UnixFileDescriptor statusDescriptor { ::openat(stat->directory.get(), "status", O_RDONLY | O_CLOEXEC) }) {
         std::array<char, 4096> status {};
         const ssize_t statusLength = ::read(statusDescriptor.get(), status.data(), status.size());
-        if (statusLength > 0)
-            isInterruptIgnored = parseStatusIgnoresInterrupt({ status.data(), static_cast<std::size_t>(statusLength) }).value_or(false);
+        if (statusLength > 0) {
+            const std::string_view statusText { status.data(), static_cast<std::size_t>(statusLength) };
+            stat->member.isInterruptIgnored = parseStatusIgnoresInterrupt(statusText).value_or(false);
+            threadCount = parseStatusThreadCount(statusText);
+        }
     }
-    return PAL::Process::GroupMember {
-        .processID = static_cast<std::uint32_t>(processID),
-        .parentProcessID = fields.parentProcessID,
-        .hasExecuted = (*flags & processFlagForkedWithoutExec) == 0,
-        .isInterruptIgnored = isInterruptIgnored,
-        .isZombie = fields.state == 'Z',
-    };
+    stat->member.isZombie = stat->state == 'Z' && threadCount.value_or(1) <= 1;
+    return stat->member;
 }
 
 } // namespace
@@ -1239,8 +1424,11 @@ std::optional<PTYProcessSnapshot> ptyProcessSnapshot(ProcessID processID)
     };
 }
 
-// /proc has no index by group, so this reads every process's stat line. The
-// caller asks only when the group's leader alone did not settle the answer.
+// /proc has no index by group, so this reads process stat lines until it has
+// filled the buffer and found one member past it, which is all the contract
+// asks of a group the buffer cannot hold; that last member's status is not
+// read. The caller asks only when the group's leader alone did not settle the
+// answer.
 std::optional<std::size_t> processGroupMembers(ProcessID group, std::span<PAL::Process::GroupMember> outputBuffer)
 {
     if (group <= 0)
@@ -1248,19 +1436,24 @@ std::optional<std::size_t> processGroupMembers(ProcessID group, std::span<PAL::P
     DIR* processes = ::opendir("/proc");
     if (!processes)
         return std::nullopt;
+    const auto groupID = static_cast<std::uint32_t>(group);
     std::size_t count = 0;
-    while (const dirent* entry = ::readdir(processes)) {
+    while (count <= outputBuffer.size()) {
+        const dirent* entry = ::readdir(processes);
+        if (!entry)
+            break;
         const std::string_view name { entry->d_name };
         long processID = 0;
         const auto [end, error] = std::from_chars(name.data(), name.data() + name.size(), processID);
         if (error != std::errc {} || end != name.data() + name.size() || processID <= 0)
             continue;
-        const std::optional<PAL::Process::GroupMember> member = readGroupMember(processID, static_cast<std::uint32_t>(group));
-        if (!member)
+        if (count == outputBuffer.size()) {
+            if (readGroupMemberStat(processID, groupID))
+                ++count;
             continue;
-        if (count < outputBuffer.size())
-            outputBuffer[count] = *member;
-        ++count;
+        }
+        if (const std::optional<PAL::Process::GroupMember> member = readGroupMember(processID, groupID))
+            outputBuffer[count++] = *member;
     }
     ::closedir(processes);
     return count;

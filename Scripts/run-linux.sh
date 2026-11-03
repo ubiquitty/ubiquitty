@@ -69,6 +69,9 @@ GTK_IMAGE="${UBIQUITTY_LINUX_GTK_IMAGE:-"$(sed -n 's/^gtk=//p' "$(dirname "$0")/
 # `llvm` is here for `llvm-profdata`, which the PGO profile checks
 # (check-profile-orphans.py) read the profile with.
 #
+# `zsh` is here for test_pty, which drives a real zsh through prompt hooks and
+# the jobs a close asks about, and fails where there is none to drive.
+#
 # Two adjacent strings: the first line is expanded, the recipe below it stays
 # single-quoted so the `\` line continuations reach docker as written. Under
 # double quotes the shell eats backslash-newline and hands docker one long line.
@@ -79,7 +82,7 @@ RUN apt-get update -qq && apt-get install -y -qq \
       golang-go perl libwebp-dev llvm \
       fonts-noto-cjk=1:20240730+repack1-1build1 \
       fonts-noto-core fonts-noto-color-emoji \
-      xvfb python3 python3-pil mesa-vulkan-drivers glslc \
+      xvfb python3 python3-pil mesa-vulkan-drivers glslc zsh \
       libx11-dev libxfixes-dev libwayland-dev wayland-protocols \
     && rm -rf /var/lib/apt/lists/*
 # libx11-dev/libxfixes-dev/libwayland-dev/wayland-protocols are named
