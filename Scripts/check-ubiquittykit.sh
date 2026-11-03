@@ -10,7 +10,9 @@
 # there, once per step, so each step is the process's first call into the
 # framework: choose the preferred family, look a shipped family up by name,
 # build a renderer, resolve the shipped faces past same-named decoys, draw the
-# icons, report the family each of a set of configurations is drawn in, and
+# icons, look programs' icons up by catalog key and draw them as the catalog
+# paints them, hand them to a thread of their own and read and draw them there,
+# report the family each of a set of configurations is drawn in, and
 # draw a frame — create a surface, make a renderer through the public factory
 # in a family the framework ships, feed bytes, draw — and read a theme's colors
 # without a surface, apply the theme by name, and hear each OSC color write and
@@ -30,7 +32,9 @@
 # no module maps, no include paths. That compile is the assertion — the UbiquittyKit
 # module imports the machinery and every Core interop module internally, so
 # one interop-typed public declaration anywhere in its interface fails this
-# compile.
+# compile. It compiles with warnings as errors, so a public value it hands to
+# another thread has to be Sendable: the capture of one that is not is a
+# warning in Swift 5 mode and an error in Swift 6.
 #
 # A second consumer, compiled the same way, shows a surface from the
 # font-taking initializer in a window. The surface must submit a frame of its
@@ -42,7 +46,7 @@
 #
 # A further consumer launches a shell in a surface taken out of its window,
 # runs a program the process catalog names, and reads the program's name,
-# catalog key and chains as the public observer hears the process sample move;
+# catalog key, icon and chains as the public observer hears the process sample move;
 # hears nothing while the observer declines process facts, and the move once it
 # asks again; reads the status a record posts and the colour a program sets as
 # the status callback fires; and reads nothing named after the shell exits.
@@ -205,6 +209,7 @@ import Foundation
 import Metal
 import QuartzCore
 import UbiquittyKit
+import os
 
 func refuse(_ reason: String) -> Bool {
     FileHandle.standardError.write(Data("consumer: \(reason)\n".utf8))
@@ -589,6 +594,206 @@ func followsAColorPastBackToBackUpdates(writer: String) -> Bool {
     return true
 }
 
+/// An image drawn into a square sRGB bitmap of `side` pixels, as
+/// premultiplied red, green, blue and alpha bytes, on whatever thread calls.
+func pixels(of image: NSImage, side: Int) -> [UInt8] {
+    var bytes = [UInt8](repeating: 0, count: side * side * 4)
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB) else {
+        return []
+    }
+    bytes.withUnsafeMutableBytes { buffer in
+        guard let context = CGContext(
+            data: buffer.baseAddress,
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bytesPerRow: side * 4,
+            space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        image.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
+        NSGraphicsContext.restoreGraphicsState()
+    }
+    return bytes
+}
+
+/// The colour of each fully opaque pixel among `bytes`.
+func opaqueColors(_ bytes: [UInt8]) -> [(red: UInt8, green: UInt8, blue: UInt8)] {
+    stride(from: 0, to: bytes.count, by: 4).compactMap { index in
+        bytes[index + 3] == 255 ? (bytes[index], bytes[index + 1], bytes[index + 2]) : nil
+    }
+}
+
+/// Whether a colour is within a few units of another in every channel.
+func isNear(_ color: (red: UInt8, green: UInt8, blue: UInt8), _ red: UInt8, _ green: UInt8, _ blue: UInt8) -> Bool {
+    abs(Int(color.red) - Int(red)) <= 3 && abs(Int(color.green) - Int(green)) <= 3 && abs(Int(color.blue) - Int(blue)) <= 3
+}
+
+/// Looks programs' icons up by catalog key, as a host drawing its own tabs
+/// does: a drawn icon in its own colours, with Core's plate decision; a
+/// template icon in the ink it is given; and nothing for a key the catalog
+/// does not hold. The host carries no icon of its own, so every pixel comes
+/// from the framework's files.
+@MainActor
+func looksUpProgramIcons() -> Bool {
+    let side = TerminalSurface.ProgramIcon.preferredSide
+    let square = NSSize(width: side, height: side)
+    guard let claude = TerminalSurface.ProgramIcon(key: "claude-code") else {
+        return refuse("no icon for the catalog key claude-code")
+    }
+    guard claude.key == "claude-code", claude.title == "Claude Code", claude.renderingMode == .original, !claude.image.isTemplate,
+        claude.image.size == square, claude.image.accessibilityDescription == "Claude Code"
+    else {
+        return refuse("claude-code's icon reads as \(claude.key), \(claude.title), \(claude.renderingMode), \(claude.image)")
+    }
+    // The catalog's own colour for Claude Code, which its file is drawn in.
+    let own = NSColor(srgbRed: 0xD9 / 255.0, green: 0x77 / 255.0, blue: 0x57 / 255.0, alpha: 1)
+    let drawn = opaqueColors(pixels(of: claude.image, side: 32))
+    guard drawn.count >= 32, drawn.contains(where: { isNear($0, 0xD9, 0x77, 0x57) }) else {
+        return refuse("claude-code's icon drew \(drawn.count) opaque pixels, none of them its own colour")
+    }
+    // Core's plate: none on black, which the colour stands out on; one on a
+    // ground of the colour itself.
+    guard !claude.needsPlate(on: .black), claude.needsPlate(on: own) else {
+        return refuse("claude-code needs a plate on black: \(claude.needsPlate(on: .black)); on its own colour: \(claude.needsPlate(on: own))")
+    }
+    guard let bare = claude.image(side: 32, ink: .black, ground: .black), let plated = claude.image(side: 32, ink: .black, ground: own),
+        bare.size == NSSize(width: 32, height: 32)
+    else {
+        return refuse("claude-code drew no image at 32 points")
+    }
+    let bareCount = opaqueColors(pixels(of: bare, side: 32)).count
+    let platedCount = opaqueColors(pixels(of: plated, side: 32)).count
+    guard platedCount > bareCount else {
+        return refuse("claude-code on its own colour drew \(platedCount) opaque pixels, no more than the \(bareCount) it drew on black")
+    }
+    guard claude.image(side: 0, ink: .black, ground: .black) == nil else {
+        return refuse("claude-code drew an image with no side")
+    }
+
+    guard let template = TerminalSurface.ProgramIcon(key: "opencode") else {
+        return refuse("no icon for the catalog key opencode")
+    }
+    guard template.renderingMode == .template, template.image.isTemplate, !template.needsPlate(on: .white),
+        !template.needsPlate(on: .black)
+    else {
+        return refuse("opencode's icon reads as \(template.renderingMode), template \(template.image.isTemplate)")
+    }
+    let red = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+    guard let inked = template.image(side: 32, ink: red, ground: .white) else {
+        return refuse("opencode drew no image at 32 points")
+    }
+    let inkedColors = opaqueColors(pixels(of: inked, side: 32))
+    guard !inkedColors.isEmpty, inkedColors.allSatisfy({ isNear($0, 255, 0, 0) }) else {
+        return refuse("opencode in red drew \(inkedColors.count) opaque pixels, not all red")
+    }
+
+    // Each lookup's image is its own, so a host resizing one leaves the next.
+    guard let again = TerminalSurface.ProgramIcon(key: "claude-code"), again.image !== claude.image else {
+        return refuse("two lookups of claude-code share an image")
+    }
+    claude.image.size = NSSize(width: 64, height: 64)
+    guard TerminalSurface.ProgramIcon(key: "claude-code")?.image.size == square else {
+        return refuse("resizing one lookup's image resized the next")
+    }
+
+    // A name is not a key, and a key is matched as the catalog spells it.
+    for key in ["", "claude", "no-such-program", "Claude-Code"] where TerminalSurface.ProgramIcon(key: key) != nil {
+        return refuse("an icon for \"\(key)\", which is no catalog key")
+    }
+    print("consumer: claude-code's and opencode's icons drew from the framework's files, and no other key has one")
+    return true
+}
+
+/// What a host reads of a program's icon: its values, Core's plate decision
+/// on each of a few grounds, and its image's pixels.
+struct ProgramIconReading: Equatable, Sendable {
+    let key: String
+    let title: String
+    let renderingMode: TerminalSurface.ProgramIcon.RenderingMode
+    let needsPlate: [Bool]
+    let imagePixels: [UInt8]
+
+    /// Reads an icon on whatever thread calls.
+    init(of icon: TerminalSurface.ProgramIcon, on grounds: [NSColor]) {
+        key = icon.key
+        title = icon.title
+        renderingMode = icon.renderingMode
+        needsPlate = grounds.map { icon.needsPlate(on: $0) }
+        imagePixels = pixels(of: icon.image, side: 32)
+    }
+}
+
+/// Runs `body` on a thread of its own and waits for its answer.
+///
+/// - Returns: The answer, and whether the thread it ran on was the main one.
+func onAnotherThread<Answer: Sendable>(_ body: @escaping @Sendable () -> Answer) -> (answer: Answer, wasMainThread: Bool)? {
+    let outcome = OSAllocatedUnfairLock<(answer: Answer, wasMainThread: Bool)?>(initialState: nil)
+    let done = DispatchSemaphore(value: 0)
+    Thread.detachNewThread {
+        let answer = body()
+        outcome.withLock { $0 = (answer, Thread.isMainThread) }
+        done.signal()
+    }
+    done.wait()
+    return outcome.withLock { $0 }
+}
+
+/// Hands programs' icons to a thread other than the main one, as a host
+/// rasterising an icon for a thumbnail or a cache does, and reads them there:
+/// each icon's values, Core's plate decision and its image, and the images
+/// `image(side:ink:ground:)` makes, plated and in a template's ink. Each is
+/// read or drawn there before anything does so on the main thread, which must
+/// then answer the same and draw byte for byte the same.
+@MainActor
+func drawsProgramIconsOffTheMainThread() -> Bool {
+    guard let claude = TerminalSurface.ProgramIcon(key: "claude-code"), let template = TerminalSurface.ProgramIcon(key: "opencode") else {
+        return refuse("no icon for the catalog keys claude-code and opencode")
+    }
+    let own = NSColor(srgbRed: 0xD9 / 255.0, green: 0x77 / 255.0, blue: 0x57 / 255.0, alpha: 1)
+    let red = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+    guard let plated = claude.image(side: 32, ink: .black, ground: own), let inked = template.image(side: 32, ink: red, ground: .white) else {
+        return refuse("claude-code or opencode drew no image at 32 points")
+    }
+    // The icon itself crosses to the other thread, as a host's background
+    // task or cache takes it: Core's plate decision there is the main
+    // thread's, none on black and one on the icon's own colour for a drawn
+    // icon and none for a template.
+    let grounds: [NSColor] = [.black, own]
+    let icons: [(icon: TerminalSurface.ProgramIcon, needsPlate: [Bool])] = [(claude, [false, true]), (template, [false, false])]
+    for (icon, needsPlate) in icons {
+        guard let elsewhere = onAnotherThread({ ProgramIconReading(of: icon, on: grounds) }), !elsewhere.wasMainThread else {
+            return refuse("\(icon.key)'s icon was not read on a thread of its own")
+        }
+        guard elsewhere.answer.key == icon.key, elsewhere.answer.needsPlate == needsPlate else {
+            return refuse("\(icon.key)'s icon read off the main thread as \(elsewhere.answer.key), plates \(elsewhere.answer.needsPlate)")
+        }
+        let onMainThread = ProgramIconReading(of: icon, on: grounds)
+        guard !opaqueColors(onMainThread.imagePixels).isEmpty, elsewhere.answer == onMainThread else {
+            return refuse("\(icon.key)'s icon read differently off the main thread than on it")
+        }
+    }
+    let images: [(name: String, image: NSImage)] = [
+        ("claude-code on its plate", plated),
+        ("opencode in red", inked),
+    ]
+    for (name, image) in images {
+        guard let elsewhere = onAnotherThread({ pixels(of: image, side: 32) }), !elsewhere.wasMainThread else {
+            return refuse("\(name) was not drawn on a thread of its own")
+        }
+        let onMainThread = pixels(of: image, side: 32)
+        guard !opaqueColors(onMainThread).isEmpty, elsewhere.answer == onMainThread else {
+            return refuse("\(name) drew differently off the main thread than on it")
+        }
+    }
+    print("consumer: claude-code's and opencode's icons read and drew off the main thread as on it, and so did claude-code on its plate and opencode in red")
+    return true
+}
+
 /// The first call into the framework, then everything the step asserts.
 ///
 /// - Parameters:
@@ -672,6 +877,10 @@ func run(_ step: String, arguments: [String], shipped: [URL]) -> Bool {
         return true
     case "icons":
         return ShippedIconsSmokeEntry.run() || refuse("an icon was not drawn from the framework's own files")
+    case "program-icons":
+        return looksUpProgramIcons()
+    case "program-icons-off-main":
+        return drawsProgramIconsOffTheMainThread()
     case "renderer":
         guard TerminalSurface.makeRenderer(fontFamily: "Monaspace Neon") != nil else {
             return refuse("no renderer")
@@ -776,6 +985,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 EOF
 xcrun swiftc "$HOST_DIR/main.swift" \
     -o "$APP/Contents/MacOS/consumer" \
+    -warnings-as-errors \
     -F "$FRAMEWORK_DIR" \
     -framework UbiquittyKit \
     -Xlinker -rpath -Xlinker @executable_path/../Frameworks
@@ -887,6 +1097,10 @@ run_consumer "$consumer" faces
 echo "check-ubiquittykit: ok (every shipped style and the symbol face are opened from the framework's files)"
 run_consumer "$consumer" icons
 echo "check-ubiquittykit: ok (the Phosphor and program icons are drawn from the framework's files)"
+run_consumer "$consumer" program-icons
+echo "check-ubiquittykit: ok (a program's icon is looked up by catalog key from the framework's files, drawn and template icons each as the catalog paints them, and an unknown key has none)"
+run_consumer "$consumer" program-icons-off-main
+echo "check-ubiquittykit: ok (a program's icon handed to another thread reads and draws there as on the main thread, and so do the images drawn for a title)"
 run_consumer "$consumer" family
 echo "check-ubiquittykit: ok (a surface reports a family that is drawn as configured, under any of its names, and one that is not by the family drawn in its place)"
 run_consumer "$consumer" draw
@@ -1473,6 +1687,9 @@ struct ProcessReport {
     let key: String?
     let chain: String
     let chainWithArguments: String
+    /// The key and title of the icon the surface gives for its program.
+    let iconKey: String?
+    let iconTitle: String?
 }
 
 /// What one status callback read, taken inside the callback for the same reason.
@@ -1492,11 +1709,14 @@ final class ProcessWatch: TerminalSurfaceObserver {
     var needsProcessState = true
 
     private static func report(_ surface: TerminalSurface) -> ProcessReport {
-        ProcessReport(
+        let icon = surface.foregroundProgramIcon
+        return ProcessReport(
             name: surface.foregroundProgramName,
             key: surface.foregroundProgramKey,
             chain: surface.foregroundProcessChain,
-            chainWithArguments: surface.foregroundProcessChainWithArguments
+            chainWithArguments: surface.foregroundProcessChainWithArguments,
+            iconKey: icon?.key,
+            iconTitle: icon?.title
         )
     }
 
@@ -1583,6 +1803,11 @@ func readsTheForegroundProgram(at path: String, expectedKey: String) -> Bool {
     guard report.key == expectedKey else {
         return refuse("\(name) resolved to key \(report.key ?? "nil"), expected \(expectedKey)")
     }
+    // The surface's icon is the catalog's for that key, read in the same
+    // callback from the same sample.
+    guard report.iconKey == expectedKey, let iconTitle = report.iconTitle, !iconTitle.isEmpty else {
+        return refuse("\(name)'s icon is \(report.iconKey ?? "nil") titled \(report.iconTitle ?? "nil"), expected \(expectedKey)'s")
+    }
     // The chain names the program without its argument, and is the argument
     // chain with the argument taken out.
     guard report.chain.contains(name), !report.chain.contains("\(name) 30"), report.chainWithArguments.contains("\(name) 30"),
@@ -1594,9 +1819,15 @@ func readsTheForegroundProgram(at path: String, expectedKey: String) -> Bool {
 
     let heardBeforeInterrupt = watch.reports.count
     surface.send("\u{3}")
-    guard wait(seconds: 20, until: { watch.reports.dropFirst(heardBeforeInterrupt).contains { $0.name == shell } }) else {
+    guard wait(seconds: 20, until: { watch.reports.dropFirst(heardBeforeInterrupt).contains { $0.name == shell } }),
+        let back = watch.reports.dropFirst(heardBeforeInterrupt).first(where: { $0.name == shell })
+    else {
         return refuse("the shell \(shell) did not take the terminal back from \(name): heard \(watch.reports.map(\.name))")
     }
+    guard back.key == nil, back.iconKey == nil else {
+        return refuse("the shell \(shell) at its prompt has the key \(back.key ?? "nil") and the icon \(back.iconKey ?? "nil")")
+    }
+    print("consumer: \(name)'s icon is \(iconTitle)'s, and the shell at its prompt has none")
 
     // Declined, the surface samples nothing and says nothing: the program
     // starts unheard, and the name read fresh is still the shell's. Asked
@@ -1673,7 +1904,7 @@ func readsTheForegroundProgram(at path: String, expectedKey: String) -> Bool {
     guard wait(seconds: 20, until: { watch.exitReport != nil }), let ended = watch.exitReport else {
         return refuse("the shell did not exit")
     }
-    guard ended.name.isEmpty, ended.key == nil, ended.chain.isEmpty, ended.chainWithArguments.isEmpty else {
+    guard ended.name.isEmpty, ended.key == nil, ended.iconKey == nil, ended.chain.isEmpty, ended.chainWithArguments.isEmpty else {
         return refuse("an ended session still names \(ended)")
     }
     guard let last = watch.reports.last, last.name.isEmpty, last.chain.isEmpty else {
@@ -1701,7 +1932,7 @@ xcrun swiftc "$PROGRAM_DIR/main.swift" \
     -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
 
 run_consumer "$PROGRAM_DIR/program-consumer" "$PROGRAM_DIR/claude" claude-code
-echo "check-ubiquittykit: ok (external consumer read a shell's foreground program and its status out of a window, heard nothing while declining, and read nothing named after exit)"
+echo "check-ubiquittykit: ok (external consumer read a shell's foreground program, its icon and its status out of a window, heard nothing while declining, and read nothing named after exit)"
 
 # Another consumer moves panes in code, as a host laying out its own panes
 # does: an animation of a pane's frame, a sequence of frames set a display

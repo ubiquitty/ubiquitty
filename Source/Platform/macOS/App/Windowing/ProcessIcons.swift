@@ -14,6 +14,10 @@ internal import UbiquittyRenderKit
 // title's size. A template icon takes the title's ink, so it reads on any theme like
 // the words beside it; a drawn icon keeps its owner's colours, on a plate in
 // the title's ink when Core finds them too close to the ground.
+//
+// The images are made on the main thread, which owns the files read, and draw
+// on any thread: each drawing handler is @Sendable, so it is nonisolated and
+// captures only sendable values.
 
 /// A program's icon in a title, saying which program it draws.
 ///
@@ -51,12 +55,17 @@ package final class ProcessIconAttachment: NSTextAttachment {
 package enum ProcessIcons {
     /// A leading icon's side: the size Safari draws a site's icon at in its
     /// tab, the same as a tab's tag icon.
-    package static let side: CGFloat = 16
+    nonisolated package static let side: CGFloat = 16
     /// The air between the icon and the text after it.
-    package static let gap: CGFloat = 5
+    nonisolated package static let gap: CGFloat = 5
 
     /// Each icon's file as read, by catalog key; nil where the bundle lacks it.
+    /// Only the catalog's keys are kept, so it holds at most one entry per
+    /// catalog program whatever keys a caller asks for.
     private static var sources: [String: NSImage?] = [:]
+
+    /// The number of keys whose file has been read and kept.
+    package static var keptSourceCount: Int { sources.count }
 
     /// Whether a title draws programs' icons: `[appearance] process_icons`.
     package static var isShown: Bool {
@@ -71,6 +80,48 @@ package enum ProcessIcons {
         String(Ubiquitty.Title.processIconTitle(std.string(key)))
     }
 
+    /// Whether a program's icon is painted in the ink of the text beside it
+    /// rather than in its own colours: Core's catalog's answer.
+    ///
+    /// - Parameter key: A catalog key.
+    /// - Returns: Whether it is a template; true for an unknown key, which draws nothing.
+    nonisolated package static func isTemplate(forKey key: String) -> Bool {
+        Ubiquitty.Title.isProcessIconTemplate(std.string(key))
+    }
+
+    /// Whether a program's icon needs a plate behind it to be made out on a
+    /// ground: Core's decision, from the catalog's ink and the contrast of the
+    /// icon's own colour with the ground.
+    ///
+    /// - Parameters:
+    ///   - key: A catalog key.
+    ///   - ground: The colour the icon is drawn on.
+    /// - Returns: Whether to draw a plate in the text's ink behind it; false
+    ///   for a template icon and for an unknown key.
+    nonisolated package static func needsPlate(forKey key: String, ground: NSColor) -> Bool {
+        Ubiquitty.App.processIconNeedsPlate(std.string(key), packedRGB(ground))
+    }
+
+    /// A program's icon in its file's own colours, fitted in a square: a
+    /// template icon is marked as one, so AppKit paints it in the ink of the
+    /// control it sits in.
+    ///
+    /// - Parameters:
+    ///   - key: The program's catalog key.
+    ///   - side: The square's side, in points.
+    /// - Returns: The image, or nil for an empty or unknown key, a side that
+    ///   is not positive, or a bundle without the file.
+    package static func image(forKey key: String, side: CGFloat) -> NSImage? {
+        guard !key.isEmpty, side > 0, let source = source(forKey: key) else { return nil }
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { @Sendable bounds in
+            source.draw(in: fit(source.size, in: bounds))
+            return true
+        }
+        image.isTemplate = isTemplate(forKey: key)
+        image.accessibilityDescription = title(forKey: key)
+        return image
+    }
+
     /// A program's icon at a title's size.
     ///
     /// - Parameters:
@@ -81,9 +132,9 @@ package enum ProcessIcons {
     /// - Returns: The image, or nil for an empty or unknown key or a bundle without the file.
     package static func image(forKey key: String, side: CGFloat, ink: NSColor, ground: NSColor) -> NSImage? {
         guard !key.isEmpty, side > 0, let source = source(forKey: key) else { return nil }
-        let isTemplate = Ubiquitty.Title.isProcessIconTemplate(std.string(key))
-        let needsPlate = !isTemplate && Ubiquitty.App.processIconNeedsPlate(std.string(key), packedRGB(ground))
-        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { bounds in
+        let isTemplate = Self.isTemplate(forKey: key)
+        let needsPlate = Self.needsPlate(forKey: key, ground: ground)
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { @Sendable bounds in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             var mark = bounds
             if needsPlate {
@@ -142,7 +193,7 @@ package enum ProcessIcons {
     package static func attachment(forKey key: String, font: NSFont, ink: NSColor, ground: NSColor) -> ProcessIconAttachment? {
         guard let icon = image(forKey: key, side: side, ink: ink, ground: ground) else { return nil }
         let width = side + gap
-        let image = NSImage(size: NSSize(width: width, height: side), flipped: false) { _ in
+        let image = NSImage(size: NSSize(width: width, height: side), flipped: false) { @Sendable _ in
             icon.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
             return true
         }
@@ -153,18 +204,19 @@ package enum ProcessIcons {
         return attachment
     }
 
-    /// The icon's file, read once.
+    /// The icon's file, read once per catalog key; a key the catalog does not
+    /// hold reads nothing and is not kept.
     private static func source(forKey key: String) -> NSImage? {
         if let cached = sources[key] { return cached }
         let file = String(Ubiquitty.Title.processIconFile(std.string(key)))
-        let url = ShippedResources.directory(named: "process-icons")?.appendingPathComponent(file)
-        let image = file.isEmpty ? nil : url.flatMap { NSImage(contentsOf: $0) }
+        guard !file.isEmpty else { return nil }
+        let image = ShippedResources.directory(named: "process-icons").flatMap { NSImage(contentsOf: $0.appendingPathComponent(file)) }
         sources[key] = image
         return image
     }
 
     /// The largest rect of an image's proportions centred in a box.
-    private static func fit(_ size: NSSize, in box: NSRect) -> NSRect {
+    nonisolated private static func fit(_ size: NSSize, in box: NSRect) -> NSRect {
         guard size.width > 0, size.height > 0 else { return box }
         let scale = min(box.width / size.width, box.height / size.height)
         let width = size.width * scale
@@ -174,7 +226,7 @@ package enum ProcessIcons {
 
     /// A squircle filling a rect: a superellipse, whose corners blend into its
     /// sides the way a continuous-corner app icon's do.
-    private static func squircle(in rect: NSRect) -> NSBezierPath {
+    nonisolated private static func squircle(in rect: NSRect) -> NSBezierPath {
         let path = NSBezierPath()
         let exponent = 5.0
         let steps = 96
@@ -193,7 +245,7 @@ package enum ProcessIcons {
     }
 
     /// A colour as Core's 0xRRGGBB.
-    private static func packedRGB(_ color: NSColor) -> UInt32 {
+    nonisolated private static func packedRGB(_ color: NSColor) -> UInt32 {
         guard let rgb = color.usingColorSpace(.sRGB) else { return 0 }
         let byte = { (channel: CGFloat) in UInt32(UInt8(clamping: Int((channel * 255).rounded()))) }
         return (byte(rgb.redComponent) << 16) | (byte(rgb.greenComponent) << 8) | byte(rgb.blueComponent)
