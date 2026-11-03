@@ -12,7 +12,9 @@
 // temporary directory in the process ahead of the resolution, the way an
 // installed family sits there, and requires every style of each shipped
 // family to come from the bundled file Core's table names for it. A clean
-// machine cannot hide the defect from it.
+// machine cannot hide the defect from it. The symbol face a renderer falls
+// back to is held to the same rule: the factory hands the renderer the
+// bundled file's path.
 
 #if canImport(AppKit)
 import AppKit
@@ -24,13 +26,18 @@ internal import UbiquittyRenderKit
 public final class ShippedFacesSmokeEntry: NSObject {
     /// Runs the smoke.
     ///
-    /// - Returns: Whether every shipped style resolved to its bundled file.
+    /// - Returns: Whether every shipped style and the symbol face resolved to
+    ///   their bundled files.
     public static func run() -> Bool {
-        ShippedFacesSmoke.run()
+        MainActor.assumeIsolated {
+            ShippedFacesSmoke.run()
+        }
     }
 }
 
-/// The scenario: decoys first, then each shipped family's four styles.
+/// The scenario: decoys first, then each shipped family's four styles, then
+/// the symbol face.
+@MainActor
 enum ShippedFacesSmoke {
     /// A family, and the bundled file each of its four styles must come from,
     /// in FontFace order.
@@ -49,7 +56,7 @@ enum ShippedFacesSmoke {
 
     /// - Returns: Whether every style came from its bundled file.
     static func run() -> Bool {
-        guard let directory = Bundle.main.resourceURL?.appendingPathComponent("fonts"),
+        guard let directory = ShippedResources.fontDirectory,
             FileManager.default.fileExists(atPath: directory.appendingPathComponent("JetBrainsMono[wght].ttf").path)
         else {
             return failed("no bundled fonts beside this binary")
@@ -116,11 +123,29 @@ enum ShippedFacesSmoke {
         } else {
             findings.append("no grid faces to size the proportional run by")
         }
+        // Last, since building a renderer registers the shipped files for a
+        // framework's process, and every resolution above must find only the
+        // decoys by name.
+        let symbolFile = directory.appendingPathComponent("SymbolsNerdFontMono-Regular.ttf").standardizedFileURL
+        switch TerminalSurface.buildRenderer(
+            fontFamily: "JetBrains Mono",
+            pointSize: 13,
+            typography: SurfaceTypography(),
+            style: SurfaceStyle()
+        ) {
+        case .success(let renderer):
+            let path = (renderer as? SurfaceRenderer)?.typography.symbolFontPath ?? ""
+            if path.isEmpty || URL(fileURLWithPath: path).standardizedFileURL != symbolFile {
+                findings.append("the symbol face: \(path.isEmpty ? "no file" : path) — wanted \(symbolFile.lastPathComponent)")
+            }
+        case .failure(let refusal):
+            findings.append("no renderer to read the symbol face from: \(refusal)")
+        }
         guard findings.isEmpty else {
             return failed(findings.joined(separator: "; "))
         }
         print(
-            "smoke-shipped-faces: ok (\(expectations.count) families, 4 styles each, and the proportional run, from their bundled files past \(decoys.count) same-named decoys)"
+            "smoke-shipped-faces: ok (\(expectations.count) families, 4 styles each, the proportional run and the symbol face, from their bundled files past \(decoys.count) same-named decoys)"
         )
         return true
     }

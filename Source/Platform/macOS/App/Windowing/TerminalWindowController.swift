@@ -1036,10 +1036,10 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
                 }
                 // A family the face store refuses leaves the window on what it
                 // is drawing rather than on a name whose sheets could not be
-                // cut, and the house family is what a configuration naming
+                // cut, and the preferred family is what a configuration naming
                 // nothing resolves to.
                 if !renderer.adopt(pointSize: pointSize, familyName: family, typography: typography) {
-                    renderer.adopt(pointSize: pointSize, familyName: TerminalSurface.installedHouseFontFamily(), typography: typography)
+                    renderer.adopt(pointSize: pointSize, familyName: TerminalSurface.preferredFontFamily(), typography: typography)
                 }
                 surface.drive.publishActualFont(family: renderer.familyName, sizePoints: renderer.pointSize)
                 // The colour-space tag rides the same re-apply: it is the other

@@ -149,6 +149,17 @@ namespace Ubiquitty::Title {
     return processIconFor(processIconReported(store), foregroundName, holder);
 }
 
+/// The catalog key a published ordinal names, for a frontend walking the
+/// catalog without borrowing its entries.
+///
+/// - Parameter ordinal: An ``processIconOrdinal``.
+/// - Returns: The key, empty for zero or a position past the catalog.
+[[nodiscard]] inline std::string processIconKeyAt(std::uint8_t ordinal)
+{
+    const auto* icon = processIconAt(ordinal);
+    return icon ? std::string(icon->key) : std::string();
+}
+
 /// The bundled file a catalog key's icon is in, for a frontend that holds a key.
 ///
 /// - Parameter key: A catalog key.

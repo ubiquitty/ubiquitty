@@ -10,7 +10,6 @@
 // draws what the document says, the same on either shell, and an unset key draws
 // as its default because the fold resolved it before it crossed.
 
-import CoreText
 import Foundation
 import Metal
 import QuartzCore
@@ -187,13 +186,13 @@ extension TerminalSurface {
         return built
     }
 
-    /// The family a configuration draws in: the one it names, or the first of
-    /// Core's house families this system has installed.
+    /// The family a configuration draws in: the one it names, or the
+    /// preferred family when it names none.
     ///
     /// - Parameter configuration: Core's fold of the live document.
     /// - Returns: The family name to adopt.
     package static func family(of configuration: borrowing Ubiquitty.Rendering.RenderConfiguration) -> String {
-        configuration.fontFamily.isEmpty() ? installedHouseFontFamily() : String(configuration.fontFamily.string())
+        configuration.fontFamily.isEmpty() ? preferredFontFamily() : String(configuration.fontFamily.string())
     }
 
     /// Dresses this surface in a configuration: its renderer — built when it
@@ -232,7 +231,7 @@ extension TerminalSurface {
         let change = {
             didAdopt =
                 renderer.adopt(pointSize: pointSize, familyName: family, typography: typography)
-                || renderer.adopt(pointSize: pointSize, familyName: Self.installedHouseFontFamily(), typography: typography)
+                || renderer.adopt(pointSize: pointSize, familyName: Self.preferredFontFamily(), typography: typography)
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -274,21 +273,28 @@ extension TerminalSurface {
         )
     }
 
-    /// The first of Core's house families this system has installed.
+    /// The family Ubiquitty's windows draw in when the configuration names
+    /// none: the first of Ubiquitty's preferred families that this process
+    /// can draw.
     ///
-    /// The order is Core's; whether a family is installed is an OS fact, asked
-    /// of CoreText by name on either shell.
+    /// The preference order is Core's, best first, and includes a family the
+    /// framework ships. Whether a family can be drawn is asked of CoreText by
+    /// name. The framework registers the fonts it ships for the process before
+    /// it asks, as building a surface or a renderer does, so a shipped family
+    /// is found on a system that has no copy of it, and from then on the
+    /// process's own font lookups find the shipped families too.
     ///
-    /// - Returns: The first installed candidate, or the last one.
-    package static func installedHouseFontFamily() -> String {
+    /// ``init(rows:columns:fontFamily:pointSize:typography:style:device:)``
+    /// and ``makeRenderer(device:fontFamily:pointSize:typography:style:)``
+    /// draw in Menlo when given no family; pass this as the family to draw in
+    /// the one Ubiquitty's own windows default to.
+    ///
+    /// - Returns: The first preferred family CoreText resolves by name, or the
+    ///   last of them when none resolves.
+    public static func preferredFontFamily() -> String {
         let count = Ubiquitty.Preferences.Defaults.houseFontFamilyCount()
-        for index in 0..<count {
-            let candidate = String(cString: Ubiquitty.Preferences.Defaults.houseFontFamilyAt(index))
-            let font = CTFontCreateWithName(candidate as CFString, 12, nil)
-            if (CTFontCopyFamilyName(font) as String) == candidate {
-                return candidate
-            }
-        }
-        return String(cString: Ubiquitty.Preferences.Defaults.houseFontFamilyAt(count - 1))
+        let candidates = (0..<count).map { String(cString: Ubiquitty.Preferences.Defaults.houseFontFamilyAt($0)) }
+        return ShippedFonts.firstFamilyFoundByName(in: candidates)
+            ?? String(cString: Ubiquitty.Preferences.Defaults.houseFontFamilyAt(count - 1))
     }
 }

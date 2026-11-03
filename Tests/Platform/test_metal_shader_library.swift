@@ -24,8 +24,9 @@
 // - late: a request made while the file is gone answers nil, and a request
 //   after it returns loads it, because a failed load is not kept.
 //
-// Compiled by plain `xcrun swiftc` with MetalPipelines.swift. A failure prints
-// FAIL file:line, and any failure exits nonzero.
+// Compiled by plain `xcrun swiftc` with MetalPipelines.swift and
+// ShippedResources.swift. A failure prints FAIL file:line, and any failure
+// exits nonzero.
 //
 
 import Foundation

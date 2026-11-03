@@ -260,9 +260,10 @@ The Swift renderer reads the struct through one adapter,
 `SurfaceTypography(configuration:)`, `SurfaceStyle(configuration:systemTransparency:)`,
 `SurfaceTekSettings(configuration:)` and
 `TerminalSurface.makeRenderer(device:configuration:systemTransparency:)`, plus
-`TerminalSurface.installedHouseFontFamily()`, which asks CoreText for Core's
-house family list on either shell. The ground goes through Core's
-`backgroundEffects`; the host reports only the system's Reduce Transparency.
+`TerminalSurface.preferredFontFamily()`, which asks CoreText for the first
+family of Core's preference list that it finds, on either shell. The ground
+goes through Core's `backgroundEffects`; the host reports only the system's
+Reduce Transparency.
 
 On macOS the window owner holds the one `ConfigurationSubscription`
 (`TerminalWindowController+Configuration.swift`) and re-applies

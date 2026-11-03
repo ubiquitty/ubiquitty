@@ -2124,10 +2124,11 @@ fi
 # (Source/UbiquittyRenderKit/MetalPipelines.swift) hands every renderer the
 # library its device first loaded, so a window or tab asked for while the
 # application is being replaced still has shaders, and a load that failed is
-# tried again. Plain `xcrun swiftc` with MetalPipelines.swift alone. The binary
-# runs beside a one-function library compiled here, because a command-line
-# tool's bundle is the directory it runs from; it moves that file away and back
-# itself, so it reads no application's bundle.
+# tried again. Plain `xcrun swiftc` with MetalPipelines.swift and the bundle it
+# reads from, ShippedResources.swift. The binary runs beside a one-function
+# library compiled here, because a command-line tool's bundle is the directory
+# it runs from; it moves that file away and back itself, so it reads no
+# application's bundle.
 if [ "$(uname -s)" = "Darwin" ] && wanted test_metal_shader_library; then
     NAME=test_metal_shader_library
     echo "=== $NAME ==="
@@ -2140,9 +2141,10 @@ if [ "$(uname -s)" = "Darwin" ] && wanted test_metal_shader_library; then
         printf '%s\n' '#include <metal_stdlib>' 'kernel void residencyKernel() {}' >"$BUNDLE_DIR/residency.metal"
         xcrun metal -c "$BUNDLE_DIR/residency.metal" -o "$BUNDLE_DIR/residency.air" || exit 1
         xcrun metallib "$BUNDLE_DIR/residency.air" -o "$BUNDLE_DIR/default.metallib" || exit 1
-        xcrun swiftc -parse-as-library -warnings-as-errors \
+        xcrun swiftc -parse-as-library -warnings-as-errors -package-name ubiquitty \
             "$ROOT/Tests/Platform/test_metal_shader_library.swift" \
             "$ROOT/Source/UbiquittyRenderKit/MetalPipelines.swift" \
+            "$ROOT/Source/UbiquittyRenderKit/ShippedResources.swift" \
             -o "$BUNDLE_DIR/$NAME" || exit 1
         "$BUNDLE_DIR/$NAME" || exit 1
     fi

@@ -49,6 +49,23 @@ extension TerminalSurface {
         return true
     }
 
+    /// The family this surface's regular text is drawn in.
+    ///
+    /// The configured family, spelled as configured, when that family is
+    /// drawn: a family the framework ships, GNU Unifont, which the framework
+    /// draws itself, or a family CoreText finds under any of its family, full
+    /// or PostScript names. A family that is not found is drawn in a
+    /// substitute, and this is CoreText's name for the substitute's family. A
+    /// typography whose `unifontScale` puts another family on the framework's
+    /// bitmap face draws GNU Unifont, and this is GNU Unifont. It therefore
+    /// differs from the configured family exactly when a substitute is drawn.
+    ///
+    /// - Returns: The family, or nil for a surface with no renderer or with a
+    ///   renderer the framework did not build.
+    public var resolvedFontFamily: String? {
+        (renderer as? SurfaceRenderer)?.resolvedFontFamily
+    }
+
     /// The em size this surface draws at right now.
     ///
     /// - Returns: The configured size with the window's offset applied.

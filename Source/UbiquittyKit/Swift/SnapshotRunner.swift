@@ -3,9 +3,9 @@
 
 #if canImport(AppKit)
 import AppKit
-import CoreText
 internal import CxxStdlib
 internal import UbiquittyCore
+internal import UbiquittyRenderKit
 
 /// The app's headless `--snapshot` command: one offscreen frame written as a
 /// PNG, through the portable software renderer or the surface's Metal
@@ -114,24 +114,19 @@ public enum SnapshotRunner {
         fail("--config contains an unknown, malformed, or mistyped setting")
     }
 
-    /// Makes the app's bundled fonts (Resources/fonts) available to this
-    /// process, and says what is there, so a fallback face is never silent.
+    /// Makes the shipped fonts available to this process, and says what is
+    /// there, so a fallback face is never silent.
     ///
     /// A run from inside the bundle already has them through the Info.plist's
     /// ATSApplicationFontsPath; registering again is harmless and also covers a
     /// run outside the bundle.
     private static func registerBundledFonts() {
-        let faces = Bundle.main.urls(forResourcesWithExtension: "ttf", subdirectory: "fonts") ?? []
+        let faces = ShippedFonts.files
         guard let first = faces.first else {
-            FileHandle.standardError.write(Data("snapshot: no bundled fonts in Resources/fonts; CoreText will use system fallbacks\n".utf8))
+            FileHandle.standardError.write(Data("snapshot: no shipped fonts in Resources/fonts; CoreText will use system fallbacks\n".utf8))
             return
         }
-        var newlyRegistered = 0
-        for face in faces where CTFontManagerRegisterFontsForURL(face as CFURL, .process, nil) {
-            // A face already registered is reported as an error and is in the
-            // process scope either way.
-            newlyRegistered += 1
-        }
+        let newlyRegistered = ShippedFonts.register()
         let directory = first.deletingLastPathComponent().path
         print("snapshot: \(faces.count) bundled font(s) at \(directory) (\(newlyRegistered) newly registered)")
         fflush(stdout)

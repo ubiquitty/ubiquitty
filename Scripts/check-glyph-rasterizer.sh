@@ -43,6 +43,7 @@ SWIFT_ARGUMENTS=(
     -framework CoreText
     -framework CoreGraphics
     "$SWIFT_DIRECTORY/FontFaces.swift"
+    "$SWIFT_DIRECTORY/ShippedResources.swift"
     "$SWIFT_DIRECTORY/GlyphRasterizer.swift"
     "$ROOT/Scripts/drive-glyph-rasterizer.swift"
 )

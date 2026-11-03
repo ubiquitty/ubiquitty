@@ -54,6 +54,15 @@ package final class FontFaces {
     /// the regular one with a shear applied.
     package let isItalicSynthesized: Bool
 
+    /// Whether these faces stand in for the family they were asked for.
+    ///
+    /// True when no font answers to the family's name, which the fixed-pitch
+    /// system face is drawn in place of, and when the name is blank and names
+    /// no family. False for a shipped family, drawn from its own files, and for
+    /// a family CoreText finds under any of its family, full or PostScript
+    /// names.
+    package let isSubstitute: Bool
+
     /// The OpenType `wdth` axis identifier.
     private static let widthAxisTag: UInt32 = UInt32(Ubiquitty.Rendering.variationAxisTagWidth)
     /// The OpenType `wght` axis identifier.
@@ -353,18 +362,21 @@ package final class FontFaces {
     /// The name is matched as a prefix of what came back, normalised, because
     /// a family resolves to one of its members: "Monaspace Neon Var" answers
     /// as "Monaspace Neon Var ExtraLight", and a PostScript name answers as
-    /// itself. A substitute shares no such prefix.
+    /// itself. The face CoreText substitutes is matched by its names whole, so
+    /// a name that only begins one of them, "Helv" for Helvetica, is a name no
+    /// font carries.
     ///
     /// - Parameters:
     ///   - family: The family, full or PostScript name the reader asked for.
     ///   - size: The point size to build at.
-    /// - Returns: The named face, or the fixed-pitch system face.
-    private static func named(_ family: String, _ size: CGFloat) -> CTFont {
+    /// - Returns: The named face, or the fixed-pitch system face, and whether
+    ///   the face stands in for a name no font answers to or for a blank one.
+    private static func named(_ family: String, _ size: CGFloat) -> (face: CTFont, isSubstitute: Bool) {
         if let confirmed = confirmed(family, size) {
-            return confirmed
+            return (confirmed, normalisedFontName(family).isEmpty)
         }
-        return CTFontCreateUIFontForLanguage(.userFixedPitch, size, nil)
-            ?? CTFontCreateWithName(family as CFString, size, nil)
+        let substitute = CTFontCreateUIFontForLanguage(.userFixedPitch, size, nil) ?? CTFontCreateWithName(family as CFString, size, nil)
+        return (substitute, true)
     }
 
     /// The face a family name asks for, or nil when nothing carries that name.
@@ -375,7 +387,9 @@ package final class FontFaces {
     /// alone cannot tell them apart, because it answers a substitute.
     ///
     /// The name is matched as a prefix of what came back, normalised, for the
-    /// reason `named` gives: a family resolves to one of its members.
+    /// reason `named` gives: a family resolves to one of its members. The face
+    /// CoreText substitutes answers to its own names whole, since it is what
+    /// every name no font carries comes back as.
     ///
     /// - Parameters:
     ///   - family: The family, full or PostScript name the reader asked for.
@@ -388,16 +402,24 @@ package final class FontFaces {
         guard !wanted.isEmpty else {
             return font
         }
-        let answers = [
-            CTFontCopyFamilyName(font) as String,
-            CTFontCopyFullName(font) as String,
-            (CTFontCopyPostScriptName(font) as String?) ?? "",
-        ]
-        for answer in answers where normalisedFontName(answer).hasPrefix(wanted) {
-            return font
+        let postScriptName = CTFontCopyPostScriptName(font) as String
+        let isSubstituteFace = postScriptName == substitutePostScriptName
+        let answers = [CTFontCopyFamilyName(font) as String, CTFontCopyFullName(font) as String, postScriptName]
+        for answer in answers {
+            let answered = normalisedFontName(answer)
+            if isSubstituteFace ? answered == wanted : answered.hasPrefix(wanted) {
+                return font
+            }
         }
         return nil
     }
+
+    /// The PostScript name of the face `CTFontCreateWithName` answers a name
+    /// no font carries with.
+    private static let substitutePostScriptName: String = {
+        let unnamed = CTFontCreateWithName(UUID().uuidString as CFString, 12, nil)
+        return CTFontCopyPostScriptName(unnamed) as String
+    }()
 
     /// A font name with the spelling differences that do not distinguish one
     /// removed: case, spaces and hyphens.
@@ -417,7 +439,7 @@ package final class FontFaces {
         featureSpec: String = "",
         widthPercent: Double = 0,
         variationSpec: String = "",
-        fontDirectory: URL? = FontFaces.bundledFontDirectory
+        fontDirectory: URL? = ShippedResources.fontDirectory
     ) {
         guard size > 0, pixelsPerPoint > 0 else {
             return nil
@@ -460,12 +482,15 @@ package final class FontFaces {
             features: features
         ) {
             self.isItalicSynthesized = shipped.isItalicSynthesized
+            self.isSubstitute = false
             self.faces = shipped.faces
             return
         }
+        let named = FontFaces.named(family, size)
+        self.isSubstitute = named.isSubstitute
         let regular = FontFaces.featured(
             FontFaces.resolved(
-                FontFaces.named(family, size),
+                named.face,
                 face: .Regular,
                 weights: weights,
                 widthPercent: widthPercent,
@@ -598,10 +623,6 @@ package final class FontFaces {
     package subscript(bold bold: Bool, italic italic: Bool) -> CTFont {
         self[Ubiquitty.Rendering.fontFace(bold, italic)]
     }
-
-    /// Where the app's shipped font files are: `Resources/fonts`, in the
-    /// bundle the process runs from.
-    package static let bundledFontDirectory: URL? = Bundle.main.resourceURL?.appendingPathComponent("fonts")
 
     /// A shipped style file opened by its path, or nil when the table names
     /// none or the file is not there.
@@ -738,7 +759,7 @@ package final class FontFaces {
         matrix: CGAffineTransform? = nil,
         isBold: Bool,
         isItalic: Bool,
-        in directory: URL? = bundledFontDirectory
+        in directory: URL? = ShippedResources.fontDirectory
     ) -> CTFont? {
         guard let styles = shippedStyles(family: family, size: size, in: directory) else { return nil }
         let face = styles[Int(Ubiquitty.Rendering.fontFace(isBold, isItalic).rawValue) & 0x3]
@@ -754,7 +775,7 @@ package final class FontFaces {
     package static func shippedStyles(
         family: String,
         size: CGFloat,
-        in directory: URL? = bundledFontDirectory
+        in directory: URL? = ShippedResources.fontDirectory
     ) -> [CTFont]? {
         let files = Ubiquitty.Rendering.bundledFaceFiles(std.string(family.trimmingCharacters(in: .whitespaces)))
         guard

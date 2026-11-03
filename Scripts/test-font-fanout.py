@@ -33,7 +33,7 @@ enum Ubiquitty {
     enum Rendering {
         struct FontFeatures { func string() -> String { "" } }
         // Core's fold of the configuration document, as far as the fan-out
-        // reads it: the family is asked of the surface, which owns the house
+        // reads it: the family is asked of the surface, which owns the preferred
         // fallback.
         struct RenderConfiguration {
             var fontSizePoints = 20.0
@@ -101,7 +101,7 @@ struct FontRequest { let isResolved = true; let family: String; let sizePoints: 
     var needsDisplay = false
     init(_ renderer: any TerminalSurfaceRenderer) { self.renderer = renderer }
     static func family(of configuration: Ubiquitty.Rendering.RenderConfiguration) -> String { "Configured" }
-    static func installedHouseFontFamily() -> String { "House" }
+    static func preferredFontFamily() -> String { "Preferred" }
     func invalidateRetainedBaseline() { invalidations += 1 }
     // The real one releases the per-scale renderers and their retained grids
     // before it invalidates the baseline and asks for a draw. Nothing here

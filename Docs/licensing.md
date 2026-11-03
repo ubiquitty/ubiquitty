@@ -68,7 +68,10 @@ and icon.
 ## Third-party code, generated data, and notices
 
 Third-party components retain their own licenses, as listed in
-[third-party-notices.md](../third-party-notices.md). Generated Unicode tables,
+[third-party-notices.md](../third-party-notices.md). The macOS app, the iOS
+app, and UbiquittyKit.framework each carry the complete notice set in their
+resources, checked after every build, so every font they bundle travels with
+its license. Generated Unicode tables,
 Unifont and proportional font data, and the built-in theme data carry
 identifiers that combine Apache-2.0 for the wrapper code with the applicable
 data licenses. Their generators are Apache-2.0; that does not change the

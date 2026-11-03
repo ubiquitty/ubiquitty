@@ -207,10 +207,9 @@ public final class MetalPipelines {
 
     /// The module's own compiled shaders, read from the bundle once per device.
     ///
-    /// Resolved against the bundle this class lives in rather than the main
-    /// bundle: linked statically into an app the two are the same, and packaged
-    /// as a framework only this spelling finds the library — `Bundle.main` is
-    /// the host application, which carries no metallib of ours.
+    /// Read from ``ShippedResources/bundle``, which is the framework when this
+    /// module is packaged as one: `Bundle.main` is then the host application,
+    /// which carries no metallib of ours.
     ///
     /// The first library a device loads is the one every later caller gets, so
     /// a window opened after launch does not read the bundle again. An update or
@@ -227,7 +226,7 @@ public final class MetalPipelines {
             if let loaded = libraries.first(where: { $0.device === device }) {
                 return loaded
             }
-            guard let library = try? device.makeDefaultLibrary(bundle: Bundle(for: MetalPipelines.self)) else {
+            guard let library = try? device.makeDefaultLibrary(bundle: ShippedResources.bundle) else {
                 return nil
             }
             libraries.append(library)
