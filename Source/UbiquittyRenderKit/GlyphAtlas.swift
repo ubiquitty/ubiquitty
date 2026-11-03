@@ -352,6 +352,9 @@ package final class GlyphAtlas {
     /// sized by the glyph's ink sets the device size CoreText quantises on.
     /// Measured once per glyph, since Core asks for every phased wide cell.
     private var widePenGrids: [UInt64: Int32] = [:]
+    /// Each fallback face's raise on the wide sheet, by face and style.
+    /// Measured once per face, since every glyph of a face shares it.
+    private var wideRaises: [String: CGFloat] = [:]
     /// Whether the sheets are CoreText rasters. A bitmap family Core draws
     /// itself (Unifont) positions on the portable grid and has no smoothing
     /// tiers, so its frame keys exactly as the portable renderer's.
@@ -1561,19 +1564,67 @@ extension GlyphAtlas: WideGlyphSource {
                 in: font,
                 style: rasterStyle(for: variant),
                 subpixel: wideSubpixel(of: variant, for: codePoint, face: face),
+                raisedBy: wideRaise(for: font, face: face),
                 slot: Int(slot)
             )
             FillCensus.note(lane: "wide", font: font, spent: DispatchTime.now().uptimeNanoseconds - start)
             return true
         }
+        let font = faceCarrying(codePoint, face: face)
         wide.rasterise(
             codePoint,
-            in: faceCarrying(codePoint, face: face),
+            in: font,
             style: rasterStyle(for: variant),
             subpixel: wideSubpixel(of: variant, for: codePoint, face: face),
+            raisedBy: wideRaise(for: font, face: face),
             slot: Int(slot)
         )
         return true
+    }
+
+    /// The whole pixels the wide sheet raises a face's glyphs.
+    ///
+    /// A CJK face's ideographs centre on its ideographic character face, and
+    /// the primary face's capitals on half its cap height; text mixing the two
+    /// reads level when those centres meet. Where the face's centre lands is
+    /// measured as the wide sheet draws it, size matching and growth included,
+    /// through a reference ideograph less that glyph's own offset from the
+    /// character face's centre. A face whose BASE table names no character face
+    /// is measured by the reference glyph alone.
+    ///
+    /// The whole face moves together, so its marks and punctuation keep their
+    /// places beside its ideographs. The primary face, and a face carrying none
+    /// of the reference characters, keep their own placement.
+    ///
+    /// - Parameters:
+    ///   - font: The face a glyph is drawn in.
+    ///   - face: Bold and italic, which pick the primary face.
+    /// - Returns: The raise in pixels, zero for a face left where it stands.
+    private func wideRaise(for font: CTFont, face: Ubiquitty.Rendering.FontFace) -> CGFloat {
+        let primary = faces[face]
+        guard let wide, !CFEqual(font, primary) else {
+            return 0
+        }
+        let key = "\(CTFontCopyPostScriptName(font)) \(CTFontGetSize(font)) \(face.rawValue)"
+        if let known = wideRaises[key] {
+            return known
+        }
+        var raise: CGFloat = 0
+        // 漢, 国, 한 and あ: a Han, a Hangul and a kana face each carry one.
+        for reference: UInt32 in [0x6F22, 0x56FD, 0xD55C, 0x3042] {
+            guard let glyph = GlyphAtlas.glyphIdentifier(for: reference, in: font),
+                let drawn = wide.drawnInkCentre(of: reference, glyph: glyph, in: font)
+            else {
+                continue
+            }
+            var inkGlyph = glyph
+            let ink = CTFontGetBoundingRectsForGlyphs(font, .default, &inkGlyph, nil, 1)
+            let offsetFromFace = ideographicCharacterFaceCentre(font).map { ink.midY - $0 } ?? 0
+            raise = (CTFontGetCapHeight(primary) / 2 - (drawn - offsetFromFace)).rounded()
+            break
+        }
+        wideRaises[key] = raise
+        return raise
     }
 
     func wideGlyphPhaseCount(_ codePoint: UInt32, face: Ubiquitty.Rendering.FontFace) -> Int32 {
@@ -1670,6 +1721,7 @@ extension GlyphAtlas: WideClusterGlyphSource {
                     in: baseFont,
                     style: rasterStyle(for: variant),
                     subpixel: wideSubpixel(of: variant, for: shaped.base, face: face),
+                    raisedBy: wideRaise(for: baseFont, face: face),
                     slot: slot
                 )
             } else {
@@ -2128,8 +2180,9 @@ extension GlyphAtlas: SizedGlyphSource {
             if let glyph = GlyphAtlas.glyphIdentifier(for: codePoint, in: font) {
                 // The wide page is two cells across, so a window steps two
                 // advances. The wide sheet places its glyph at its own pen, the
-                // advance centred in the two cells, and grows it toward the slot,
-                // which the master draws as well.
+                // advance centred in the two cells and the face raised to the
+                // primary's cap height, and grows it toward the slot, which the
+                // master draws as well.
                 var canvas = Ubiquitty.Rendering.sizedWindowCanvas(
                     Int32(wide.slotWidthInPixels),
                     Int32(wide.slotHeightInPixels),
@@ -2149,7 +2202,7 @@ extension GlyphAtlas: SizedGlyphSource {
                             font: font,
                             widened: nil,
                             room: Ubiquitty.Rendering.WidthAxisRoom(),
-                            pen: .placed(wide.centredPen(of: glyph, in: font))
+                            pen: .placed(wide.centredPen(of: glyph, in: font, raisedBy: wideRaise(for: font, face: face)))
                         ),
                         tile: tile,
                         phase: 0,

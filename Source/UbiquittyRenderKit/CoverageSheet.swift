@@ -210,17 +210,26 @@ final class CoverageSheet {
     ///   - font: The face to draw it in.
     ///   - style: The raster style, whose tier is the foreground's weight.
     ///   - subpixel: How far into its pixel the pen falls, 0..<1.
+    ///   - raise: The whole pixels the glyph's face is raised.
     ///   - slot: The slot the cache assigned.
-    func rasterise(_ codePoint: UInt32, in font: CTFont, style: GlyphRasterizer.Style, subpixel: CGFloat, slot: Int) {
+    func rasterise(
+        _ codePoint: UInt32,
+        in font: CTFont,
+        style: GlyphRasterizer.Style,
+        subpixel: CGFloat,
+        raisedBy raise: CGFloat,
+        slot: Int
+    ) {
         guard let glyph = GlyphAtlas.glyphIdentifier(for: codePoint, in: font) else {
             rasterizer.rasteriseBlank()
             upload(slot)
             return
         }
+        let centred = centredPen(of: glyph, in: font, raisedBy: raise)
         rasterizer.enqueue(
             glyph: glyph,
             in: font,
-            at: CGPoint(x: centredPen(of: glyph, in: font).x + subpixel, y: pen.y),
+            at: CGPoint(x: centred.x + subpixel, y: centred.y),
             boostCappedTo: boostCap,
             style: style
         ) { [weak self] plane in
@@ -238,17 +247,66 @@ final class CoverageSheet {
 
     /// The pen a glyph stands at in a slot so its advance is centred.
     ///
-    /// The sheet's pen moved by the whole pixels its advance leaves of the
-    /// centring width, halved. A sized master magnifies this pen, so a sized
-    /// glyph stands where the unsized one does, at its scale.
+    /// The sheet's pen moved across by the whole pixels its advance leaves of
+    /// the centring width, halved, and up by its face's raise. A sized master
+    /// magnifies this pen, so a sized glyph stands where the unsized one does,
+    /// at its scale.
     ///
     /// - Parameters:
     ///   - glyph: The glyph, or a cluster's base.
     ///   - font: The face that carries it.
-    /// - Returns: The pen, bottom-left origin; the sheet's own when it does not
-    ///   centre.
-    func centredPen(of glyph: CGGlyph, in font: CTFont) -> CGPoint {
-        CGPoint(x: pen.x + centringOffset(of: glyph, in: font), y: pen.y)
+    ///   - raise: The whole pixels the face is raised.
+    /// - Returns: The pen, bottom-left origin; the sheet's own when it neither
+    ///   centres nor raises.
+    func centredPen(of glyph: CGGlyph, in font: CTFont, raisedBy raise: CGFloat) -> CGPoint {
+        CGPoint(x: pen.x + centringOffset(of: glyph, in: font), y: pen.y + raise)
+    }
+
+    /// Where a glyph's ink centre lands above the baseline as this sheet draws it.
+    ///
+    /// Drawn at the sheet's pen with its growth into the rasteriser's plane and
+    /// read back, so what it reports is the raster's own placement rather than a
+    /// prediction of it. Nothing is uploaded.
+    ///
+    /// - Parameters:
+    ///   - codePoint: The character to draw.
+    ///   - glyph: The glyph `font` maps it to, which sizes the growth.
+    ///   - font: The face to draw it in.
+    /// - Returns: The height of the ink's centre above the pen's baseline, in
+    ///   pixels, or `nil` when the glyph leaves no ink.
+    func drawnInkCentre(of codePoint: UInt32, glyph: CGGlyph, in font: CTFont) -> CGFloat? {
+        guard let scalar = Unicode.Scalar(codePoint) else {
+            return nil
+        }
+        let line = CTLineCreateWithAttributedString(
+            NSAttributedString(
+                string: String(Character(scalar)),
+                attributes: [
+                    NSAttributedString.Key(kCTFontAttributeName as String): font,
+                    NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
+                ]
+            )
+        )
+        rasterizer.rasterise(line: line, at: pen, boostCappedTo: boostCap, sizedBy: glyph, in: font)
+        // Half coverage marks an edge, so the top and bottom are read alike.
+        var topRow: Int?
+        var bottomRow: Int?
+        rasterizer.coverage.withUnsafeBufferPointer { plane in
+            for row in 0..<slotHeightInPixels {
+                let start = row * slotWidthInPixels
+                if plane[start..<start + slotWidthInPixels].contains(where: { $0 >= 128 }) {
+                    topRow = topRow ?? row
+                    bottomRow = row
+                }
+            }
+        }
+        guard let topRow, let bottomRow else {
+            return nil
+        }
+        // The plane's first row is its top; the pen is measured from its bottom.
+        let inkTop = CGFloat(slotHeightInPixels - topRow)
+        let inkBottom = CGFloat(slotHeightInPixels - 1 - bottomRow)
+        return (inkTop + inkBottom) / 2 - pen.y
     }
 
     /// How far past the pen a glyph is drawn so its advance is centred.
@@ -475,6 +533,7 @@ final class CoverageSheet {
     ///   - font: The face carrying the base.
     ///   - style: The raster style, whose tier is the foreground's weight.
     ///   - subpixel: How far into its pixel the pen falls, 0..<1.
+    ///   - raise: The whole pixels the base's face is raised.
     ///   - slot: The slot the cache assigned.
     func rasterise(
         cluster line: CTLine,
@@ -482,11 +541,13 @@ final class CoverageSheet {
         in font: CTFont,
         style: GlyphRasterizer.Style,
         subpixel: CGFloat,
+        raisedBy raise: CGFloat,
         slot: Int
     ) {
+        let centred = centredPen(of: baseGlyph, in: font, raisedBy: raise)
         rasterizer.rasterise(
             line: line,
-            at: CGPoint(x: centredPen(of: baseGlyph, in: font).x + subpixel, y: pen.y),
+            at: CGPoint(x: centred.x + subpixel, y: centred.y),
             boostCappedTo: boostCap,
             sizedBy: baseGlyph,
             in: font,
