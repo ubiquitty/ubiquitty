@@ -87,20 +87,39 @@ extension TerminalSurface {
             .tag = absoluteRow
         }
 
+        // These two act on the pane the menu opened over, focused or not, and
+        // this surface answers them: a host's responder chain holds no window
+        // controller of the app's to answer the Edit menu's selectors.
         menu.addItem(.separator())
         addItem(
             to: menu,
             title: "Clear Scrollback",
-            action: #selector(TerminalWindowController.clearScrollback(_:)),
-            target: nil
+            action: #selector(clearScrollbackUnderMouse(_:)),
+            target: self
         )
         addItem(
             to: menu,
             title: "Reset Terminal",
-            action: #selector(TerminalWindowController.resetTerminal(_:)),
-            target: nil
+            action: #selector(resetTerminalUnderMouse(_:)),
+            target: self
         )
         return menu
+    }
+
+    /// Clears the scrollback of this surface, the one the menu opened over.
+    ///
+    /// - Parameter sender: The item.
+    @objc
+    package func clearScrollbackUnderMouse(_ sender: NSMenuItem) {
+        runClearCommand(.Scrollback)
+    }
+
+    /// Soft-resets the terminal of this surface, the one the menu opened over.
+    ///
+    /// - Parameter sender: The item.
+    @objc
+    package func resetTerminalUnderMouse(_ sender: NSMenuItem) {
+        softResetTerminal()
     }
 
     /// Copies the resolved link target captured when the menu was built.
@@ -145,6 +164,10 @@ extension TerminalSurface {
             // A shell with no integration marks nothing, which is the common
             // case, so these grey out rather than beeping at every pick.
             return drive.hasCommand(underAbsoluteRow: item.tag)
+        case #selector(resetTerminalUnderMouse(_:)):
+            // A pane attached to a host shows the host's terminal, which Core's
+            // reset leaves as it is.
+            return !drive.isRemoteAttached
         default:
             return true
         }

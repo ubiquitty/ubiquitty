@@ -185,6 +185,58 @@ surface nothing draws reports as a drawn one does, since a host's chrome around
 a hidden pane still shows its colors. The callback has an empty default, so an
 existing observer compiles unchanged.
 
+### Clear commands
+
+`clear(_:)` runs one of the clear commands the app's Edit menu offers, on the
+main thread. What each command clears and what the program is sent are Core's:
+the app's menu items, its key bindings and this call run the same command.
+One method takes a `TerminalSurface.ClearCommand` rather than one method per
+command, as Core's own dispatch does, so a host that binds gestures or builds
+a menu passes the command through instead of restating the choice.
+
+| Command | App item | Screen | Scrollback | Program is sent |
+| --- | --- | --- | --- | --- |
+| `.buffer` | Clear Buffer, Cmd-K | Blank, except the cursor's row up to the cursor, which rises to the top row | Emptied | Ctrl-L |
+| `.scrollback` | Clear Scrollback, Opt-Cmd-K | Text stands; rows return to single width and height | Emptied | Nothing |
+| `.screen` | Clear Screen | The prompt's first row scrolls to the top row | Gains the rows above the prompt | Nothing |
+
+The prompt's first row is the row the shell marked with OSC 133 A; without
+shell integration it is the cursor's row, and the cursor's row is what
+`.buffer` keeps. Ctrl-L asks the shell to redraw a prompt its line editor
+still places where the screen no longer shows it.
+
+A command that removes or moves rows drops the selection, raising
+`terminalSurfaceSelectionDidChange(_:)`, and returns the view to the live tail.
+`.scrollback` does both under every program, whether or not there was history
+to remove. A program that owns the screen's layout, by the alternate screen, a
+scroll region or left and right margins, is sent Ctrl-L for `.buffer` and
+`.screen` in place of the clear, and its screen, the selection and the view
+stay for those two; `.scrollback` still empties the history, and leaves the
+rows' width and height as the program drew them. A prompt already on the top
+row leaves `.screen` nothing to do, and the selection stays. Except on a pane
+attached to a host, `accessibilityValue()` reads the screen the command left as
+soon as the call returns, with or without a selection and wherever the view
+was.
+
+The surface's own context menu offers Clear Scrollback and Reset Terminal, and
+the surface answers both for itself, acting on the pane the menu opened over;
+a host's responder chain needs nothing for them. On a pane attached to a host,
+Clear Scrollback goes to the host as `clear(.scrollback)` does, and Reset
+Terminal is disabled: the program's terminal is the host's, and a reset of the
+pane's copy would leave the host's modes standing while the pane drew others.
+
+A pane attached to a host sends the command to the host, which runs it on its
+own copy and sends Ctrl-L to its program itself; the result arrives with the
+host's next update. The surface drops its selection and returns to the live
+tail when the request is sent. Before the attachment is established the call
+does nothing, and a host refuses it from an attachment that may only watch.
+On a tmux pane the command runs on the surface's copy, and Ctrl-L reaches the
+program through tmux.
+
+`Scripts/check-ubiquittykit.sh` runs all three, from the live tail and from a
+view scrolled back, and the context menu's two items, from a consumer compiled
+with `-F` alone, against a program of known output.
+
 ## Swift framework
 
 `UbiquittyKit.framework` packages the Swift views for an app built outside

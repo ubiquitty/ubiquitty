@@ -7319,9 +7319,15 @@ public:
     /// reset a host-initiated `CSI ! p` performs, plus the mouse, paste and
     /// focus modes DECSTR leaves, republished so a frontend's cached mode
     /// mirrors retire now rather than one drain later.
+    ///
+    /// A session attached to a host is left as it is: the program's terminal
+    /// is the host's, which encodes the pane's input under its own modes, and
+    /// only the authority mutates a mirrored grid.
     void softResetTerminal()
     {
         const std::scoped_lock hold(*m_activeLock);
+        if (m_remote)
+            return;
         if (Ubiquitty::Terminal* term = modelTerm()) {
             Ubiquitty::softReset(term);
             republishModel();
