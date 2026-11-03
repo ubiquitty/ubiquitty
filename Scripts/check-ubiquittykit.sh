@@ -48,8 +48,16 @@
 # runs a program the process catalog names, and reads the program's name,
 # catalog key, icon and chains as the public observer hears the process sample move;
 # hears nothing while the observer declines process facts, and the move once it
-# asks again; reads the status a record posts and the colour a program sets as
-# the status callback fires; and reads nothing named after the shell exits.
+# asks again, while the title and directory question it leaves unanswered still
+# tells both; reads the status a record posts and the colour a program sets as
+# the status callback fires; and reads nothing named after the shell exits. In a
+# third surface out of its window, with process facts declined, it hears the
+# directory a `cd` moves to with no report, and the title and working directory
+# the shell sets; hears nothing while its observer declines them, and the newest
+# of each once it asks again; and hears an empty title once the program that set
+# one exits, to a prompt and to a shell that writes none. A fourth surface,
+# never in a window, hidden and shown again, tells its title to an observer that
+# declines it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
@@ -1698,13 +1706,16 @@ struct StatusReport {
     let key: String?
 }
 
-/// Records each process-state and status change a surface announces, and
-/// what the surface names when its session ends; answers whether it needs
-/// process facts as `needsProcessState` says.
+/// Records each process-state, status, title and directory change a surface
+/// announces, and what the surface names when its session ends; answers
+/// whether it needs process facts as `needsProcessState` says, and leaves the
+/// title and directory question unanswered, as a host built before it does.
 @MainActor
 final class ProcessWatch: TerminalSurfaceObserver {
     private(set) var reports: [ProcessReport] = []
     private(set) var statuses: [StatusReport] = []
+    private(set) var titles: [String] = []
+    private(set) var directories: [String] = []
     private(set) var exitReport: ProcessReport?
     var needsProcessState = true
 
@@ -1736,6 +1747,18 @@ final class ProcessWatch: TerminalSurfaceObserver {
         }
     }
 
+    nonisolated func terminalSurface(_ surface: TerminalSurface, didChangeTitle title: String) {
+        MainActor.assumeIsolated {
+            titles.append(title)
+        }
+    }
+
+    nonisolated func terminalSurface(_ surface: TerminalSurface, didChangeCurrentDirectory directory: String) {
+        MainActor.assumeIsolated {
+            directories.append(directory)
+        }
+    }
+
     nonisolated func terminalSurfaceDidExit(_ surface: TerminalSurface) {
         MainActor.assumeIsolated {
             exitReport = Self.report(surface)
@@ -1743,9 +1766,86 @@ final class ProcessWatch: TerminalSurfaceObserver {
     }
 }
 
+/// What one title or directory callback carried, beside what the surface
+/// read inside it.
+struct ValueReport: Equatable {
+    let told: String
+    let read: String
+}
+
+/// Records each title and working directory a surface announces, and the tab
+/// status, which is never held and so marks how far the session's output has
+/// been delivered; declines process facts, and answers whether it needs the
+/// title and directory as `needsTitleAndDirectory` says.
+@MainActor
+final class TitleWatch: TerminalSurfaceObserver {
+    private(set) var titles: [ValueReport] = []
+    private(set) var directories: [ValueReport] = []
+    private(set) var statusLabels: [String] = []
+    private(set) var hasExited = false
+    var needsTitleAndDirectory = true
+
+    nonisolated func terminalSurfaceNeedsProcessState(_ surface: TerminalSurface) -> Bool { false }
+
+    nonisolated func terminalSurfaceNeedsTitleAndDirectory(_ surface: TerminalSurface) -> Bool {
+        MainActor.assumeIsolated { needsTitleAndDirectory }
+    }
+
+    nonisolated func terminalSurface(_ surface: TerminalSurface, didChangeTitle title: String) {
+        MainActor.assumeIsolated {
+            titles.append(ValueReport(told: title, read: surface.title))
+        }
+    }
+
+    nonisolated func terminalSurface(_ surface: TerminalSurface, didChangeCurrentDirectory directory: String) {
+        MainActor.assumeIsolated {
+            directories.append(ValueReport(told: directory, read: surface.currentDirectory))
+        }
+    }
+
+    nonisolated func terminalSurfaceDidChangeTabStatus(_ surface: TerminalSurface) {
+        MainActor.assumeIsolated {
+            statusLabels.append(surface.programStatus.label)
+        }
+    }
+
+    nonisolated func terminalSurfaceDidExit(_ surface: TerminalSurface) {
+        MainActor.assumeIsolated {
+            hasExited = true
+        }
+    }
+}
+
 func refuse(_ message: String) -> Bool {
     FileHandle.standardError.write(Data("consumer: \(message)\n".utf8))
     return false
+}
+
+/// Makes each directory under the consumer's HOME, returning their paths as
+/// the kernel resolves them, which is how a sampled directory reads; nil when
+/// there is no HOME or a directory cannot be made.
+func makeDirectories(_ names: [String]) -> [String]? {
+    guard let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty else {
+        _ = refuse("no HOME to make directories in")
+        return nil
+    }
+    var paths: [String] = []
+    for name in names {
+        let path = home + "/" + name
+        do {
+            try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        } catch {
+            _ = refuse("could not make \(path): \(error)")
+            return nil
+        }
+        guard let resolved = realpath(path, nil) else {
+            _ = refuse("could not resolve \(path)")
+            return nil
+        }
+        paths.append(String(cString: resolved))
+        free(resolved)
+    }
+    return paths
 }
 
 /// Runs the main loop, which carries the surface's deliveries, until the
@@ -1760,11 +1860,25 @@ func wait(seconds: TimeInterval, until condition: () -> Bool) -> Bool {
     return true
 }
 
+/// Puts the surface in a window that is never ordered front and takes it out
+/// again. A window never ordered front shows no title, and a surface that has
+/// been in a window and is in none is one a host keeps out of the window: what
+/// it hears from here on, it hears because its observer asks.
+@MainActor
+func takeThroughAWindowAndOut(_ surface: TerminalSurface) {
+    _ = NSApplication.shared
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400), styleMask: [.titled], backing: .buffered, defer: true)
+    window.isReleasedWhenClosed = false
+    window.contentView?.addSubview(surface)
+    surface.removeFromSuperview()
+}
+
 /// Launches a shell in a surface taken out of its window, runs the program
 /// from it, and reads the program back through the values the process-state
 /// callback announces; hears nothing while the observer declines process
-/// facts, and the move once it asks again; reads the status a record posts
-/// and the colour a program sets through the status callback; and reads
+/// facts, and the move once it asks again, and meanwhile the title and
+/// directory its unanswered question reads as asked; reads the status a record
+/// posts and the colour a program sets through the status callback; and reads
 /// nothing named once the shell has exited.
 @MainActor
 func readsTheForegroundProgram(at path: String, expectedKey: String) -> Bool {
@@ -1772,15 +1886,9 @@ func readsTheForegroundProgram(at path: String, expectedKey: String) -> Bool {
     guard let surface = TerminalSurface(rows: 24, columns: 80) else {
         return refuse("no shell surface")
     }
-    // A window never ordered front shows no title, so the surface leaves it
-    // unpresented: what it hears from here on, it hears because its observer
-    // asks for process facts, which is how a host keeps hearing a background
-    // tab it keeps out of the window.
-    _ = NSApplication.shared
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400), styleMask: [.titled], backing: .buffered, defer: true)
-    window.isReleasedWhenClosed = false
-    window.contentView?.addSubview(surface)
-    surface.removeFromSuperview()
+    // It hears process facts because its observer asks for them, which is
+    // how a host keeps hearing a background tab it keeps out of the window.
+    takeThroughAWindowAndOut(surface)
     // Assigned after the surface has been through a window, so the only
     // question asked of it is the one the assignment asks.
     let watch = ProcessWatch()
@@ -1829,11 +1937,22 @@ func readsTheForegroundProgram(at path: String, expectedKey: String) -> Bool {
     }
     print("consumer: \(name)'s icon is \(iconTitle)'s, and the shell at its prompt has none")
 
-    // Declined, the surface samples nothing and says nothing: the program
-    // starts unheard, and the name read fresh is still the shell's. Asked
-    // again, it samples and names the program.
+    // Declined, the surface walks no process and says nothing of one: the
+    // program starts unheard, and the name read fresh is still the shell's.
+    // Asked again, it samples and names the program. The title and directory
+    // question left unanswered reads as asked, so both are told meanwhile.
     watch.needsProcessState = false
     surface.observer = watch
+    guard let unansweredDirectory = makeDirectories(["unanswered"])?.first else {
+        return false
+    }
+    surface.send("cd '\(unansweredDirectory)' && printf '\\033]2;%s\\007\\033]7;file://localhost%s\\033\\\\' consumer-unanswered \"$PWD\"\n")
+    guard wait(seconds: 20, until: { watch.titles.contains("consumer-unanswered") && watch.directories.contains(unansweredDirectory) }) else {
+        return refuse(
+            "out of a window, an observer that leaves the title and directory question unanswered heard \(watch.titles) and \(watch.directories)"
+        )
+    }
+    print("consumer: unanswered, the title and directory question reads as asked")
     let heardWhileDeclined = watch.reports.count
     surface.send("'\(path)' 30\n")
     _ = wait(seconds: 2, until: { watch.reports.count != heardWhileDeclined || surface.foregroundProgramName != shell })
@@ -1914,13 +2033,167 @@ func readsTheForegroundProgram(at path: String, expectedKey: String) -> Bool {
     return true
 }
 
+/// Launches a shell in a surface kept out of any window, as a host keeps a
+/// background tab, with process facts declined; hears the directory a `cd`
+/// moves to with no report, then the title (OSC 0) and directory (OSC 7) the
+/// shell sets, each read back inside its callback; hears nothing while the
+/// observer declines them as the shell sets more (OSC 2, OSC 7), and only the
+/// newest of each once it asks again; and hears an empty title once the
+/// program that set one exits, whether or not the shell writes a prompt after
+/// it.
+@MainActor
+func hearsTheTitleAndDirectoryOutOfAWindow() -> Bool {
+    guard let directories = makeDirectories(["sampled", "asked", "declined"]) else {
+        return false
+    }
+    let sampledDirectory = directories[0]
+    let askedDirectory = directories[1]
+    let declinedDirectory = directories[2]
+    guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+        return refuse("no title surface")
+    }
+    takeThroughAWindowAndOut(surface)
+    let watch = TitleWatch()
+    surface.observer = watch
+    guard surface.launchShell() else {
+        return refuse("the title shell did not launch")
+    }
+
+    // /bin/sh reports no directory, so this one is the session's sample of
+    // where the shell is.
+    surface.send("cd '\(sampledDirectory)'\n")
+    let sampled = ValueReport(told: sampledDirectory, read: sampledDirectory)
+    guard wait(seconds: 20, until: { watch.directories.contains(sampled) }) else {
+        return refuse("out of a window, the surface did not follow the shell to \(sampledDirectory): heard \(watch.directories)")
+    }
+    print("consumer: out of a window, the surface followed a shell that reports no directory")
+
+    surface.send("cd '\(askedDirectory)' && printf '\\033]0;%s\\007\\033]7;file://localhost%s\\033\\\\' consumer-asked \"$PWD\"\n")
+    let asked = ValueReport(told: "consumer-asked", read: "consumer-asked")
+    let askedReport = ValueReport(told: askedDirectory, read: askedDirectory)
+    guard wait(seconds: 20, until: { watch.titles.contains(asked) && watch.directories.contains(askedReport) }) else {
+        return refuse("out of a window, the surface did not tell its title and directory: heard \(watch.titles) and \(watch.directories)")
+    }
+    print("consumer: out of a window, the surface told the title \(asked.told) and the directory \(askedDirectory)")
+
+    // Declined, both are held, and the values keep what was last told. The
+    // status set after them is never held, so once it is heard the title and
+    // directory before it have been delivered or held.
+    watch.needsTitleAndDirectory = false
+    surface.observer = watch
+    let titlesBeforeDeclining = watch.titles.count
+    let directoriesBeforeDeclining = watch.directories.count
+    surface.send(
+        "cd '\(declinedDirectory)' && printf '\\033]2;%s\\007\\033]2;%s\\007\\033]7;file://localhost%s\\033\\\\\\033]21337;indicator=#010203;status=%s\\007' consumer-declined-first consumer-declined-last \"$PWD\" declined\n"
+    )
+    guard wait(seconds: 20, until: { watch.statusLabels.contains("declined") }) else {
+        return refuse("the status set after the declined title was not heard: heard \(watch.statusLabels)")
+    }
+    _ = wait(seconds: 0.5, until: { false })
+    guard watch.titles.count == titlesBeforeDeclining, watch.directories.count == directoriesBeforeDeclining else {
+        return refuse(
+            "a surface whose observer declines the title and directory told \(watch.titles.dropFirst(titlesBeforeDeclining)) and \(watch.directories.dropFirst(directoriesBeforeDeclining))"
+        )
+    }
+    guard surface.title == asked.told, surface.currentDirectory == askedDirectory else {
+        return refuse("while held, the surface reads \(surface.title) in \(surface.currentDirectory)")
+    }
+
+    // Asked again, the newest of each is told at once, and only the newest.
+    watch.needsTitleAndDirectory = true
+    surface.observer = watch
+    let declinedTitles = Array(watch.titles.dropFirst(titlesBeforeDeclining))
+    let declinedDirectories = Array(watch.directories.dropFirst(directoriesBeforeDeclining))
+    guard declinedTitles == [ValueReport(told: "consumer-declined-last", read: "consumer-declined-last")],
+        declinedDirectories == [ValueReport(told: declinedDirectory, read: declinedDirectory)]
+    else {
+        return refuse("asked again, the surface told \(declinedTitles) and \(declinedDirectories)")
+    }
+    print("consumer: declined, the surface held its title and directory; asked again, it told the newest of each")
+
+    // A program sets a title and exits: the title leaves with it.
+    let titlesBeforeChild = watch.titles.count
+    surface.send("sh -c 'printf \"\\033]2;%s\\007\" consumer-child; sleep 1'\n")
+    let child = ValueReport(told: "consumer-child", read: "consumer-child")
+    let retired = ValueReport(told: "", read: "")
+    guard
+        wait(seconds: 20, until: {
+            let told = watch.titles.dropFirst(titlesBeforeChild)
+            return told.contains(child) && told.last == retired
+        })
+    else {
+        return refuse("out of a window, the title of a program that exited was not retired: heard \(watch.titles.dropFirst(titlesBeforeChild))")
+    }
+    print("consumer: out of a window, a program's title left with it")
+
+    // With no prompt written after a program, the edge of its exit is all
+    // that retires its title, and the shell takes the terminal back after that
+    // edge. Each run is a race between the two, so the leg runs it more than
+    // once.
+    surface.send("PS1=''; PS2=''\n")
+    for run in 1...3 {
+        let titlesBeforeQuietChild = watch.titles.count
+        let quietTitle = "consumer-quiet-\(run)"
+        surface.send("sh -c 'printf \"\\033]2;%s\\007\" \(quietTitle); sleep 1'\n")
+        let quietChild = ValueReport(told: quietTitle, read: quietTitle)
+        guard
+            wait(seconds: 20, until: {
+                let told = watch.titles.dropFirst(titlesBeforeQuietChild)
+                return told.contains(quietChild) && told.last == retired
+            })
+        else {
+            return refuse(
+                "out of a window, a program that exited to a shell writing no prompt left its title: heard \(watch.titles.dropFirst(titlesBeforeQuietChild))"
+            )
+        }
+    }
+    print("consumer: out of a window, a program's title left with it to a shell that writes no prompt")
+
+    surface.send("exit\n")
+    guard wait(seconds: 20, until: { watch.hasExited }) else {
+        return refuse("the title shell did not exit")
+    }
+    return true
+}
+
+/// Launches a shell in a surface that has never been in a window, hidden and
+/// shown again, whose observer declines the title and directory and process
+/// facts; hears the title the shell sets, since a surface never in a window
+/// counts as shown, hidden or not.
+@MainActor
+func hearsTheTitleOfASurfaceNeverInAWindow() -> Bool {
+    guard let surface = TerminalSurface(rows: 24, columns: 80) else {
+        return refuse("no surface to keep out of every window")
+    }
+    surface.isHidden = true
+    surface.isHidden = false
+    let watch = TitleWatch()
+    watch.needsTitleAndDirectory = false
+    surface.observer = watch
+    guard surface.launchShell() else {
+        return refuse("the unwindowed shell did not launch")
+    }
+    surface.send("printf '\\033]2;%s\\007' consumer-unwindowed\n")
+    let unwindowed = ValueReport(told: "consumer-unwindowed", read: "consumer-unwindowed")
+    guard wait(seconds: 20, until: { watch.titles.contains(unwindowed) }) else {
+        return refuse("a surface never in a window, hidden and shown again, told \(watch.titles) and reads \(surface.title)")
+    }
+    print("consumer: a surface never in a window, hidden and shown again, told its title")
+    surface.send("exit\n")
+    guard wait(seconds: 20, until: { watch.hasExited }) else {
+        return refuse("the unwindowed shell did not exit")
+    }
+    return true
+}
+
 let arguments = CommandLine.arguments
 guard arguments.count == 3 else {
     _ = refuse("usage: program-consumer <program> <catalog key>")
     exit(2)
 }
-let passed = MainActor.assumeIsolated {
+let passed = MainActor.assumeIsolated { () -> Bool in
     readsTheForegroundProgram(at: arguments[1], expectedKey: arguments[2])
+        && hearsTheTitleAndDirectoryOutOfAWindow() && hearsTheTitleOfASurfaceNeverInAWindow()
 }
 exit(passed ? 0 : 1)
 EOF
@@ -1932,7 +2205,7 @@ xcrun swiftc "$PROGRAM_DIR/main.swift" \
     -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
 
 run_consumer "$PROGRAM_DIR/program-consumer" "$PROGRAM_DIR/claude" claude-code
-echo "check-ubiquittykit: ok (external consumer read a shell's foreground program, its icon and its status out of a window, heard nothing while declining, and read nothing named after exit)"
+echo "check-ubiquittykit: ok (external consumer read a shell's foreground program, its icon and its status out of a window, heard nothing while declining, read nothing named after exit, heard a title and directory out of a window from an unanswered question, a sampled cd and a retired title, held while declined, and a title from a surface never in a window)"
 
 # Another consumer moves panes in code, as a host laying out its own panes
 # does: an animation of a pane's frame, a sequence of frames set a display

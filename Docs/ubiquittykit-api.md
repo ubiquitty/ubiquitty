@@ -125,6 +125,31 @@ surfaces can share glyph resources and remains alive until its last owner
 releases it. Prefer the surface initializer that creates and installs a renderer;
 use separate construction when sharing one renderer between surfaces.
 
+A surface reports the title and the working directory its session sets as
+values, so one surface serves a pane header, a tab and a window title.
+`title` and `currentDirectory` move as the observer's
+`terminalSurface(_:didChangeTitle:)` and
+`terminalSurface(_:didChangeCurrentDirectory:)` fire. Both fire while the
+surface's window shows its title, and while the observer's
+`terminalSurfaceNeedsTitleAndDirectory(_:)` answers true, in a window or out
+of one. The surface asks when its presentation moves and whenever an observer
+is assigned, so a host whose answer changes assigns its observer again; an
+observer that does not answer hears both wherever its surface is. A surface
+that has never been in a window counts as shown, hidden or not. Otherwise a
+change is held, the two values keep what was last told, and the newest title
+and directory fire once either holds again. A host that keeps background tabs'
+surfaces out of the window and draws their titles answers true.
+
+While either that answer or the process-state one below is true, a local
+session reads which program holds its terminal and where that program is. So
+a title a program set is told empty once the program exits, whether or not the
+shell writes a prompt after it, and a shell that reports no directory is
+followed from one directory to the next. The title and directory take no
+process walk: a host that declines process facts, as below, still hears both
+kept current, and only the process-state answer walks the foreground's chain.
+With both answers false nothing is read, so a title can outlive the program
+that set it.
+
 A surface names the program its pane runs, so a host that draws its own tab
 or pane chrome reads Core's answer instead of walking the process table:
 
@@ -168,13 +193,13 @@ is named by the name the kernel keeps for it, cut at 15 bytes. A sample that
 moves the name or the holder fires the process-state callback.
 
 A local session reports this machine's process walk while the observer's
-`terminalSurfaceNeedsProcessState(_:)` answers true. The surface asks when its
-presentation moves and whenever an observer is assigned, so a host whose answer
-changes assigns its observer again. The process-state callback fires while the
-surface's window shows it, and also while that answer is true when no window
-shows the surface. A surface that has never been in a window counts as shown.
-A host that keeps background tabs' surfaces out of the window keeps hearing
-them by answering true. With neither, the move is held until one holds again.
+`terminalSurfaceNeedsProcessState(_:)` answers true, which the surface asks
+whenever it asks about the title and directory. The process-state callback
+fires while the surface's window shows it, and also while that answer is true
+when no window shows the surface. A surface that has never been in a window
+counts as shown, hidden or not. A host that keeps background tabs' surfaces out
+of the window keeps hearing them by answering true. With neither, the move is
+held until one holds again.
 
 A pane that `ubiquitty-host` serves reports the host's own facts, so the
 program running on the host is the one named, and who holds its terminal is
@@ -496,6 +521,13 @@ headers are not a separate compatibility promise.
   them a program writing updates back to back. A further consumer launches a
   shell in a surface taken out of its window, runs a program, and reads its
   name, catalog key, icon and chains; hears nothing while its observer declines
-  process facts and the move once it asks again; reads the status a record
-  posts and the colour a program sets; and reads nothing named once the shell
-  exits.
+  process facts and the move once it asks again, while an observer that
+  leaves the title and directory question unanswered hears both; reads the
+  status a record posts and the colour a program sets; and reads nothing named
+  once the shell exits. In a third surface out of its window, with process
+  facts declined, it hears the directory a `cd` moves to with no report, the
+  title and directory the shell sets, nothing while its observer declines
+  them, the newest of each once it asks again, and an empty title once the
+  program that set one exits, to a prompt and, three times over, to a shell
+  that writes none. A fourth surface, never in a window, hidden and shown
+  again, tells its title to an observer that declines it.

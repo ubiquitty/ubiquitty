@@ -255,6 +255,9 @@ private:
     UnixFileDescriptor m_descriptor;
 };
 
+// A session transport over a PipeEndpoint. Its foreground is the group a case
+// sets, which the case may move while the loop runs, and its tree announces
+// the edges the case raises once a case says it does.
 class PipeStream final : public Stream, private ProcessFacts {
 public:
     explicit PipeStream(UnixFileDescriptor descriptor)
@@ -262,6 +265,24 @@ public:
         , m_endpoint(std::move(descriptor))
     {
     }
+
+    ~PipeStream() override
+    {
+        if (m_releaseTreeContext)
+            m_releaseTreeContext(m_treeContext);
+    }
+
+    /// The group holding the terminal; zero resolves none.
+    std::atomic<ProcessID> foregroundGroup { 0 };
+    /// The shell's group, which holds the terminal at a prompt; zero for none.
+    ProcessID shellGroup = 0;
+    /// Whether the tree announces its edges.
+    bool isTreeTracked = false;
+
+    /// Raises a fork, exec or exit edge, as the tracker's thread does.
+    ///
+    /// - Returns: Whether the session reads its foreground.
+    bool raiseTreeEdge() { return m_treeNotify != nullptr && m_treeNotify(m_treeContext); }
 
     int read(std::span<char> buffer) override { return m_endpoint.read(buffer); }
     int write(std::span<const char> bytes) override { return m_endpoint.write(bytes); }
@@ -275,16 +296,34 @@ public:
     ProcessFacts& process() override { return *this; }
 
     std::string foregroundName() override { return {}; }
-    bool foregroundIsShell() override { return false; }
-    std::optional<ProcessID> foregroundProcessGroup() override { return {}; }
+    bool foregroundIsShell() override { return shellGroup != 0 && foregroundGroup.load(std::memory_order_relaxed) == shellGroup; }
+    std::optional<ProcessID> foregroundProcessGroup() override
+    {
+        const ProcessID group = foregroundGroup.load(std::memory_order_relaxed);
+        if (group == 0)
+            return std::nullopt;
+        return group;
+    }
     std::string foregroundCurrentDirectory() override { return {}; }
     std::string ttyName() override { return {}; }
     bool hasRunningChild() override { return false; }
     int gatherProcesses(std::span<PAL::Process::Record>) override { return 0; }
+    void setTreeChangeNotifier(bool (*notify)(void*), void* context, void (*releaseContext)(void*)) override
+    {
+        if (m_releaseTreeContext)
+            m_releaseTreeContext(m_treeContext);
+        m_treeNotify = notify;
+        m_treeContext = context;
+        m_releaseTreeContext = releaseContext;
+    }
+    bool deliversTreeEdges() override { return isTreeTracked; }
 
 private:
     int m_rawDescriptor;
     PipeEndpoint m_endpoint;
+    bool (*m_treeNotify)(void*) = nullptr;
+    void* m_treeContext = nullptr;
+    void (*m_releaseTreeContext)(void*) = nullptr;
 };
 
 } // namespace Ubiquitty::PAL
@@ -411,7 +450,7 @@ TEST(testAnEmptyReadDeliversProcessStateChanges)
     REQUIRE(isChildReady);
     auto adoption = session.adoptStream(std::move(stream));
     REQUIRE(adoption.has_value());
-    session.setProcessStatePresentation(PanePresentation::Hidden);
+    session.setForegroundObservation(ForegroundObservation::Unread);
     (void)session.takeEventFlags();
     REQUIRE(session.startIngest());
     session.setDesiredFocus(Ubiquitty::Modes::FocusState::Focused);
@@ -420,7 +459,7 @@ TEST(testAnEmptyReadDeliversProcessStateChanges)
     ::usleep(650000);
     CHECK(session.processChain().empty());
     CHECK(!(session.takeEventFlags() & processBit));
-    session.setProcessStatePresentation(PanePresentation::Presented);
+    session.setForegroundObservation(ForegroundObservation::ProcessState);
     std::uint32_t flags = 0;
     for (int waited = 0; waited < 1500 && !(flags & processBit); waited += 10) {
         flags |= session.takeEventFlags();
@@ -429,6 +468,71 @@ TEST(testAnEmptyReadDeliversProcessStateChanges)
     CHECK_MSG(session.processChain() == "-sleep", ("the empty read discovers the running process: " + session.processChain()).c_str());
     CHECK_MSG(flags & processBit, "the same empty read delivers the changed process state");
     CHECK(session.takeDrainedBytes() == 0);
+}
+
+namespace {
+
+// The model's title, read under the session's lock.
+std::string titleOf(TerminalSession& session)
+{
+    session.lockForRead();
+    const Ubiquitty::Terminal* term = session.terminal();
+    std::string title = term != nullptr ? term->titleUTF8.copyToString() : std::string();
+    session.unlockForRead();
+    return title;
+}
+
+} // namespace
+
+// A program that set a title exits, and its shell takes the terminal back a
+// moment after the exit edge, writing nothing and raising no edge of its own.
+// The edge wakes the loop out of its wait, and the loop answers it once the
+// tree has held still, so the probe reads the shell and the title leaves with
+// its program, at either level that reads the foreground.
+TEST(testAnExitEdgeIsAnsweredOnceTheShellHasTheTerminalBack)
+{
+    constexpr Ubiquitty::PAL::ProcessID shellGroup = 100;
+    constexpr Ubiquitty::PAL::ProcessID programGroup = 200;
+    for (const ForegroundObservation observation : { ForegroundObservation::TitleAndDirectory, ForegroundObservation::ProcessState }) {
+        const char* const level = observation == ForegroundObservation::TitleAndDirectory ? "TitleAndDirectory" : "ProcessState";
+        int pipeDescriptors[2] = { -1, -1 };
+        REQUIRE(::pipe(pipeDescriptors) == 0);
+        Ubiquitty::PAL::UnixFileDescriptor readEnd(pipeDescriptors[0]);
+        Ubiquitty::PAL::UnixFileDescriptor writeEnd(pipeDescriptors[1]);
+        REQUIRE(::fcntl(readEnd.get(), F_SETFL, ::fcntl(readEnd.get(), F_GETFL) | O_NONBLOCK) == 0);
+        auto stream = std::make_unique<Ubiquitty::PAL::PipeStream>(std::move(readEnd));
+        stream->isTreeTracked = true;
+        stream->shellGroup = shellGroup;
+        stream->foregroundGroup = programGroup;
+        Ubiquitty::PAL::PipeStream& transport = *stream;
+
+        SessionHandle handle;
+        TerminalSession& session = *handle.session;
+        session.start(24, 80);
+        REQUIRE(session.adoptStream(std::move(stream)).has_value());
+        session.setForegroundObservation(observation);
+        REQUIRE(session.startIngest());
+
+        constexpr std::string_view setTitle = "\x1b]2;program title\x07";
+        REQUIRE(::write(writeEnd.get(), setTitle.data(), setTitle.size()) == static_cast<ssize_t>(setTitle.size()));
+        for (int waited = 0; waited < 2000 && titleOf(session) != "program title"; ++waited)
+            ::usleep(1000);
+        REQUIRE(titleOf(session) == "program title");
+        // Past the floor and the settle of the edge the session starts owing,
+        // so the exit edge is the one the loop answers.
+        ::usleep((Ubiquitty::Title::edgeFloorMilliseconds + Ubiquitty::Title::edgeSettleMilliseconds) * 2000);
+
+        CHECK_MSG(transport.raiseTreeEdge(), level);
+        ::usleep(Ubiquitty::Title::edgeSettleMilliseconds * 1000 / 6);
+        transport.foregroundGroup = shellGroup;
+        bool isRetired = false;
+        for (int waited = 0; waited < 2000 && !isRetired; ++waited) {
+            isRetired = titleOf(session).empty();
+            ::usleep(1000);
+        }
+        CHECK_MSG(isRetired, (std::string(level) + ": the exit edge was answered before the shell took the terminal back, and the title outlived its program").c_str());
+        session.stopIngest();
+    }
 }
 
 TEST(testIngestLoopDrainsALiveShell)

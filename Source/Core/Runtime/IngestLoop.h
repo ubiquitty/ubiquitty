@@ -337,6 +337,16 @@ private:
         std::uint32_t lastTreeEdgeCount = 0;
         std::uint32_t lastTreeMoveMicros = PAL::monotonicMicros();
         std::uint32_t firstPendingEdgeMicros = 0;
+        // The tree moved when a changed edge count is first read, before the
+        // wait or after it: the edge that ends a wait starts the settle it is
+        // answered after.
+        const auto noteTreeMove = [&](std::uint32_t nowMicros) {
+            const std::uint32_t treeEdgeCount = m_runtime.processTreeEdgeCount();
+            if (treeEdgeCount == lastTreeEdgeCount)
+                return;
+            lastTreeEdgeCount = treeEdgeCount;
+            lastTreeMoveMicros = nowMicros;
+        };
         for (;;) {
             if (m_stop.load(std::memory_order_relaxed))
                 return;
@@ -493,11 +503,7 @@ private:
             // already exec'd the shell — those execs land in one burst, so the
             // decisive last one is exactly the edge a drop would discard.
             const std::uint32_t nowEdgeMicros = PAL::monotonicMicros();
-            const std::uint32_t treeEdgeCount = m_runtime.processTreeEdgeCount();
-            if (treeEdgeCount != lastTreeEdgeCount) {
-                lastTreeEdgeCount = treeEdgeCount;
-                lastTreeMoveMicros = nowEdgeMicros;
-            }
+            noteTreeMove(nowEdgeMicros);
             const bool hasTreeEdge = m_runtime.hasPendingProcessTreeEdge();
             if (hasTreeEdge && firstPendingEdgeMicros == 0)
                 firstPendingEdgeMicros = nowEdgeMicros;
@@ -585,13 +591,18 @@ private:
             if (!shouldDrain) {
                 const std::uint32_t nowMicros = PAL::monotonicMicros();
                 const std::uint32_t elapsed = (nowMicros - lastTitleWalkMicros) / 1000;
-                // Only observed process state schedules an edge or backstop.
-                // Hidden state retains its invalidation until reveal.
+                // Only a read foreground schedules an edge or backstop. An
+                // unread one retains its invalidation until it has a reader.
                 // An edge is answered once the tree has held still, or once a
                 // tree that will not hold still has made it wait the cap out.
                 // Answering each edge instead walked the table ten times a
                 // second for a shell loop forking twenty, and named the `sleep`
-                // it caught mid-flight in the title.
+                // it caught mid-flight in the title. The edge that ended the
+                // wait is a move like any other: answered at once, it reads the
+                // group of a program that has just exited before its shell
+                // takes the terminal back, and no edge follows to read the
+                // shell.
+                noteTreeMove(nowMicros);
                 const std::uint32_t stillMillis = (nowMicros - lastTreeMoveMicros) / 1000;
                 const std::uint32_t pendingMillis
                     = firstPendingEdgeMicros == 0 ? 0 : (nowMicros - firstPendingEdgeMicros) / 1000;

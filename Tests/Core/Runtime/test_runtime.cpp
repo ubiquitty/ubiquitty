@@ -229,10 +229,19 @@ public:
         return foregroundShell;
     }
     int foregroundGroupCalls { 0 };
+    /// How many of the next group reads land a process-tree edge right after
+    /// the read, the moment an edge can fall between a probe's read and its
+    /// clearing of the owed flag.
+    int edgesAfterGroupRead { 0 };
     std::optional<ProcessID> foregroundProcessGroup() override
     {
         ++foregroundGroupCalls;
-        return foregroundGroup;
+        const std::optional<ProcessID> group = foregroundGroup;
+        if (edgesAfterGroupRead > 0) {
+            --edgesAfterGroupRead;
+            (void)notifyTreeEdge();
+        }
+        return group;
     }
     std::string foregroundCurrentDirectory() override { return foregroundDirectory; }
     std::string ttyName() override { return {}; }
@@ -3509,7 +3518,7 @@ TEST(hiddenProcessStateDefersDiscoveryUntilReveal)
     runtime.init(parameters80x24());
     auto* pipe = attachPipe(runtime);
     REQUIRE(pipe != nullptr);
-    runtime.setProcessStatePresentation(PanePresentation::Hidden);
+    runtime.setForegroundObservation(ForegroundObservation::Unread);
     pipe->scriptedForegroundName = "vim";
     pipe->foregroundGroup = 4243;
     pipe->toRead = "hidden output";
@@ -3531,7 +3540,7 @@ TEST(hiddenProcessStateDefersDiscoveryUntilReveal)
     child.commandLine = "less notes.txt";
     child.isForeground = true;
     pipe->scriptedRecords = { child };
-    runtime.setProcessStatePresentation(PanePresentation::Presented);
+    runtime.setForegroundObservation(ForegroundObservation::ProcessState);
     CHECK(pipe->notifyTreeEdge());
     CHECK(runtime.hasPendingProcessTreeEdge());
     CHECK(runtime.sampleProcessStateOffDrain(host).processStateChanged);
@@ -3539,13 +3548,114 @@ TEST(hiddenProcessStateDefersDiscoveryUntilReveal)
     CHECK_STR_EQ(runtime.processRecords()[0].name, "less");
     CHECK(!runtime.hasPendingProcessTreeEdge());
 
-    runtime.setProcessStatePresentation(PanePresentation::Hidden);
+    runtime.setForegroundObservation(ForegroundObservation::Unread);
     pipe->toRead += "more output";
     (void)runtime.drainAvailable(host);
     CHECK(pipe->gatherProcessesCalls == 1);
-    runtime.setProcessStatePresentation(PanePresentation::Presented);
+    runtime.setForegroundObservation(ForegroundObservation::ProcessState);
     (void)runtime.sampleProcessStateOffDrain(host).processStateChanged;
     CHECK(pipe->gatherProcessesCalls == 2);
+}
+
+// An edge that lands while a probe reads the foreground is not answered by that
+// probe, so the probe must leave it owed: it cannot clear the flag after the
+// read.
+TEST(anEdgeLandingDuringTheOffDrainProbeStaysOwed)
+{
+    using namespace Ubiquitty::Runtime;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    auto* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    runtime.setForegroundObservation(ForegroundObservation::TitleAndDirectory);
+    CountingDrainHost host;
+    pipe->foregroundGroup = 100;
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK(!runtime.hasPendingProcessTreeEdge());
+
+    pipe->foregroundGroup = 200;
+    pipe->edgesAfterGroupRead = 1;
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_MSG(pipe->edgesAfterGroupRead == 0, "the seam landed its edge during the probe");
+    CHECK_MSG(runtime.hasPendingProcessTreeEdge(), "the edge that landed after the read is still owed");
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_MSG(!runtime.hasPendingProcessTreeEdge(), "the next probe answers it");
+}
+
+TEST(anEdgeLandingDuringTheDrainProbeStaysOwed)
+{
+    using namespace Ubiquitty::Runtime;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    auto* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    runtime.setForegroundObservation(ForegroundObservation::TitleAndDirectory);
+    CountingDrainHost host;
+    pipe->foregroundGroup = 100;
+    pipe->edgesAfterGroupRead = 1;
+    pipe->toRead = "output";
+    (void)runtime.drainAvailable(host);
+    CHECK_MSG(pipe->edgesAfterGroupRead == 0, "the seam landed its edge during the probe");
+    CHECK_MSG(runtime.hasPendingProcessTreeEdge(), "the edge that landed after the read is still owed");
+}
+
+// A reader of the title and directory alone keeps both current without the
+// walk: the probe of the terminal's holder stamps a title, retires it once its
+// program exits and samples the directory; an edge is answered once; and the
+// walk runs only once process state has a reader.
+TEST(aTitleAndDirectoryReaderProbesTheHolderWithoutWalking)
+{
+    using namespace Ubiquitty::Runtime;
+    TerminalRuntime runtime;
+    runtime.init(parameters80x24());
+    auto* pipe = attachPipe(runtime);
+    REQUIRE(pipe != nullptr);
+    runtime.setForegroundObservation(ForegroundObservation::TitleAndDirectory);
+    CountingDrainHost host;
+    pipe->scriptedForegroundName = "vim";
+    pipe->foregroundGroup = 100;
+    pipe->foregroundDirectory = "/editing";
+    pipe->toRead = "\x1b]2;Editor title\x07";
+    (void)runtime.drainAvailable(host);
+    CHECK_MSG(pipe->foregroundGroupCalls > 0, "the drain names who holds the terminal");
+    CHECK_STR_EQ(runtime.borrowTermForRender()->currentDirectory, "/editing");
+
+    pipe->foregroundGroup = 200;
+    pipe->foregroundDirectory = "/next";
+    const DrainOutcome exited = runtime.sampleProcessStateOffDrain(host);
+    CHECK_MSG(exited.titleChanged, "the title retires with its program");
+    CHECK(exited.currentDirectoryChanged);
+    CHECK_STR_EQ(runtime.borrowTermForRender()->currentDirectory, "/next");
+    CHECK(!exited.processStateChanged);
+    CHECK_MSG(pipe->gatherProcessesCalls == 0, "nothing reads the chain");
+    CHECK(runtime.processRecords().empty());
+
+    CHECK(!runtime.hasPendingProcessTreeEdge());
+    CHECK(pipe->notifyTreeEdge());
+    CHECK(runtime.hasPendingProcessTreeEdge());
+    (void)runtime.sampleProcessStateOffDrain(host);
+    CHECK_MSG(!runtime.hasPendingProcessTreeEdge(), "the probe answers the edge without a walk");
+    CHECK(pipe->gatherProcessesCalls == 0);
+
+    pipe->scriptedForegroundName = "less";
+    Ubiquitty::PAL::Process::Record child;
+    child.processID = 200;
+    child.name = "less";
+    child.commandLine = "less notes.txt";
+    child.isForeground = true;
+    pipe->scriptedRecords = { child };
+    runtime.setForegroundObservation(ForegroundObservation::ProcessState);
+    CHECK_MSG(runtime.hasPendingProcessTreeEdge(), "a reader of process state is owed the walk");
+    CHECK(runtime.sampleProcessStateOffDrain(host).processStateChanged);
+    CHECK(pipe->gatherProcessesCalls == 1);
+    CHECK_STR_EQ(runtime.processRecords()[0].name, "less");
+
+    runtime.setForegroundObservation(ForegroundObservation::Unread);
+    const int probesBeforeUnread = pipe->foregroundGroupCalls;
+    pipe->toRead += "unread output";
+    (void)runtime.drainAvailable(host);
+    CHECK_MSG(pipe->foregroundGroupCalls == probesBeforeUnread, "an unread foreground is not probed");
+    CHECK(!pipe->notifyTreeEdge());
 }
 
 TEST(refillGapsWithinOneForegroundGroupDoNotRepeatTheProcessWalk)

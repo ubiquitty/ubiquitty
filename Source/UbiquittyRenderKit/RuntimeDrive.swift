@@ -2018,8 +2018,11 @@ public final class RuntimeDrive {
         session.setSyncFramePresentation(presentation)
     }
 
-    public func setProcessStatePresentation(_ presentation: Ubiquitty.Runtime.PanePresentation) {
-        session.setProcessStatePresentation(presentation)
+    /// Sets what the surface's readers take of the session's foreground.
+    ///
+    /// - Parameter observation: What is read of the foreground.
+    public func setForegroundObservation(_ observation: Ubiquitty.Runtime.ForegroundObservation) {
+        session.setForegroundObservation(observation)
     }
 
     /// Records the rows of history the surface presents above the tail, for
