@@ -11,9 +11,9 @@ import QuartzCore
 internal final class SurfaceFrameLink: NSObject, @preconcurrency CAMetalDisplayLinkDelegate {
     private let onTick: () -> Void
     private var displayLink: CAMetalDisplayLink?
-    private weak var layer: CAMetalLayer?
+    private weak var layer: SurfaceMetalLayer?
     private weak var view: NSView?
-    private var transactionalLink: CADisplayLink?
+    private var viewLink: CADisplayLink?
     internal private(set) var currentDrawable: CAMetalDrawable?
     internal var diagnosticSnapshot: (() -> String)?
     private let tracesCadence = ProcessInfo.processInfo.environment["UBIQUITTY_TRACE_FRAME_LINK"] == "1"
@@ -23,14 +23,14 @@ internal final class SurfaceFrameLink: NSObject, @preconcurrency CAMetalDisplayL
     private var traceLongestWork: CFTimeInterval = 0
     private var requestedRate = 0
 
-    internal init(layer: CAMetalLayer, view: NSView, onTick: @escaping () -> Void) {
+    internal init(layer: SurfaceMetalLayer, view: NSView, onTick: @escaping () -> Void) {
         self.layer = layer
         self.view = view
         self.onTick = onTick
         super.init()
     }
 
-    internal var isRunning: Bool { displayLink != nil || transactionalLink != nil }
+    internal var isRunning: Bool { displayLink != nil || viewLink != nil }
     internal var ownsDrawableDelivery: Bool { displayLink != nil }
 
     /// Uses ordinary display ticks while resize steps present inside AppKit transactions.
@@ -41,36 +41,38 @@ internal final class SurfaceFrameLink: NSObject, @preconcurrency CAMetalDisplayL
     internal private(set) var startCount = 0
 
     /// Starts the display link or updates its requested rate without resetting its phase.
+    ///
+    /// A layer presenting with a transaction, or one a `nextDrawable()` call
+    /// on another thread is waiting on, takes no drawable-delivering link: the
+    /// view's display link ticks instead, and each tick asks the layer for its
+    /// drawable. A later start attaches the delivering link once the layer
+    /// takes one.
     internal func start(framesPerSecond: Int) {
         guard framesPerSecond > 0, let layer else { return }
         requestedRate = framesPerSecond
         let rate = Float(framesPerSecond)
         let range = CAFrameRateRange(minimum: rate, maximum: rate, preferred: rate)
         if layer.presentsWithTransaction, let view {
-            displayLink?.invalidate()
-            displayLink = nil
-            if let transactionalLink {
-                transactionalLink.preferredFrameRateRange = range
-                return
-            }
-            let link = view.displayLink(target: self, selector: #selector(transactionalDisplayLinkFired))
-            link.preferredFrameRateRange = range
-            transactionalLink = link
-            startCount += 1
-            link.add(to: .main, forMode: .common)
+            invalidateDisplayLink()
+            startViewLink(on: view, range: range)
             return
         }
-        transactionalLink?.invalidate()
-        transactionalLink = nil
         if let displayLink {
             displayLink.preferredFrameRateRange = range
             return
         }
+        guard let link = layer.makeDisplayLink() else {
+            if let view {
+                startViewLink(on: view, range: range)
+            }
+            return
+        }
+        viewLink?.invalidate()
+        viewLink = nil
         traceStart = 0
         traceTicks = 0
         traceWork = 0
         traceLongestWork = 0
-        let link = CAMetalDisplayLink(metalLayer: layer)
         link.delegate = self
         link.preferredFrameRateRange = range
         displayLink = link
@@ -79,15 +81,43 @@ internal final class SurfaceFrameLink: NSObject, @preconcurrency CAMetalDisplayL
         link.add(to: .main, forMode: .common)
     }
 
+    /// Ticks at the view's display cadence without taking the layer's drawables.
+    ///
+    /// - Parameters:
+    ///   - view: The view whose display the link follows.
+    ///   - range: The frame rate to request.
+    private func startViewLink(on view: NSView, range: CAFrameRateRange) {
+        if let viewLink {
+            viewLink.preferredFrameRateRange = range
+            return
+        }
+        let link = view.displayLink(target: self, selector: #selector(viewLinkFired))
+        link.preferredFrameRateRange = range
+        viewLink = link
+        startCount += 1
+        link.add(to: .main, forMode: .common)
+    }
+
     /// Invalidates continuous delivery so the layer can supply on-demand drawables.
     internal func stop() {
-        displayLink?.invalidate()
-        displayLink = nil
-        transactionalLink?.invalidate()
-        transactionalLink = nil
+        invalidateDisplayLink()
+        viewLink?.invalidate()
+        viewLink = nil
         if tracesCadence {
             NSLog("frame-link stopped %@", diagnosticSnapshot?() ?? "")
         }
+    }
+
+    /// Detaches the drawable-delivering link, handing the layer's drawables
+    /// back to `nextDrawable()`.
+    private func invalidateDisplayLink() {
+        guard let displayLink else { return }
+        if let layer {
+            layer.invalidate(displayLink)
+        } else {
+            displayLink.invalidate()
+        }
+        self.displayLink = nil
     }
 
     internal func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
@@ -97,7 +127,7 @@ internal final class SurfaceFrameLink: NSObject, @preconcurrency CAMetalDisplayL
     }
 
     @objc
-    private func transactionalDisplayLinkFired() {
+    private func viewLinkFired() {
         performTick()
     }
 

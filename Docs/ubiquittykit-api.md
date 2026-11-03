@@ -108,6 +108,18 @@ Swift code built inside this repository reaches the C++ facade above through
 C++ interoperability; see [the interop reference](swift-cxx-interop.md). The
 facade defines no separate C ABI.
 
+A `TerminalSurface` presents into its own `metalLayer`, and the layer's
+drawables are the surface's. A host reads `metalLayer` on the main actor and may
+call `nextDrawable()` on the layer on any thread; Swift 6 sees no `Sendable`
+layer, so a host hands it to a thread of its own in an `@unchecked Sendable`
+wrapper. While output flows to a surface in a macOS window, the surface's
+display link can take over delivering the drawables; while it does,
+`nextDrawable()` on the layer returns nil rather than raising, on every thread.
+The layer does not see a display link a host attaches to it, and the surface's
+own frames raise under one, so a host attaches none. To draw a terminal into a
+layer of its own, a host keeps the surface out of a window and calls the
+renderer's `encodeFrame(for:into:)` with that layer.
+
 A Swift `TerminalSurface` retains its renderer. A renderer assigned to several
 surfaces can share glyph resources and remains alive until its last owner
 releases it. Prefer the surface initializer that creates and installs a renderer;

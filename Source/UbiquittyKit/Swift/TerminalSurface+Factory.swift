@@ -58,6 +58,7 @@ extension TerminalSurface {
             return nil
         }
         self.renderer = renderer
+        rendererDidChange()
         // The size a zoom is an offset over. Set from what was asked for rather
         // than read back, so a renderer that rounded its own measurement cannot
         // move where "no zoom" lands.
