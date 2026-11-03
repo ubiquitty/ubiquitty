@@ -938,6 +938,7 @@ set(UBIQUITTY_KIT_SOURCES
     "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TitlebarTagPalette.swift"
     "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ProcessIcons.swift"
     "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PhosphorIcons.swift"
+    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ShippedIconsSmoke.swift"
     "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TagIconPicker.swift"
     "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStripStyling.swift"
     "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStripMaterial.swift"
@@ -1426,8 +1427,8 @@ endif()
 # macOS framework an external app consumes with no Ubiquitty app around it.
 # Off by default: the app links the static UbiquittyRenderKit above, and a
 # second whole-module Swift compile on every developer build would be paid
-# for a product most builds do not ship. Scripts/check-terminalkit.sh builds
-# and exercises it from its own tree.
+# for a product most builds do not ship. Scripts/check-ubiquittykit.sh builds
+# it, embeds it in a signed app and exercises it from there.
 #
 # v1 recompiles the Core TUs into the framework, the same way the app builds
 # them, so one configure produces the product. The Core frontend already
@@ -1489,10 +1490,23 @@ if(UBIQUITTY_KIT)
             "${UBIQUITTY_QUIC_PREFIX}/lib/libssl.a"
             "${UBIQUITTY_QUIC_PREFIX}/lib/libcrypto.a")
     endif()
+    # The bundle's version is the Kit version, which versions the framework's
+    # Swift interface: a host requires a version by reading its Info.plist.
+    # Read at configure time, so the header is a configure dependency.
+    set(_ubq_kit_version_header "${CMAKE_SOURCE_DIR}/Source/UbiquittyKit/Version.h")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ubq_kit_version_header}")
+    file(READ "${_ubq_kit_version_header}" _ubq_kit_version_text)
+    string(REGEX MATCH "kitVersionString = \"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _ "${_ubq_kit_version_text}")
+    if(NOT CMAKE_MATCH_1)
+        message(FATAL_ERROR "no kitVersionString in ${_ubq_kit_version_header}")
+    endif()
+    set(UBIQUITTY_KIT_VERSION "${CMAKE_MATCH_1}")
     set_target_properties(UbiquittyKit PROPERTIES
         FRAMEWORK TRUE
         FRAMEWORK_VERSION A
         MACOSX_FRAMEWORK_IDENTIFIER "dev.ubiquitty.UbiquittyKit"
+        MACOSX_FRAMEWORK_SHORT_VERSION_STRING "${UBIQUITTY_KIT_VERSION}"
+        MACOSX_FRAMEWORK_BUNDLE_VERSION "${UBIQUITTY_KIT_VERSION}"
         Swift_MODULE_NAME "UbiquittyKit"
         Swift_COMPILATION_MODE "wholemodule"
         # Its own module directory: the app's static veneer target emits the
@@ -1530,27 +1544,40 @@ if(UBIQUITTY_KIT)
         "-framework UniformTypeIdentifiers")
 
     # The framework carries its own shaders: the pipelines resolve the
-    # metallib from the bundle their class lives in, which is this one.
+    # metallib from ShippedResources.bundle, which is this one.
     if(UBIQUITTY_HAVE_METAL_TOOL)
         add_dependencies(UbiquittyKit UbiquittyMetalLib)
         add_custom_command(TARGET UbiquittyKit POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy "${UBIQUITTY_METAL_LIB}"
-                    "$<TARGET_BUNDLE_CONTENT_DIR:UbiquittyKit>/Resources/default.metallib"
+                    "$<TARGET_FILE_DIR:UbiquittyKit>/Resources/default.metallib"
             COMMENT "Copying default.metallib into UbiquittyKit Resources"
             VERBATIM)
     endif()
 
+    # The rest of what its code reads from that bundle, as the app carries it:
+    # the shipped fonts with each licence beside its font, the icons a title
+    # and a tag draw, and the notices of everything the framework links. Each
+    # directory is staged whole, as the app's are, so a file the tree drops
+    # leaves the framework a host embeds. ShippedFonts registers the fonts for
+    # the host's process, since the system reads ATSApplicationFontsPath from
+    # the app's Info.plist only.
+    ubiquitty_bundle_resource_directory(UbiquittyKit "fonts" ${UBIQUITTY_BUNDLED_FONT_FILES})
+    ubiquitty_bundle_resource_directory(UbiquittyKit "phosphor" ${UBIQUITTY_PHOSPHOR_FILES})
+    ubiquitty_bundle_resource_directory(UbiquittyKit "process-icons" ${UBIQUITTY_PROCESS_ICON_FILES})
+    ubiquitty_bundle_license_notices(UbiquittyKit)
+
     # The swiftmodule rides the framework's Modules directory, which is what
-    # lets a consumer import the module from -F alone.
+    # lets a consumer import the module from -F alone, and the bundle takes
+    # the versioned layout codesign seals in an app: see
+    # cmake/FrameworkBundleLayout.cmake. After every step that writes into
+    # the bundle, since the script refuses one that breaks the layout.
     add_custom_command(TARGET UbiquittyKit POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<TARGET_BUNDLE_CONTENT_DIR:UbiquittyKit>/Modules/UbiquittyKit.swiftmodule"
-        # The interface and not the binary swiftmodule: a consumer reading
-        # the binary form demands every module this one imported, however the
-        # imports were scoped; the interface carries the public surface only.
-        COMMAND ${CMAKE_COMMAND} -E copy
-                "${CMAKE_CURRENT_BINARY_DIR}/UbiquittyKitFramework/UbiquittyKit.swiftinterface"
-                "$<TARGET_BUNDLE_CONTENT_DIR:UbiquittyKit>/Modules/UbiquittyKit.swiftmodule/${CMAKE_SYSTEM_PROCESSOR}-apple-macos.swiftinterface"
-        COMMENT "Placing UbiquittyKit.swiftmodule into the framework Modules"
+        COMMAND ${CMAKE_COMMAND}
+                "-DUBIQUITTY_FRAMEWORK=$<TARGET_BUNDLE_DIR:UbiquittyKit>"
+                "-DUBIQUITTY_FRAMEWORK_VERSION=$<TARGET_PROPERTY:UbiquittyKit,FRAMEWORK_VERSION>"
+                "-DUBIQUITTY_FRAMEWORK_INTERFACE=${CMAKE_CURRENT_BINARY_DIR}/UbiquittyKitFramework/UbiquittyKit.swiftinterface"
+                "-DUBIQUITTY_FRAMEWORK_INTERFACE_NAME=${CMAKE_SYSTEM_PROCESSOR}-apple-macos.swiftinterface"
+                -P "${CMAKE_SOURCE_DIR}/cmake/FrameworkBundleLayout.cmake"
+        COMMENT "Laying out UbiquittyKit.framework"
         VERBATIM)
 endif()

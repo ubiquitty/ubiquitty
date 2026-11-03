@@ -6,13 +6,76 @@ include_guard(GLOBAL)
 set_property(GLOBAL PROPERTY UBIQUITTY_BUNDLE_RESOURCE_SCRIPT
     "${CMAKE_CURRENT_LIST_DIR}/StageBundleResources.cmake")
 
+# The directory a bundle target's resources are written to, as a generator
+# expression.
+#
+# A macOS framework's are its current version's, written to that directory
+# itself rather than through the `Resources` link at its root. The root holds
+# only links into the version, which is what codesign requires of a framework
+# embedded in an app, and a write through a link that is missing makes a
+# directory there instead.
+#
+# - Parameters:
+#   - target: The bundle target.
+#   - output: The variable that receives the expression.
+function(ubiquitty_bundle_resource_root target output)
+    get_target_property(isFramework ${target} FRAMEWORK)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set(root "$<TARGET_BUNDLE_CONTENT_DIR:${target}>")
+    elseif(isFramework)
+        set(root "$<TARGET_FILE_DIR:${target}>/Resources")
+    else()
+        set(root "$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Resources")
+    endif()
+    set(${output} "${root}" PARENT_SCOPE)
+endfunction()
+
 # Stages resources beneath the platform's bundle resource directory.
 #
 # - Parameters:
-#   - target: The application bundle target.
+#   - target: The bundle target.
 #   - directory: The resource subdirectory, or an empty string for its root.
 #   - ARGN: The resource files to copy.
 function(ubiquitty_bundle_resources target directory)
+    ubiquitty_stage_bundle_resources(${target} "${directory}" FALSE ${ARGN})
+endfunction()
+
+# Stages a resource subdirectory whole: after every build it holds the files
+# given and nothing else, so a file the tree drops leaves an incrementally
+# built bundle rather than shipping on in it. No other staging writes into the
+# directory. Under Xcode the build system copies the files, and removes none.
+#
+# - Parameters:
+#   - target: The bundle target.
+#   - directory: The resource subdirectory.
+#   - ARGN: The resource files the directory holds.
+function(ubiquitty_bundle_resource_directory target directory)
+    if(directory STREQUAL "")
+        message(FATAL_ERROR "${target}: a resource directory staged whole needs a name, not the resource root")
+    endif()
+    ubiquitty_stage_bundle_resources(${target} "${directory}" TRUE ${ARGN})
+endfunction()
+
+# Stages resources for the two functions above.
+#
+# - Parameters:
+#   - target: The bundle target.
+#   - directory: The resource subdirectory, or an empty string for its root.
+#   - isWhole: Whether the subdirectory holds these files and nothing else.
+#   - ARGN: The resource files to copy.
+function(ubiquitty_stage_bundle_resources target directory isWhole)
+    get_property(stagedDirectories TARGET ${target} PROPERTY UBIQUITTY_STAGED_RESOURCE_DIRECTORIES)
+    get_property(wholeDirectories TARGET ${target} PROPERTY UBIQUITTY_WHOLE_RESOURCE_DIRECTORIES)
+    list(FIND stagedDirectories "${directory}" stagedIndex)
+    list(FIND wholeDirectories "${directory}" wholeIndex)
+    if(NOT wholeIndex EQUAL -1 OR (isWhole AND NOT stagedIndex EQUAL -1))
+        message(FATAL_ERROR "${target} stages the resource directory '${directory}' twice, and one staging holds it whole")
+    endif()
+    set_property(TARGET ${target} APPEND PROPERTY UBIQUITTY_STAGED_RESOURCE_DIRECTORIES "${directory}")
+    if(isWhole)
+        set_property(TARGET ${target} APPEND PROPERTY UBIQUITTY_WHOLE_RESOURCE_DIRECTORIES "${directory}")
+    endif()
+
     if(CMAKE_GENERATOR MATCHES "Xcode")
         target_sources(${target} PRIVATE ${ARGN})
         set_source_files_properties(${ARGN} PROPERTIES
@@ -20,10 +83,7 @@ function(ubiquitty_bundle_resources target directory)
         return()
     endif()
 
-    set(destination "$<TARGET_BUNDLE_CONTENT_DIR:${target}>")
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-        string(APPEND destination "/Resources")
-    endif()
+    ubiquitty_bundle_resource_root(${target} destination)
     if(NOT directory STREQUAL "")
         string(APPEND destination "/${directory}")
     endif()
@@ -49,6 +109,7 @@ function(ubiquitty_bundle_resources target directory)
         COMMAND ${CMAKE_COMMAND}
             "-DUBIQUITTY_BUNDLE_DESTINATION_FILE=${destinationFile}"
             "-DUBIQUITTY_BUNDLE_RESOURCES=${ARGN}"
+            "-DUBIQUITTY_BUNDLE_WHOLE_DIRECTORY=${isWhole}"
             -P "${stagingScript}"
         DEPENDS ${ARGN}
         COMMENT "Staging ${target} bundle resources"

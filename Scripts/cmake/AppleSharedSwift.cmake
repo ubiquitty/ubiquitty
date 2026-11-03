@@ -59,6 +59,8 @@ set(UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES
     Source/UbiquittyRenderKit/RichTextShaper.swift
     Source/UbiquittyRenderKit/RichTextStore.swift
     Source/UbiquittyRenderKit/ShapingCandidateFilter.swift
+    Source/UbiquittyRenderKit/ShippedFonts.swift
+    Source/UbiquittyRenderKit/ShippedResources.swift
     Source/UbiquittyRenderKit/SizedWindowRaster.swift
     Source/UbiquittyRenderKit/UniformFaceShaper.swift
     Source/UbiquittyRenderKit/MetalPipelines.swift
@@ -99,6 +101,7 @@ set(UBIQUITTY_APPLE_SHARED_KIT_SOURCES
     Source/UbiquittyKit/Swift/GridCacheSmoke.swift
     Source/UbiquittyKit/Swift/GridCacheScrollBench.swift
     Source/UbiquittyKit/Swift/ShippedFacesSmoke.swift
+    Source/UbiquittyKit/Swift/ShippedFamilyLookupSmoke.swift
     Source/UbiquittyKit/Swift/ProportionalFacesSmoke.swift
     Source/UbiquittyKit/Swift/TouchSmoke.swift
     Source/UbiquittyKit/Swift/RichTextSelectionSmoke.swift

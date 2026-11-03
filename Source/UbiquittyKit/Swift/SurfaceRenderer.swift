@@ -822,9 +822,27 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         (typography.unifontScale > 0 ? typography.unifontScale : current.font.unifontScale) > 0
     }
 
-    /// The regular face's family after CoreText resolves the configured font.
+    /// The family the regular text is drawn in: the configured family, spelled
+    /// as configured, when that family is drawn, and the name of the family
+    /// drawn in its place when it is not.
+    ///
+    /// The configured family is drawn when Core rasterises it itself, when it
+    /// is shipped, and when CoreText finds it under any of its names, so a
+    /// differently spelled name that was found never reads as a substitute. A
+    /// typography that puts another family on the bitmap tier draws GNU
+    /// Unifont in its place, and a family CoreText does not find is drawn in
+    /// the substitute's family.
     package var resolvedFontFamily: String {
-        CTFontCopyFamilyName(current.font.faces[bold: false, italic: false]) as String
+        if current.font.unifontScale > 0 {
+            return familyName
+        }
+        if isBitmapTier {
+            return String(Ubiquitty.Rendering.unifontFamilyName())
+        }
+        if !current.font.faces.isSubstitute {
+            return familyName
+        }
+        return CTFontCopyFamilyName(current.font.faces[bold: false, italic: false]) as String
     }
 
     /// The backing scale the last encoded frame resolved its geometry against.
@@ -1134,6 +1152,9 @@ final class SurfaceRenderer: TerminalSurfaceRenderer {
         typography: SurfaceTypography = SurfaceTypography(),
         style: SurfaceStyle = SurfaceStyle()
     ) {
+        // Before the measurement below, since a renderer may be built before
+        // any surface is.
+        ShippedFonts.registerIfEmbedded()
         guard
             let build = Self.measure(
                 device: device,

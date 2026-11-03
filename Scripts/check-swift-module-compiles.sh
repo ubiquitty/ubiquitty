@@ -18,7 +18,7 @@
 # The cost is that one compile and nothing else: the build reuses a configured
 # directory, and `cmake --build --target` reaches the module without rebuilding
 # what it links against — the log is two steps, a glob re-check and the swiftc
-# job. It grows with the module rather than with the tree: 51 files
+# job. It grows with the module rather than with the tree: 53 files
 # [= Source/UbiquittyRenderKit/*.swift]. The count carries its pathspec, so
 # check-census-claims.py re-derives it instead of trusting it.
 #

@@ -13,8 +13,9 @@ read Docs/third-party-inventory.json and the tree:
   discovery   every third-party input the tree carries has an inventory row —
               vendored sources, bundled fonts, fetched pins, generated tables
   surface     every font a package copies is on its row's distribution
-              surface: the macOS bundle, the iOS bundle, the web stage and
-              the AppImage, each read from the file that does the copying
+              surface: the macOS bundle, UbiquittyKit.framework, the iOS
+              bundle, the web stage and the AppImage, each read from the file
+              that does the copying
   pin         everything redistributed is pinned to one upstream release: a
               version token, not a moving branch, or a stated reason a pin
               does not apply
@@ -80,7 +81,8 @@ def project_license_errors(directory, paths, file_errors=None):
     return failures
 
 
-REDISTRIBUTED = {"source-repo", "libUbiquittyCore", "mac-app", "ios-app", "appimage", "web", "ubiquitty-host"}
+REDISTRIBUTED = {"source-repo", "libUbiquittyCore", "mac-app", "ubiquittykit-framework", "ios-app", "appimage", "web",
+                 "ubiquitty-host"}
 # A moving reference, matched as a whole word: "remains" and "header-only"
 # hold "main" and "head" without naming a branch.
 MOVING = re.compile(r"\b(?:continuous|latest|main|head|master|trunk)\b", re.I)
@@ -146,11 +148,13 @@ def matches(a, b):
 
 FONT_FILE = re.compile(r"[\w\-\[\]]+\.(?:ttf|otf|ttc|otc|woff2?)\b")
 # Each package that carries fonts, and the file that copies them out of
-# Resources/fonts. The macOS bundle copies the whole directory; the iOS bundle
-# and the Linux install rule, which the AppImage is laid out from, copy a named
-# CMake list; the web stage names each file.
+# Resources/fonts. The macOS bundle copies the whole directory, and
+# UbiquittyKit.framework copies the same list into its own resources; the iOS
+# bundle and the Linux install rule, which the AppImage is laid out from, copy
+# a named CMake list; the web stage names each file.
 FONT_COPIERS = (
     ("mac-app", "Source/Platform/macOS/CMakeLists.txt", "directory"),
+    ("ubiquittykit-framework", "Source/Platform/macOS/CMakeLists.txt", "framework"),
     ("ios-app", "CMakeLists.txt", "list:UBIQUITTY_IOS_BUNDLED_FONT_FILES"),
     ("web", "Scripts/build-web.sh", "script"),
     ("appimage", "CMakeLists.txt", "list:UBIQUITTY_LINUX_BUNDLED_FONTS"),
@@ -160,8 +164,11 @@ FONT_COPIERS = (
 def copied_fonts(directory, path, kind):
     """Returns the font files a package copies, or None when the copy is not spelled as expected."""
     text = (directory / path).read_text(encoding="utf-8")
-    if kind == "directory":
+    if kind in ("directory", "framework"):
         if not re.search(r'file\(GLOB\s+UBIQUITTY_BUNDLED_FONT_FILES\b[^)]*Resources/fonts/\*"', text):
+            return None
+        if kind == "framework" and not re.search(
+                r'ubiquitty_bundle_resource_directory\(\s*UbiquittyKit\s+"fonts"\s+\$\{UBIQUITTY_BUNDLED_FONT_FILES\}\s*\)', text):
             return None
         return {font.name for font in (directory / "Resources/fonts").glob("*") if FONT_FILE.fullmatch(font.name)}
     if kind.startswith("list:"):
@@ -348,6 +355,9 @@ def project_license_self_test():
     class FontSurfaceTests(unittest.TestCase):
         CMAKE_LISTS = ('set(UBIQUITTY_IOS_BUNDLED_FONT_FILES\n    "Face-Regular.ttf")\n'
                        'set(UBIQUITTY_LINUX_BUNDLED_FONTS\n    "Face-Regular.ttf")\n')
+        MACOS_LISTS = ('file(GLOB UBIQUITTY_BUNDLED_FONT_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/Resources/fonts/*")\n'
+                       'ubiquitty_bundle_resource_directory(UbiquittyKit "fonts" ${UBIQUITTY_BUNDLED_FONT_FILES})\n')
+        SURFACES = ("mac-app", "ubiquittykit-framework", "ios-app", "web", "appimage")
 
         def setUp(self):
             self.temporary = tempfile.TemporaryDirectory()
@@ -355,8 +365,7 @@ def project_license_self_test():
             self.root = Path(self.temporary.name)
             self.write("Resources/fonts/Face-Regular.ttf", "")
             self.write("Resources/fonts/Face-OFL.txt", "")
-            self.write("Source/Platform/macOS/CMakeLists.txt",
-                       'file(GLOB UBIQUITTY_BUNDLED_FONT_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/Resources/fonts/*")\n')
+            self.write("Source/Platform/macOS/CMakeLists.txt", self.MACOS_LISTS)
             self.write("CMakeLists.txt", self.CMAKE_LISTS)
             self.write("Scripts/build-web.sh", '# Face-Other.ttf is named in a comment only\n'
                                                'cp "$ROOT/Resources/fonts/Face-Regular.ttf" "$STAGE/fonts/"\n')
@@ -370,12 +379,12 @@ def project_license_self_test():
             return [{"name": "Face", "distributionSurface": list(surfaces)}]
 
         def test_every_copy_on_its_surface_passes(self):
-            self.assertEqual(font_surface_errors(self.root, self.rows("mac-app", "ios-app", "web", "appimage")), [])
+            self.assertEqual(font_surface_errors(self.root, self.rows(*self.SURFACES)), [])
 
         def test_a_copy_off_its_rows_surface_fails(self):
-            for missing in ("mac-app", "ios-app", "web", "appimage"):
+            for missing in self.SURFACES:
                 with self.subTest(missing=missing):
-                    surfaces = [s for s in ("mac-app", "ios-app", "web", "appimage") if s != missing]
+                    surfaces = [s for s in self.SURFACES if s != missing]
                     failures = font_surface_errors(self.root, self.rows(*surfaces))
                     self.assertEqual(len(failures), 1)
                     self.assertIn(missing, failures[0])
@@ -385,10 +394,17 @@ def project_license_self_test():
 
         def test_a_copy_the_check_cannot_read_fails(self):
             self.write("CMakeLists.txt", 'set(UBIQUITTY_IOS_FONTS "Face-Regular.ttf")\n')
-            self.assertTrue(font_surface_errors(self.root, self.rows("mac-app", "ios-app", "web", "appimage")))
+            self.assertTrue(font_surface_errors(self.root, self.rows(*self.SURFACES)))
             self.write("CMakeLists.txt", self.CMAKE_LISTS)
             self.write("Source/Platform/macOS/CMakeLists.txt", 'set(FONTS "${CMAKE_SOURCE_DIR}/Resources/fonts/Face-Regular.ttf")\n')
-            self.assertTrue(font_surface_errors(self.root, self.rows("mac-app", "ios-app", "web", "appimage")))
+            self.assertTrue(font_surface_errors(self.root, self.rows(*self.SURFACES)))
+
+        def test_a_framework_copy_of_another_list_fails(self):
+            self.write("Source/Platform/macOS/CMakeLists.txt", self.MACOS_LISTS.replace(
+                "${UBIQUITTY_BUNDLED_FONT_FILES}", "${UBIQUITTY_KIT_FONT_FILES}"))
+            failures = font_surface_errors(self.root, self.rows(*self.SURFACES))
+            self.assertEqual(len(failures), 1)
+            self.assertIn("ubiquittykit-framework", failures[0])
 
     test_path = Path(__file__).resolve().parent.parent / "Tests/test-license-scope.py"
     specification = importlib.util.spec_from_file_location("license_scope_tests", test_path)

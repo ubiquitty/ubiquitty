@@ -38,11 +38,9 @@ function(ubiquitty_bundle_license_notices target)
     # The staged set is checked against the inventory after every build, on
     # every generator: a resource rule that silently builds nothing ships an
     # app without its licences, and only the finished bundle can show that.
-    set(noticeRoot "$<TARGET_BUNDLE_CONTENT_DIR:${target}>")
+    ubiquitty_bundle_resource_root(${target} noticeRoot)
     if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         string(APPEND noticeRoot "/Licenses")
-    else()
-        string(APPEND noticeRoot "/Resources")
     endif()
     # FindPython's executable variable is scoped to the function that found
     # it, so the check finds the interpreter for itself.

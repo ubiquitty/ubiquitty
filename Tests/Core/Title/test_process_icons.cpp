@@ -120,7 +120,10 @@ TEST(anIconRoundTripsThroughItsPublishedOrdinal)
     CHECK(Ubiquitty::Title::processIconAt(static_cast<std::uint8_t>(processIconCatalog.size() + 1)) == nullptr);
     for (const auto& icon : processIconCatalog) {
         CHECK(Ubiquitty::Title::processIconAt(Ubiquitty::Title::processIconOrdinal(&icon)) == &icon);
+        CHECK(Ubiquitty::Title::processIconKeyAt(Ubiquitty::Title::processIconOrdinal(&icon)) == icon.key);
     }
+    CHECK(Ubiquitty::Title::processIconKeyAt(0).empty());
+    CHECK(Ubiquitty::Title::processIconKeyAt(static_cast<std::uint8_t>(processIconCatalog.size() + 1)).empty());
     // A published program outranks the process; none leaves it to the process.
     CHECK(Ubiquitty::Title::processIconFor(processIconWithKey("pi"), "codex", TerminalHolder::Program) == processIconWithKey("pi"));
     CHECK(Ubiquitty::Title::processIconFor(nullptr, "codex", TerminalHolder::Program) == processIconWithKey("codex"));

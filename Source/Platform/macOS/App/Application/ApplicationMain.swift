@@ -105,6 +105,7 @@ enum ApplicationMain {
             case "--smoke-draw-entry": verdict = DrawEntrySmokeEntry.run()
             case "--smoke-grid-cache": verdict = GridCacheSmokeEntry.run()
             case "--smoke-shipped-faces": verdict = ShippedFacesSmokeEntry.run()
+            case "--smoke-shipped-icons": verdict = ShippedIconsSmokeEntry.run()
             case "--smoke-proportional-faces": verdict = ProportionalFacesSmokeEntry.run()
             case "--smoke-frame-clock": verdict = FrameClockSmokeEntry.run()
             case "--bench-swift-drain": verdict = SwiftDrainBenchEntry.run()
@@ -115,7 +116,7 @@ enum ApplicationMain {
                 guard flag.hasPrefix("--smoke-") || flag.hasPrefix("--bench-") else { continue }
                 standardError("ubiquitty: no such headless mode: \(flag)")
                 standardError(
-                    "  --smoke-swift-runtime  --smoke-surface  --smoke-shell  --smoke-frame-clock  --smoke-grid-cache  --smoke-shipped-faces  --smoke-proportional-faces"
+                    "  --smoke-swift-runtime  --smoke-surface  --smoke-shell  --smoke-frame-clock  --smoke-grid-cache  --smoke-shipped-faces  --smoke-shipped-icons  --smoke-proportional-faces"
                 )
                 standardError("  --bench-swift-drain    --bench-swift-frames  --bench-deliveries  --bench-grid-cache-scroll")
                 exit(2)

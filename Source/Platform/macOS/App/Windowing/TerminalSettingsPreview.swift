@@ -107,7 +107,7 @@ package final class TerminalSettingsPreview: NSView {
         configuration.backgroundOpacity = 1
         configuration.defaultBackgroundOpacity = 1
         let family =
-            familyOverride.flatMap { $0.isEmpty ? TerminalSurface.installedHouseFontFamily() : $0 }
+            familyOverride.flatMap { $0.isEmpty ? TerminalSurface.preferredFontFamily() : $0 }
             ?? TerminalSurface.family(of: configuration)
         var typography = SurfaceTypography(configuration: configuration)
         if let featuresOverride { typography.ligatureFeatureSpec = featuresOverride }
@@ -116,7 +116,7 @@ package final class TerminalSettingsPreview: NSView {
             if !renderer.adopt(pointSize: configuration.fontSizePoints, familyName: family, typography: typography) {
                 _ = renderer.adopt(
                     pointSize: configuration.fontSizePoints,
-                    familyName: TerminalSurface.installedHouseFontFamily(),
+                    familyName: TerminalSurface.preferredFontFamily(),
                     typography: typography
                 )
             }

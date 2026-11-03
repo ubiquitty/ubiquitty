@@ -258,10 +258,23 @@ gate_host() {
     run "test runs leave nothing behind" ./Scripts/run-tests.sh run_hygiene
     # The framework product has no other oracle: the app links the static
     # module, so a packaging break — the metallib off the bundle, the
-    # swiftmodule missing from Modules/, the factory unreachable — passes
-    # every app build. Runs only when the module's sources moved, because
-    # it is a second whole-module Swift compile.
-    if ! git diff --quiet origin/main -- Source/Platform/macOS/App Source/UbiquittyKit Source/UbiquittyRenderKit Scripts/check-ubiquittykit.sh 2>/dev/null; then
+    # swiftmodule missing from Modules/, the factory unreachable, a root entry
+    # codesign refuses to seal — passes every app build. Runs only when the
+    # module's sources or the framework's packaging moved, because it is a
+    # second whole-module Swift compile: the framework target's block, the
+    # source lists it compiles, the scripts that lay out its bundle and copy
+    # its resources, the fonts and icons it carries, the Core tables that say
+    # which of them it registers and reads, which family it prefers and what
+    # the bitmap face is called, and the checks the oracle runs.
+    if ! git diff --quiet origin/main -- Source/Platform/macOS/App Source/UbiquittyKit Source/UbiquittyRenderKit \
+            Source/Platform/macOS/CMakeLists.txt Scripts/cmake/AppleSharedSwift.cmake \
+            cmake/FrameworkBundleLayout.cmake cmake/BundleResources.cmake cmake/StageBundleResources.cmake \
+            cmake/LicenseNotices.cmake Resources/fonts Resources/phosphor Resources/process-icons \
+            Source/Core/Rendering/BundledFonts.h Source/Core/Rendering/FontSelection.h \
+            Source/Core/Rendering/UnifontRasterizer.h \
+            Source/Core/Preferences/PreferencesDefaults.h Source/Core/Title/ProcessIconCatalog.h \
+            Source/Core/Title/ProcessIcons.h \
+            Scripts/check-ubiquittykit.sh Scripts/check-swift-cxx-exports.py 2>/dev/null; then
         run "UbiquittyKit consumer" ./Scripts/check-ubiquittykit.sh
     fi
     # The headless smokes assert into their exit codes; the runner derives the

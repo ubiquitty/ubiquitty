@@ -2526,6 +2526,9 @@ public final class TerminalSurface: PlatformView {
     ///   - rows: The grid's rows, matching the drive's.
     ///   - columns: The grid's columns, likewise.
     package init(drive: RuntimeDrive, rows: Int, columns: Int) {
+        // Before anything this surface measures: the preferred family and the
+        // fallback lists resolve shipped families by name.
+        ShippedFonts.registerIfEmbedded()
         self.drive = drive
         publishedGrid = (rows, columns)
         super.init(frame: .zero)

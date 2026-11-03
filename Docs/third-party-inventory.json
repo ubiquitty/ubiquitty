@@ -9,6 +9,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web",
@@ -32,6 +33,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web"
@@ -52,6 +54,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web",
@@ -73,6 +76,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web",
@@ -98,6 +102,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web",
@@ -121,6 +126,7 @@
     "licenseSPDX": "OFL-1.1",
     "distributionSurface": [
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web"
@@ -141,6 +147,7 @@
     "licenseSPDX": "OFL-1.1",
     "distributionSurface": [
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage"
     ],
@@ -163,6 +170,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web"
@@ -183,6 +191,7 @@
     "licenseSPDX": "OFL-1.1",
     "distributionSurface": [
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage"
     ],
@@ -202,6 +211,7 @@
     "licenseSPDX": "MIT AND OFL-1.1 AND CC-BY-4.0 AND Apache-2.0 AND Bitstream-Vera AND Unlicense",
     "distributionSurface": [
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web"
@@ -236,6 +246,7 @@
     "licenseSPDX": "MIT",
     "distributionSurface": [
       "mac-app",
+      "ubiquittykit-framework",
       "web"
     ],
     "noticeRequired": true,
@@ -325,6 +336,7 @@
     "licenseSPDX": "MIT",
     "distributionSurface": [
       "mac-app",
+      "ubiquittykit-framework",
       "ubiquitty-host"
     ],
     "noticeRequired": true,
@@ -341,6 +353,7 @@
     "licenseSPDX": "Apache-2.0 AND ISC AND MIT AND BSD-3-Clause AND CC0-1.0",
     "distributionSurface": [
       "mac-app",
+      "ubiquittykit-framework",
       "ubiquitty-host"
     ],
     "noticeRequired": true,
@@ -363,6 +376,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web",
@@ -384,6 +398,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web",
@@ -405,6 +420,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web",
@@ -426,6 +442,7 @@
       "source-repo",
       "libUbiquittyCore",
       "mac-app",
+      "ubiquittykit-framework",
       "ios-app",
       "appimage",
       "web",
@@ -593,7 +610,8 @@
     "pinNotApplicable": "Each icon comes from its own source (theSVG, the program's repository, or its publisher's GitHub avatar) with no shared release; Resources/process-icons/NOTICE.md lists each source and its terms.",
     "licenseSPDX": "LicenseRef-Process-Icon-Marks",
     "distributionSurface": [
-      "mac-app"
+      "mac-app",
+      "ubiquittykit-framework"
     ],
     "noticeRequired": true,
     "noticeStatus": "present-complete",

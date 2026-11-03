@@ -121,13 +121,7 @@ extension TerminalSurface {
             return .failure(.noShaderLibrary)
         }
         var resolvedTypography = typography
-        if resolvedTypography.symbolFontPath.isEmpty,
-            let bundledSymbols = Bundle.main.url(
-                forResource: "SymbolsNerdFontMono-Regular",
-                withExtension: "ttf",
-                subdirectory: "fonts"
-            )
-        {
+        if resolvedTypography.symbolFontPath.isEmpty, let bundledSymbols = ShippedFonts.uprightFile(family: "Symbols Nerd Font Mono") {
             resolvedTypography.symbolFontPath = bundledSymbols.path
         }
         // One format for both shells: the shaders write linear light and rely

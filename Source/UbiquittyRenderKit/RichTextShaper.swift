@@ -247,6 +247,7 @@ package final class RichTextShaper: @unchecked Sendable {
 
     package init(faces: RichTextFaces) { self.faces = faces }
 
+    // swift-only: a member of the package-scoped shaper, which the generated C++ header never prints, and only the Swift surface's font-catalog callback queries through it
     package func queryFonts(
         _ query: Ubiquitty.RichText.FontCatalogQuery,
         into result: inout Ubiquitty.RichText.FontCatalogPage

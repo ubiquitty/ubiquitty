@@ -3,15 +3,16 @@
 
 // PhosphorIcons.swift — the icons a tag can wear in place of its dot.
 //
-// The fonts and the catalog are the app's own resources (Resources/phosphor,
-// refreshed by Scripts/import-phosphor.py), read from the bundle into fonts
-// that only this file holds. They are never registered with the system: the
+// The fonts and the catalog ship with this code (Resources/phosphor, refreshed
+// by Scripts/import-phosphor.py) and are read from its bundle into fonts that
+// only this file holds. They are never registered with the system: the
 // glyphs sit in the Private Use Area, where a registered font would be one more
 // candidate for a terminal's own icon codepoints.
 
 import AppKit
 import CoreText
 internal import UbiquittyCore
+internal import UbiquittyRenderKit
 
 /// The Phosphor catalog, its search, and its glyphs drawn as images.
 @MainActor
@@ -150,8 +151,8 @@ package enum PhosphorIcons {
         return descriptor
     }
 
-    /// A file of the bundle's Phosphor resources.
+    /// A file of the shipped Phosphor resources.
     private static func resourceURL(_ file: String) -> URL? {
-        Bundle.main.resourceURL?.appendingPathComponent("phosphor", isDirectory: true).appendingPathComponent(file)
+        ShippedResources.directory(named: "phosphor")?.appendingPathComponent(file)
     }
 }

@@ -54,6 +54,7 @@ SWIFT_ARGUMENTS=(
     -framework CoreText
     -framework CoreGraphics
     "$SWIFT_DIRECTORY/FontFaces.swift"
+    "$SWIFT_DIRECTORY/ShippedResources.swift"
     "$SWIFT_DIRECTORY/FontCatalogue.swift"
     "$ROOT/Scripts/drive-font-catalogue.swift"
 )

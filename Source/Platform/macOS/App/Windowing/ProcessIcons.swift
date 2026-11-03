@@ -4,13 +4,14 @@
 import AppKit
 internal import CxxStdlib
 internal import UbiquittyCore
+internal import UbiquittyRenderKit
 
 // ProcessIcons.swift — programs' icons a title draws before their names.
 //
 // Core's catalog (Title/ProcessIconCatalog.h) says which program a pane runs, which
 // file its icon is in, how it is painted and when it needs a plate; this reads
-// the file from Contents/Resources/process-icons/ once and draws it at a title's
-// size. A template icon takes the title's ink, so it reads on any theme like
+// the file from the shipped resources' process-icons/ once and draws it at a
+// title's size. A template icon takes the title's ink, so it reads on any theme like
 // the words beside it; a drawn icon keeps its owner's colours, on a plate in
 // the title's ink when Core finds them too close to the ground.
 
@@ -156,9 +157,7 @@ package enum ProcessIcons {
     private static func source(forKey key: String) -> NSImage? {
         if let cached = sources[key] { return cached }
         let file = String(Ubiquitty.Title.processIconFile(std.string(key)))
-        let url = Bundle.main.resourceURL?
-            .appendingPathComponent("process-icons", isDirectory: true)
-            .appendingPathComponent(file)
+        let url = ShippedResources.directory(named: "process-icons")?.appendingPathComponent(file)
         let image = file.isEmpty ? nil : url.flatMap { NSImage(contentsOf: $0) }
         sources[key] = image
         return image

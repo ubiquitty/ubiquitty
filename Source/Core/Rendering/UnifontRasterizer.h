@@ -38,6 +38,19 @@ namespace Ubiquitty::Rendering {
     return unifontScaleForRequestedSize(requestedPointSize, backingScale);
 }
 
+/// The family a frame on the bitmap tier draws its text in, whichever family
+/// it was configured with: the embedded family this rasterizer draws.
+///
+/// - Returns: GNU Unifont's family name, as the family table spells it.
+[[nodiscard]] inline std::string unifontFamilyName()
+{
+    for (const auto& descriptor : embeddedFontFamilies) {
+        if (descriptor.rasterizerKind == FontRasterizerKind::EmbeddedBitmap)
+            return std::string(descriptor.family);
+    }
+    return {};
+}
+
 // One R8 coverage slot, row-major, as the seam's own name for the span.
 //
 // Named rather than spelled inline because `std::span`'s extent is a non-type
