@@ -41,6 +41,55 @@ extension TerminalSurface {
 
     override public func viewWillStartLiveResize() {
         super.viewWillStartLiveResize()
+        beginLiveResize()
+    }
+
+    override public func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        endLiveResize()
+    }
+
+    /// Opens a live resize: every frame change until ``endLiveResize()`` is
+    /// a step of one drag.
+    ///
+    /// AppKit opens one for a drag of a window edge or of an `NSSplitView`
+    /// divider. A host that resizes surfaces from the pointer through a
+    /// divider it draws itself calls this on each surface the drag resizes
+    /// when the drag begins. Each step fits the visible grid to the step's
+    /// bounds and leaves the scrollback's rewrap for the end, however long
+    /// the pointer holds still. A run of frame changes the surface is taking
+    /// as a drag is taken over and ends with this one.
+    public func beginLiveResize() {
+        // A drag begun while a run of frame changes settles takes the run
+        // over, and the drag's end settles both.
+        resizeRunSettle?.cancel()
+        resizeRunSettle = nil
+        // The drag presents transactionally so each step's bounds change and
+        // the frame drawn for it reach the compositor together. A run of
+        // frame changes made in code takes the mode step by step instead, in
+        // `setFrameSize`, and only where a reader sees the step.
+        metalLayer.presentsWithTransaction = true
+        frameLink?.synchronizePresentationMode()
+        beginResizeGesture()
+        if !liveResizeStartWindowFrame.isEmpty {
+            let pointer = NSEvent.mouseLocation
+            let frame = liveResizeStartWindowFrame
+            isLiveResizeBottomFixed = abs(pointer.y - frame.maxY) < abs(pointer.y - frame.minY)
+        }
+    }
+
+    /// Ends the live resize ``beginLiveResize()`` opened: the grid is fitted
+    /// to the final bounds, the scrollback is rewrapped once at the final
+    /// width, and a frame of the settled grid is drawn.
+    ///
+    /// A host that opened the resize calls this when the pointer is released.
+    public func endLiveResize() {
+        endResizeGesture()
+    }
+
+    /// Opens a resize gesture: a drag's, or a run of frame changes made in
+    /// code.
+    private func beginResizeGesture() {
         // The drag is activity in its own right: a full-screen program's
         // reflow lands milliseconds after each step, off the main thread,
         // and the redraw it would ask for does not fire in AppKit's
@@ -51,26 +100,20 @@ extension TerminalSurface {
         if !drive.isPresentationContinuous {
             frameClock.resume()
         }
-        // The drag presents transactionally so each step's bounds change and
-        // the frame drawn for it reach the compositor together.
-        metalLayer.presentsWithTransaction = true
-        frameLink?.synchronizePresentationMode()
         liveResizeStartWindowFrame = window?.frame ?? .zero
         // The drain's half of the resize's hold: no frame it publishes may
         // show a redraw the capture keeps back.
         drive.setLiveResize(liveResizeStartWindowFrame.isEmpty ? .Idle : .Active)
-        if !liveResizeStartWindowFrame.isEmpty {
-            let pointer = NSEvent.mouseLocation
-            let frame = liveResizeStartWindowFrame
-            isLiveResizeBottomFixed = abs(pointer.y - frame.maxY) < abs(pointer.y - frame.minY)
-        }
         // An image application's per-frame delete-and-replace must not blank
         // its picture on a frame captured between the two; see the latch.
         isHoldingImageGapsForResize = true
     }
 
-    override public func viewDidEndLiveResize() {
-        super.viewDidEndLiveResize()
+    /// Settles the open resize gesture, and with it a run whose settle is
+    /// still booked.
+    private func endResizeGesture() {
+        resizeRunSettle?.cancel()
+        resizeRunSettle = nil
         // A delete after the drag is a delete again.
         isHoldingImageGapsForResize = false
         // The drag's anchoring ends with the drag: the settled grid is fitted
@@ -87,7 +130,7 @@ extension TerminalSurface {
         drive.settleResize()
         carryViewOffsetAcrossResize()
         needsDisplay = true
-        if window?.occlusionState.contains(.visible) == true {
+        if isWindowOnScreen {
             isDrawingResizeStep = true
             drawSurfaceFrame()
             isDrawingResizeStep = false
@@ -129,6 +172,7 @@ extension TerminalSurface {
             super.setFrameSize(newSize)
             return
         }
+        noteResizeOutsideLiveResize()
         // The surface's own latch rather than `inLiveResize`: the two say the
         // same thing during a drag, and this one is set by the entry point
         // above rather than by AppKit, so the whole path can be exercised.
@@ -171,7 +215,7 @@ extension TerminalSurface {
         let isTabBarPresent = (window?.tabGroup?.windows.count ?? 0) >= 2
         let isTabStripRelayout = isTabBarPresent != wasTabBarPresent
         wasTabBarPresent = isTabBarPresent
-        let isVisible = window?.occlusionState.contains(.visible) ?? false
+        let isVisible = isWindowOnScreen
         isDrawingResizeStep = true
         defer { isDrawingResizeStep = false }
         if inLiveResize {
@@ -192,10 +236,68 @@ extension TerminalSurface {
         }
     }
 
+    /// How long a frame holds still before the change that moved it is over.
+    ///
+    /// Longer than the gap between two steps of an animation: AppKit steps
+    /// one display refresh apart, 8 to 17 ms, and a host's own timer seldom
+    /// spaces its steps wider than two refreshes, which leaves room for a step
+    /// drawn late behind a busy GPU. Short enough that a reader who looks at
+    /// the pane once it stops finds it settled.
+    private static let resizeQuietInterval: TimeInterval = 0.08
+
+    /// Takes a frame change made outside a live resize as a step of a run.
+    ///
+    /// A host moving panes in code sends no live-resize edges: an animation
+    /// sets the frame once per display refresh, a host's timer at a cadence of
+    /// its own. The first change of a run cannot be told from a lone change,
+    /// so it resizes settled, as a lone change does. A change that follows it
+    /// within ``resizeQuietInterval`` opens a gesture taken the way a drag is
+    /// taken, and the gesture settles once the frame has held still for that
+    /// interval. A drag already open owns the gesture and is left alone. A
+    /// window with no extent opens none: the gesture is latched on the
+    /// window's frame, and a latch that cannot open is a gesture its settle
+    /// cannot end.
+    private func noteResizeOutsideLiveResize() {
+        let isRunOpen = resizeRunSettle != nil
+        guard isRunOpen || !isInLiveResizeGesture else { return }
+        if isRunOpen, !isInLiveResizeGesture, let window, !window.frame.isEmpty {
+            beginResizeGesture()
+        }
+        resizeRunSettle?.cancel()
+        let settle = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.resizeRunSettle = nil
+            guard self.isInLiveResizeGesture else { return }
+            // The settle moves no bounds, so its frame has no transaction to
+            // land with: presented in one it would hold the main thread until
+            // the GPU schedules it, for a frame nobody needs synchronised.
+            self.releaseTransactionalPresent()
+            self.endResizeGesture()
+        }
+        resizeRunSettle = settle
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resizeQuietInterval, execute: settle)
+    }
+
+    /// Whether the window system shows any of the window, which decides
+    /// whether a resize presents in the transaction of its bounds change.
+    private var isWindowOnScreen: Bool {
+        guard let window else { return false }
+        return isWindowOnScreenForResizeTesting ?? window.occlusionState.contains(.visible)
+    }
+
+    /// Turns the transactional present off now, and drops a release booked
+    /// for later.
+    private func releaseTransactionalPresent() {
+        transactionalPresentRelease?.cancel()
+        transactionalPresentRelease = nil
+        metalLayer.presentsWithTransaction = false
+        frameLink?.synchronizePresentationMode()
+    }
+
     /// Drops the transactional present once the frame has held still for
-    /// longer than an animation step. Cancelled and rebooked by every step,
-    /// so the mode outlives the animation by one interval and no more; a
-    /// live drag owns the mode itself and is left alone.
+    /// ``resizeQuietInterval``. Cancelled and rebooked by every step, so the
+    /// mode outlives the animation by one interval and no more; a resize
+    /// gesture owns the mode itself and is left alone.
     private func scheduleTransactionalPresentRelease() {
         transactionalPresentRelease?.cancel()
         let release = DispatchWorkItem { [weak self] in
@@ -204,7 +306,7 @@ extension TerminalSurface {
             self.frameLink?.synchronizePresentationMode()
         }
         transactionalPresentRelease = release
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: release)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resizeQuietInterval, execute: release)
     }
 
     override public func viewDidChangeBackingProperties() {

@@ -1703,6 +1703,347 @@ xcrun swiftc "$PROGRAM_DIR/main.swift" \
 run_consumer "$PROGRAM_DIR/program-consumer" "$PROGRAM_DIR/claude" claude-code
 echo "check-ubiquittykit: ok (external consumer read a shell's foreground program and its status out of a window, heard nothing while declining, and read nothing named after exit)"
 
+# Another consumer moves panes in code, as a host laying out its own panes
+# does: an animation of a pane's frame, a sequence of frames set a display
+# refresh apart, lone changes, and a drag of the host's own divider bracketed
+# by beginLiveResize() and endLiveResize() and held still on the way. Its
+# window is off every screen, so the window system reports it covered and the
+# runs draw nothing until an edge reveals the pane. No run in the covered
+# window may turn the transactional present on, and every grid the observer
+# hears must differ from the one before it. The pane must land on the grid a
+# pane laid out once at the final frame takes, draw that grid when a
+# key-window edge reveals it, and hold a picture of its text row for row as a
+# fresh pane given the same text draws it, cursor hidden in both, with text on
+# every row the moves exposed. A run in a window with no extent must leave the
+# pane out of a resize, so an image the program deletes goes. It runs in an
+# empty home, so it reads none of the configuration of whoever runs it.
+cat > "$HOST_DIR/resize.swift" <<'EOF'
+import AppKit
+import Foundation
+import Metal
+import QuartzCore
+import UbiquittyKit
+
+/// Every grid a surface reported, in order.
+final class GridReport: TerminalSurfaceObserver {
+    private(set) var grids: [(rows: Int, columns: Int)] = []
+    var rows: Int { grids.last?.rows ?? 0 }
+    var columns: Int { grids.last?.columns ?? 0 }
+
+    /// The reports that named the grid the report before them named.
+    var repeats: Int {
+        zip(grids, grids.dropFirst()).filter { $0.0 == $0.1 }.count
+    }
+
+    func terminalSurface(_: TerminalSurface, didResizeGridTo rows: Int, columns: Int) {
+        grids.append((rows, columns))
+    }
+}
+
+/// A layer that keeps the texture of the last drawable it handed out, so a
+/// frame encoded into it can be read back.
+final class ProbeLayer: CAMetalLayer {
+    var lastTexture: (any MTLTexture)?
+
+    override func nextDrawable() -> (any CAMetalDrawable)? {
+        let drawable = super.nextDrawable()
+        lastTexture = drawable?.texture
+        return drawable
+    }
+}
+
+@MainActor
+func refuse(_ message: String) -> Bool {
+    FileHandle.standardError.write(Data("resize-consumer: \(message)\n".utf8))
+    return false
+}
+
+/// Turns the main run loop until `isDone` answers true or the time runs out,
+/// calling `observe` on every turn.
+@MainActor
+func spin(seconds: Double, observe: () -> Void = {}, until isDone: () -> Bool) -> Bool {
+    let deadline = Date(timeIntervalSinceNow: seconds)
+    while !isDone(), Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
+        observe()
+    }
+    return isDone()
+}
+
+/// Encodes the frame `surface` would draw now into a probe the size of its
+/// own drawable, and counts the probe's pixels row by row.
+///
+/// The probe matches the surface's drawable and presents with its
+/// transaction, so a frame of a pane nothing has changed since its last
+/// frame Loads the retained grid the pane's own frames Load and is not
+/// skipped as the glass it already shows. A frame the output's own hold
+/// declines is asked for again.
+///
+/// - Returns: For each pixel row, the pixels unlike the corner; the
+///   pure-red pixels in all; or nil when no frame was encoded within two
+///   seconds.
+@MainActor
+func inkOfFrame(_ surface: TerminalSurface, _ renderer: any TerminalSurfaceRenderer) -> (rows: [Int], red: Int)? {
+    let probe = ProbeLayer()
+    probe.device = MTLCreateSystemDefaultDevice()
+    probe.pixelFormat = surface.metalLayer.pixelFormat
+    probe.framebufferOnly = false
+    probe.presentsWithTransaction = true
+    probe.contentsScale = surface.metalLayer.contentsScale
+    probe.frame = surface.metalLayer.bounds
+    probe.drawableSize = surface.metalLayer.drawableSize
+    var drawn: (any MTLTexture)?
+    _ = spin(
+        seconds: 2,
+        until: {
+            probe.lastTexture = nil
+            if renderer.encodeFrame(for: surface, into: probe) {
+                drawn = probe.lastTexture
+            }
+            return drawn != nil
+        }
+    )
+    guard let texture = drawn else { return nil }
+    // The present waits for the frame's scheduling, not its completion.
+    _ = spin(seconds: 0.1, until: { false })
+    var bytes = [UInt8](repeating: 0, count: texture.width * texture.height * 4)
+    texture.getBytes(&bytes, bytesPerRow: texture.width * 4, from: MTLRegionMake2D(0, 0, texture.width, texture.height), mipmapLevel: 0)
+    var rows = [Int](repeating: 0, count: texture.height)
+    var red = 0
+    for row in 0..<texture.height {
+        for column in 0..<texture.width {
+            let index = (row * texture.width + column) * 4
+            if bytes[index] != bytes[0] || bytes[index + 1] != bytes[1] || bytes[index + 2] != bytes[2] {
+                rows[row] += 1
+            }
+            if bytes[index + 2] > 200, bytes[index + 1] < 60, bytes[index] < 60 {
+                red += 1
+            }
+        }
+    }
+    return (rows, red)
+}
+
+/// Makes the frame changes `move` makes, then lets the run settle.
+///
+/// - Returns: Whether the layer presented with its transaction at any turn.
+@MainActor
+func isTransactionalThroughRun(_ surface: TerminalSurface, _ move: (_ observe: () -> Void) -> Void) -> Bool {
+    var didTurnTransactional = false
+    let observe = { didTurnTransactional = didTurnTransactional || surface.metalLayer.presentsWithTransaction }
+    move(observe)
+    _ = spin(seconds: 0.6, observe: observe, until: { false })
+    return didTurnTransactional
+}
+
+let passed = MainActor.assumeIsolated { () -> Bool in
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    application.finishLaunching()
+    guard let renderer = TerminalSurface.makeRenderer(),
+        let moved = TerminalSurface(rows: 24, columns: 80),
+        let control = TerminalSurface(rows: 24, columns: 80)
+    else {
+        return refuse("no surfaces or no renderer")
+    }
+    moved.renderer = renderer
+    control.renderer = renderer
+    let movedGrid = GridReport()
+    let controlGrid = GridReport()
+    moved.observer = movedGrid
+    control.observer = controlGrid
+    let window = NSWindow(
+        contentRect: CGRect(x: -4000, y: -4000, width: 1000, height: 600),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    let container = NSView(frame: CGRect(x: 0, y: 0, width: 1000, height: 600))
+    window.contentView = container
+    moved.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+    container.addSubview(moved)
+    window.orderFrontRegardless()
+    defer { window.orderOut(nil) }
+    // More lines than the tallest grid holds, so every row the moves expose
+    // has text to draw. The cursor is hidden, so the picture is the text's.
+    let markers = (0..<60).map { "resize-marker-\($0)" }
+    moved.feed(Data(("\u{1b}[?25l" + markers.joined(separator: "\r\n")).utf8))
+    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+    guard spin(seconds: 10, until: { renderer.presentedGeometry(for: moved) != nil }) else {
+        return refuse("the pane drew no frame in 10 s")
+    }
+
+    var isAnimating = true
+    let isAnimationTransactional = isTransactionalThroughRun(moved) { observe in
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.25
+            moved.animator().frame = CGRect(x: 0, y: 0, width: 520, height: 360)
+        }, completionHandler: { isAnimating = false })
+        _ = spin(seconds: 5, observe: observe, until: { !isAnimating })
+    }
+    guard !isAnimating else {
+        return refuse("an animation of the pane's frame did not finish in 5 s")
+    }
+    guard !isAnimationTransactional else {
+        return refuse("an animated run in a covered window presented with its transaction")
+    }
+
+    let finalFrame = CGRect(x: 0, y: 0, width: 760, height: 560)
+    let start = moved.frame.size
+    let isSteppedTransactional = isTransactionalThroughRun(moved) { observe in
+        for step in 1...20 {
+            let progress = CGFloat(step) / 20
+            moved.frame = CGRect(
+                x: 0,
+                y: 0,
+                width: start.width + (finalFrame.width - start.width) * progress,
+                height: start.height + (finalFrame.height - start.height) * progress
+            )
+            _ = spin(seconds: 1.0 / 60.0, observe: observe, until: { false })
+        }
+    }
+    guard !isSteppedTransactional else {
+        return refuse("a stepped run in a covered window presented with its transaction")
+    }
+
+    _ = isTransactionalThroughRun(moved) { observe in
+        moved.frame = CGRect(x: 0, y: 0, width: 700, height: 520)
+        _ = spin(seconds: 0.3, observe: observe, until: { false })
+        moved.frame = finalFrame
+    }
+
+    // The host's own divider drag, bracketed, held still mid-drag for longer
+    // than a run's quiet interval.
+    _ = isTransactionalThroughRun(moved) { observe in
+        moved.beginLiveResize()
+        for step in 1...10 {
+            moved.frame = CGRect(x: 0, y: 0, width: finalFrame.width - CGFloat(step) * 6, height: finalFrame.height)
+            _ = spin(seconds: 1.0 / 60.0, observe: observe, until: { false })
+        }
+        _ = spin(seconds: 0.3, observe: observe, until: { false })
+        for step in 1...10 {
+            moved.frame = CGRect(x: 0, y: 0, width: finalFrame.width - 60 + CGFloat(step) * 6, height: finalFrame.height)
+            _ = spin(seconds: 1.0 / 60.0, observe: observe, until: { false })
+        }
+        moved.endLiveResize()
+    }
+    guard movedGrid.repeats == 0 else {
+        return refuse(
+            "the observer heard \(movedGrid.repeats) grid reports naming the grid before them: "
+                + movedGrid.grids.map { "\($0.rows)x\($0.columns)" }.joined(separator: " ")
+        )
+    }
+
+    // The grid the runs settled on is the one a pane laid out once at the
+    // final frame takes.
+    control.frame = finalFrame
+    container.addSubview(control, positioned: .below, relativeTo: moved)
+    guard spin(seconds: 2, until: { controlGrid.rows > 0 }) else {
+        return refuse("a pane laid out at the final frame reported no grid")
+    }
+    guard movedGrid.rows == controlGrid.rows, movedGrid.columns == controlGrid.columns else {
+        return refuse(
+            "the moved pane settled on \(movedGrid.rows)x\(movedGrid.columns), "
+                + "a pane laid out at its final frame on \(controlGrid.rows)x\(controlGrid.columns)"
+        )
+    }
+
+    // The window becoming key reveals the pane, which draws the settled
+    // grid over whatever its frames retained.
+    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+    let isSettledGridDrawn = {
+        guard let geometry = renderer.presentedGeometry(for: moved) else { return false }
+        return Int(geometry.rows) == movedGrid.rows && Int(geometry.columns) == movedGrid.columns
+    }
+    guard spin(seconds: 5, until: isSettledGridDrawn) else {
+        let drawn = renderer.presentedGeometry(for: moved).map { "\($0.rows)x\($0.columns)" } ?? "none"
+        return refuse("the revealed pane drew no frame of its settled \(movedGrid.rows)x\(movedGrid.columns) grid; last \(drawn)")
+    }
+    let visibleText = moved.accessibilityValue() as? String ?? ""
+    let visibleLines = visibleText.components(separatedBy: "\n")
+    guard visibleText.contains(markers[markers.count - 1]),
+        visibleLines.filter({ $0.hasPrefix("resize-marker-") }).count >= movedGrid.rows - 1
+    else {
+        return refuse("the moved pane's \(movedGrid.rows) rows hold \(visibleLines.count) lines, not its last \(movedGrid.rows) markers")
+    }
+
+    // A fresh pane given the text the moved one shows draws the picture the
+    // moved one's frames Load, pixel row for pixel row.
+    control.feed(Data(("\u{1b}[?25l" + visibleLines.joined(separator: "\r\n")).utf8))
+    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+    guard spin(seconds: 2, until: { (control.accessibilityValue() as? String ?? "") == visibleText }) else {
+        return refuse("a fresh pane given the moved pane's text shows other text")
+    }
+    _ = spin(seconds: 0.3, until: { false })
+    guard let movedInk = inkOfFrame(moved, renderer), let controlInk = inkOfFrame(control, renderer),
+        movedInk.rows.count == controlInk.rows.count
+    else {
+        return refuse("the moved pane or a fresh pane drew no frame of its final drawable")
+    }
+    let differingRows = zip(movedInk.rows, controlInk.rows).enumerated().filter { $0.element.0 != $0.element.1 }
+    let textRows = controlInk.rows.filter { $0 > 0 }.count
+    guard textRows > 0, differingRows.isEmpty else {
+        let first = differingRows.first.map { "pixel row \($0.offset): \($0.element.0) against \($0.element.1)" } ?? "no ink"
+        return refuse("the moved pane's picture differs from a fresh pane's in \(differingRows.count) pixel rows (\(first))")
+    }
+
+    // A window with no extent: a run there opens no gesture, so nothing is
+    // left holding the pane in a resize once it settles.
+    let emptyWindow = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
+    emptyWindow.isReleasedWhenClosed = false
+    let emptyContainer = NSView(frame: .zero)
+    emptyWindow.contentView = emptyContainer
+    guard let imaged = TerminalSurface(rows: 24, columns: 80) else {
+        return refuse("no surface for the window with no extent")
+    }
+    imaged.renderer = renderer
+    imaged.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+    emptyContainer.addSubview(imaged)
+    emptyWindow.orderFrontRegardless()
+    defer { emptyWindow.orderOut(nil) }
+    var image = [UInt8]()
+    for _ in 0..<(16 * 16) { image += [255, 0, 0] }
+    imaged.feed(Data("image probe\r\n\u{1b}_Gf=24,s=16,v=16,a=T;\(Data(image).base64EncodedString())\u{1b}\\".utf8))
+    guard spin(seconds: 3, until: { (inkOfFrame(imaged, renderer)?.red ?? 0) > 50 }) else {
+        return refuse("the image drew no red pixels")
+    }
+    imaged.frame = CGRect(x: 0, y: 0, width: 600, height: 460)
+    _ = spin(seconds: 1.0 / 60.0, until: { false })
+    imaged.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+    _ = spin(seconds: 0.6, until: { false })
+    imaged.feed(Data("\u{1b}_Ga=d\u{1b}\\\r\nafter delete\r\n".utf8))
+    _ = spin(seconds: 0.3, until: { false })
+    _ = inkOfFrame(imaged, renderer)
+    imaged.feed(Data("x".utf8))
+    _ = spin(seconds: 0.2, until: { false })
+    guard let afterDelete = inkOfFrame(imaged, renderer), afterDelete.red == 0,
+        !imaged.metalLayer.presentsWithTransaction
+    else {
+        return refuse("a run in a window with no extent left the pane in a resize: the deleted image is still drawn")
+    }
+    print(
+        "resize-consumer: \(movedGrid.grids.count) grid reports, none repeated, settled on \(movedGrid.rows)x\(movedGrid.columns); "
+            + "\(textRows) pixel rows of text match a fresh pane's"
+    )
+    return true
+}
+exit(passed ? 0 : 1)
+EOF
+
+xcrun swiftc "$HOST_DIR/resize.swift" \
+    -o "$HOST_DIR/resize-consumer" \
+    -F "$FRAMEWORK_DIR" \
+    -framework UbiquittyKit \
+    -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
+
+RESIZE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/ubiquittykit-resize.XXXXXX")"
+resize_status=0
+env -i HOME="$RESIZE_HOME" TMPDIR="$RESIZE_HOME" PATH=/usr/bin:/bin "$HOST_DIR/resize-consumer" || resize_status=$?
+rm -rf "$RESIZE_HOME"
+[ "$resize_status" -eq 0 ] || exit "$resize_status"
+echo "check-ubiquittykit: ok (panes moved in code reported each grid once, settled on the grid of their final frame, and kept a picture of their text)"
+
 # The generated header and archive this build just produced are the only place a
 # Swift export naming a C++ interop type can silently vanish -- swiftc prints no
 # diagnostic and the build stays green. Assert every such export survived both.

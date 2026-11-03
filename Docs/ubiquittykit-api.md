@@ -314,6 +314,52 @@ program through tmux.
 view scrolled back, and the context menu's two items, from a consumer compiled
 with `-F` alone, against a program of known output.
 
+### Resizing in code
+
+On macOS a host that moves or resizes panes in code, by setting frames
+directly or by animating them, calls nothing beyond setting each surface's
+frame. A surface takes a run of frame changes the way it takes the drag of a
+split divider, without the live-resize calls AppKit sends during a drag:
+
+- A lone frame change fits the grid to the new bounds and rewraps the
+  scrollback at once.
+- A frame change made within 80 ms of the one before it, as each step of an
+  `NSAnimationContext` animation of the frame or of a host's own timer is,
+  opens a run. Each step of the run fits the visible grid to its bounds and
+  leaves the scrollback's rewrap for the end, and the pane keeps its previous
+  frame while a full-screen program's repaint for the step is still arriving,
+  as in a drag. While the window is on screen, the layer presents each step's
+  frame in the same Core Animation transaction as its bounds change.
+- Once the frame has held still for 80 ms the run settles: the grid is fitted
+  to the final bounds, the scrollback is rewrapped once at the final width, and
+  a frame of the settled grid is drawn. The settle moves no bounds, so that
+  frame is presented as any other frame is, never in a Core Animation
+  transaction, and it never holds the main thread until the GPU schedules it.
+
+80 ms is longer than the gap between two steps of an animation, which AppKit
+sets one display refresh apart, and short enough that the settle has happened
+by the time a person reads the moved pane. Steps set further apart than that
+are lone changes, each paid for at once. A window whose frame has no width or
+height takes every change as a lone one.
+
+The observer's `terminalSurface(_:didResizeGridTo:columns:)` fires once for
+each change of the grid's rows or columns, whether a lone change, a step or a
+settle made it. A settle that leaves the grid as the last step left it, which
+is the usual case, fires nothing.
+
+A host that resizes panes from the pointer, dragging a divider it draws
+itself, brackets the drag with `beginLiveResize()` and `endLiveResize()`, as
+AppKit brackets the drag of an `NSSplitView` divider or a window edge. It
+calls `beginLiveResize()` on each surface the drag resizes when the drag
+begins, sets their frames as the pointer moves, and calls `endLiveResize()` on
+each when the pointer is released. A bracketed drag settles once, when it
+ends, however long the pointer holds still on the way. Unbracketed, a pause of
+more than 80 ms settles the run and the step after the pause resizes as a lone
+change, so the scrollback is rewrapped twice for each pause. A bracket that
+begins during a run takes the run over and settles it when it ends. A host
+animating frames whose steps it cannot keep 80 ms apart, a timer of its own on
+a busy main thread among them, brackets the animation the same way.
+
 ## Swift framework
 
 `UbiquittyKit.framework` packages the Swift views for an app built outside

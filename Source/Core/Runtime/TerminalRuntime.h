@@ -1221,6 +1221,14 @@ public:
     /// - Parameter resize: Whether a live resize is in progress.
     void setLiveResize(LiveResize resize) { m_isLiveResizeActive.store(resize == LiveResize::Active, std::memory_order_relaxed); }
 
+    /// Returns what the frontend last said of its live resize. Any thread.
+    ///
+    /// - Returns: The state `setLiveResize` last stored.
+    [[nodiscard]] LiveResize liveResize() const
+    {
+        return m_isLiveResizeActive.load(std::memory_order_relaxed) ? LiveResize::Active : LiveResize::Idle;
+    }
+
     /// Returns whether a present now would show a frame the program asked to
     /// withhold.
     ///

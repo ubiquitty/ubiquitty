@@ -2187,9 +2187,10 @@ public final class TerminalSurface: PlatformView {
     /// The lock shown while the model believes a password prompt is on screen.
     internal let passwordBadge = PasswordPromptBadge(frame: .zero)
 
-    /// The window's frame when the current live resize began, or `.zero`
-    /// outside one — which edges of it are moving is what the layer anchors
-    /// against for the drag's duration.
+    /// The window's frame when the current resize gesture began — a live
+    /// resize, or a run of frame changes made in code — or `.zero` outside
+    /// one. Which edges of it are moving is what the layer anchors against for
+    /// the gesture's duration.
     internal var liveResizeStartWindowFrame = CGRect.zero
 
     /// Whether the tab bar was present at the last resize.
@@ -2340,10 +2341,12 @@ public final class TerminalSurface: PlatformView {
     ///
     /// For a caller whose grid may already hold the row count the bounds
     /// give and still needs Core's fit run: a drag's settle, which lays out
-    /// top-anchored what its steps laid out bottom-anchored.
+    /// top-anchored what its steps laid out bottom-anchored. The observer
+    /// hears only a grid that differs from the one standing.
     internal func refitGridToBounds() {
+        let standingGrid = publishedGrid
         publishedGrid = (0, 0)
-        resizeGridToBounds()
+        resizeGridToBounds(reportingChangeFrom: standingGrid)
     }
 
     package func invalidateRetainedBaseline() {
@@ -4091,6 +4094,10 @@ public final class TerminalSurface: PlatformView {
     /// The booked release of the transactional present a resize step turned on.
     internal var transactionalPresentRelease: DispatchWorkItem?
 
+    /// The booked settle of a run of frame changes made outside a live
+    /// resize; nil while no run is open.
+    internal var resizeRunSettle: DispatchWorkItem?
+
     /// The size the surface last re-gridded for; a repeat of it owes nothing.
     private var lastResizedSize = CGSize.zero
 
@@ -4841,6 +4848,14 @@ public final class TerminalSurface: PlatformView {
     /// answers, so a scenario sets this and posts that notification.
     package var isFullyOccludedForTesting: Bool?
 
+    /// Stands in for whether the window system shows the window when a
+    /// resize decides how to present, nil to read its occlusion state.
+    ///
+    /// A seam of its own rather than ``isFullyOccludedForTesting``: a scenario
+    /// that uncovers a parked window through that one keeps the asynchronous
+    /// resize present it was written against.
+    package var isWindowOnScreenForResizeTesting: Bool?
+
     /// Keeps the display link from driving this surface, for a smoke that
     /// draws through the entry point by hand.
     ///
@@ -5110,23 +5125,26 @@ public final class TerminalSurface: PlatformView {
     /// says nothing about which edge is standing still.
     package var isLiveResizeBottomFixed = false
 
-    /// Whether a live resize is in progress, for the image layer's carry.
+    /// Whether a resize gesture is in progress, for the image layer's carry:
+    /// a live resize, or a run of frame changes made in code.
     ///
     /// An image application redraws by deleting and re-placing its picture
     /// every frame, and a frame captured between the two sees no placement at
-    /// all. Outside a drag that is a real delete and the layer goes; inside
+    /// all. Outside a gesture that is a real delete and the layer goes; inside
     /// one it is the gap, and `Rendering::imageLayerAction` carries the last
-    /// good layer across it. The drag is the only thing this arm knows that
+    /// good layer across it. The gesture is the only thing this arm knows that
     /// Core does not, so it is the one fact reported.
     package internal(set) var isHoldingImageGapsForResize = false
 
-    /// Whether a live resize drag is running.
+    /// Whether a resize gesture is running: a live resize drag, or a run of
+    /// frame changes made in code.
     ///
-    /// The surface's own latch, opened by `viewWillStartLiveResize` and
-    /// closed by its partner, rather than AppKit's `inLiveResize`: they say
-    /// the same thing during a drag and only this one can be opened by a
-    /// caller. A toolkit with no window drag settles every resize, which is
-    /// the answer that pays for the rewrap at once.
+    /// The surface's own latch rather than AppKit's `inLiveResize`, opened by
+    /// `viewWillStartLiveResize` or by the second frame change of a run, and
+    /// closed by `viewDidEndLiveResize` or once the run's frame holds still.
+    /// The two say the same thing during a drag, and only this one can be
+    /// opened by a caller or by a run. A toolkit with no window drag settles
+    /// every resize, which is the answer that pays for the rewrap at once.
     internal var isInLiveResizeGesture: Bool {
         #if canImport(AppKit)
         return !liveResizeStartWindowFrame.isEmpty
@@ -5135,7 +5153,12 @@ public final class TerminalSurface: PlatformView {
         #endif
     }
 
-    internal func resizeGridToBounds() {
+    /// Publishes the grid the bounds hold, when it is not the one published.
+    ///
+    /// - Parameter standingGrid: The grid the observer last heard, for a refit
+    ///   that cleared the published grid to force Core's fit; nil when the
+    ///   published grid is that one.
+    internal func resizeGridToBounds(reportingChangeFrom standingGrid: (rows: Int, columns: Int)? = nil) {
         guard let renderer else { return }
         let cell = renderer.cellSize(for: self)
         guard cell.width > 0, cell.height > 0 else { return }
@@ -5250,6 +5273,7 @@ public final class TerminalSurface: PlatformView {
         // on the callback is handed a viewport and a bar that already agree
         // about the new grid.
         carryViewOffsetAcrossResize()
+        guard standingGrid.map({ $0 != (rows, columns) }) ?? true else { return }
         observer?.terminalSurface(self, didResizeGridTo: rows, columns: columns)
     }
 

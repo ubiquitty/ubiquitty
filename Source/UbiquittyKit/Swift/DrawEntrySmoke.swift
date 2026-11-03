@@ -202,6 +202,11 @@ enum DrawEntrySmoke {
         guard cursorVisibilityLeg(device: device, library: library) else {
             return false
         }
+        #if canImport(AppKit)
+        guard resizeRunLeg(device: device, library: library) else {
+            return false
+        }
+        #endif
 
         // Font preparation must leave the target untouched until the complete frame is ready.
         guard let preparedSurface = TerminalSurface(rows: 6, columns: 60),
@@ -997,6 +1002,237 @@ enum DrawEntrySmoke {
             "no acquire on another thread waited for a drawable with \(heldAcquires.count) of the layer's "
                 + "\(layer.maximumDrawableCount) held"
         )
+    }
+
+    /// Moves a pane in code, as a host laying out its own panes does: frame
+    /// changes a display refresh apart with no live-resize edge, and the same
+    /// steps bracketed by `beginLiveResize()` and `endLiveResize()`, as a host
+    /// dragging a divider it draws itself brackets them.
+    ///
+    /// Each run is taken as one drag from its second change to its last and
+    /// settles as a drag's end does: the latch closes, the drain's hold and
+    /// the image carry are released, and the history the steps deferred is
+    /// rewrapped. On screen an unbracketed run's settle presents outside a
+    /// transaction. A cover over the run, or one that lifts after it, leaves
+    /// the pane's retained picture the one a whole rebuild draws. A drag's
+    /// end settles a run still booked, a lone change settles at once, and a
+    /// window with no extent takes no gesture.
+    ///
+    /// - Parameters:
+    ///   - device: The device used by the live surface renderer.
+    ///   - library: The shipping shader library.
+    /// - Returns: Whether every run settled and every picture held its text.
+    private static func resizeRunLeg(device: any MTLDevice, library: any MTLLibrary) -> Bool {
+        guard let runSurface = TerminalSurface(rows: 24, columns: 80),
+            let runRenderer = SurfaceRenderer(device: device, library: library, familyName: defaultFamilyName, pointSize: 12)
+        else { return failed("resize-run fixture unavailable") }
+        runSurface.renderer = runRenderer
+        guard let runWindow = present(runSurface) else { return noWindow() }
+        defer { dismiss(runWindow) }
+        // Lines wider than the narrowest step, so the history a run defers
+        // is one that rewraps.
+        let lines = (0..<120).map { "run-\($0) " + String(repeating: "w", count: 70) }
+        feed(runSurface.drive, lines.joined(separator: "\r\n"))
+        let originalSize = runSurface.frame.size
+        func pump(_ seconds: Double) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+            }
+        }
+        func draw() {
+            runSurface.needsDisplay = true
+            runSurface.drawSurfaceFrame()
+        }
+        // The window system's two answers, together: whether the pane's
+        // frames reach the glass, and whether a resize presents with its
+        // bounds change.
+        func cover(_ isCovered: Bool) {
+            runSurface.isFullyOccludedForTesting = isCovered
+            runSurface.isWindowOnScreenForResizeTesting = !isCovered
+            NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: runWindow)
+        }
+        func isRunSettled() -> Bool {
+            !runSurface.isInLiveResizeGesture && runSurface.resizeRunSettle == nil
+        }
+        // Each step draws as a step on screen does, the grid at the step's
+        // bounds; a covered pane's draw is withheld. Answers whether the
+        // steps stayed inside one quiet interval of each other, which a main
+        // thread held up for longer does not, and whether the latch stood
+        // from the second step to the last.
+        func steps(from startWidth: CGFloat, to endWidth: CGFloat) -> (isTimely: Bool, didLatchHold: Bool) {
+            var isTimely = true
+            var didLatchHold = true
+            var lastChangeAt: Date?
+            for index in 1...8 {
+                let width = startWidth + (endWidth - startWidth) * CGFloat(index) / 8
+                if let lastChangeAt, Date().timeIntervalSince(lastChangeAt) >= 0.06 {
+                    isTimely = false
+                }
+                lastChangeAt = Date()
+                runSurface.setFrameSize(CGSize(width: width.rounded(), height: originalSize.height))
+                if index > 1, !runSurface.isInLiveResizeGesture {
+                    didLatchHold = false
+                }
+                runSurface.isDrawingResizeStep = true
+                draw()
+                runSurface.isDrawingResizeStep = false
+                pump(1.0 / 60.0)
+            }
+            return (isTimely, didLatchHold)
+        }
+        // A run whose steps were held apart past the quiet interval is two
+        // runs by design, so it is put back with a lone change and taken
+        // again rather than judged.
+        func takeRun(from startWidth: CGFloat, to endWidth: CGFloat, isBracketed: Bool) -> Bool {
+            for _ in 0..<3 {
+                if isBracketed {
+                    runSurface.beginLiveResize()
+                }
+                let run = steps(from: startWidth, to: endWidth)
+                if run.isTimely || isBracketed {
+                    return run.didLatchHold
+                }
+                _ = spinUntil(isRunSettled)
+                runSurface.setFrameSize(CGSize(width: startWidth, height: originalSize.height))
+                _ = spinUntil(isRunSettled)
+            }
+            return false
+        }
+        func heldAfterSettle() -> String? {
+            if runSurface.drive.liveResize != .Idle { return "the drain's hold" }
+            if runSurface.drive.hasDeferredHistoryRewrap { return "the deferred history rewrap" }
+            if runSurface.isHoldingImageGapsForResize { return "the image carry" }
+            if runSurface.isLiveResizeBottomFixed { return "the bottom anchor" }
+            return nil
+        }
+        // The retained grid the pane's frames Load once the reveal's frames
+        // have drawn, against the one a whole rebuild of the same model draws.
+        func retainedPictureMatchesRebuild() -> Bool {
+            for _ in 0..<10 {
+                draw()
+                pump(0.03)
+            }
+            guard let retained = runSurface.retainedGridPixelsForTesting() else { return false }
+            let encoded = runSurface.framesEncodedForTesting
+            runSurface.invalidateRetainedBaseline()
+            guard
+                spinUntil({
+                    draw()
+                    return runSurface.framesEncodedForTesting > encoded
+                })
+            else { return false }
+            return runSurface.retainedGridPixelsForTesting() == retained
+        }
+        draw()
+
+        let runs: [(name: String, isBracketed: Bool, isCoveredDuringRun: Bool)] = [
+            ("a run on screen", false, false),
+            ("a covered run", false, true),
+            ("a bracketed drag on screen", true, false),
+            ("a covered bracketed drag", true, true),
+        ]
+        var width = originalSize.width
+        for run in runs {
+            let target = width == originalSize.width ? (originalSize.width * 0.55).rounded() : originalSize.width
+            cover(run.isCoveredDuringRun)
+            guard takeRun(from: width, to: target, isBracketed: run.isBracketed) else {
+                return failed("\(run.name) was not held as one drag from its second step to its last")
+            }
+            width = target
+            guard runSurface.isInLiveResizeGesture, runSurface.drive.liveResize == .Active,
+                runSurface.drive.hasDeferredHistoryRewrap
+            else {
+                return failed("\(run.name) was not taken as a drag (latch \(runSurface.isInLiveResizeGesture))")
+            }
+            // The frames drawn once the latch has closed are the settle's.
+            var settleFramesInTransaction = 0
+            runSurface.frameEncodedObserverForTesting = { surface in
+                if !surface.isInLiveResizeGesture, surface.metalLayer.presentsWithTransaction {
+                    settleFramesInTransaction += 1
+                }
+            }
+            if run.isBracketed {
+                // A host's drag held still past the quiet interval is still a drag.
+                pump(0.3)
+                guard runSurface.isInLiveResizeGesture else {
+                    return failed("\(run.name) settled while the host held it still")
+                }
+                runSurface.endLiveResize()
+            }
+            let didSettle = spinUntil(isRunSettled)
+            let isTransactionalAfterSettle = runSurface.metalLayer.presentsWithTransaction
+            runSurface.frameEncodedObserverForTesting = nil
+            guard didSettle else {
+                return failed("\(run.name) did not settle once its frame held still")
+            }
+            if let held = heldAfterSettle() {
+                return failed("\(run.name) settled holding \(held)")
+            }
+            // A drag's end presents in the transaction of its last step, as
+            // AppKit's drag does; a run's settle moves no bounds.
+            if !run.isBracketed, settleFramesInTransaction > 0 || isTransactionalAfterSettle {
+                return failed(
+                    "\(run.name) settled presenting in a transaction (\(settleFramesInTransaction) frames, mode left \(isTransactionalAfterSettle))"
+                )
+            }
+            cover(false)
+            guard retainedPictureMatchesRebuild() else {
+                return failed("after \(run.name) the pane's retained picture is not the grid a rebuild draws")
+            }
+        }
+
+        // A cover that falls between a run drawn on screen and its settle.
+        _ = steps(from: width, to: (originalSize.width * 0.7).rounded())
+        cover(true)
+        guard spinUntil(isRunSettled), heldAfterSettle() == nil else {
+            return failed("a run covered before its settle did not settle")
+        }
+        pump(0.2)
+        cover(false)
+        guard retainedPictureMatchesRebuild() else {
+            return failed("a cover over a run's settle left a retained picture that is not the grid's")
+        }
+
+        // AppKit's own end of a drag settles a run whose settle is still
+        // booked, and the change after it stands alone.
+        runSurface.setFrameSize(CGSize(width: originalSize.width - 40, height: originalSize.height))
+        runSurface.setFrameSize(CGSize(width: originalSize.width - 80, height: originalSize.height))
+        guard runSurface.isInLiveResizeGesture else {
+            return failed("two frame changes in a turn were not taken as a run")
+        }
+        runSurface.viewDidEndLiveResize()
+        guard isRunSettled(), heldAfterSettle() == nil else {
+            return failed("a drag's end left a run's settle booked")
+        }
+        runSurface.setFrameSize(originalSize)
+        guard !runSurface.isInLiveResizeGesture, !runSurface.drive.hasDeferredHistoryRewrap else {
+            return failed("a lone frame change after a drag's end was taken as a run")
+        }
+        guard spinUntil({ runSurface.resizeRunSettle == nil }), isRunSettled() else {
+            return failed("a lone frame change left a gesture open")
+        }
+
+        // A window with no extent latches nothing, so a run in it opens
+        // nothing its settle would have to close.
+        guard let emptySurface = TerminalSurface(rows: 24, columns: 80) else {
+            return failed("no empty-window surface")
+        }
+        emptySurface.renderer = runRenderer
+        let emptyWindow = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
+        emptyWindow.isReleasedWhenClosed = false
+        emptyWindow.contentView?.addSubview(emptySurface)
+        defer { emptyWindow.orderOut(nil) }
+        emptySurface.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+        emptySurface.setFrameSize(CGSize(width: 600, height: 460))
+        emptySurface.setFrameSize(CGSize(width: 640, height: 480))
+        pump(0.3)
+        guard !emptySurface.isInLiveResizeGesture, !emptySurface.isHoldingImageGapsForResize,
+            emptySurface.drive.liveResize == .Idle, !emptySurface.metalLayer.presentsWithTransaction
+        else {
+            return failed("a run in a window with no extent left the pane in a resize")
+        }
+        return true
     }
     #endif
 
