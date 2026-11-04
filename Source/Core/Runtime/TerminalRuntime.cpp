@@ -1411,6 +1411,13 @@ void TerminalRuntime::noteFeedParsed(std::uint32_t eraseGenerationBefore)
     noteEraseRedrawParsed();
 }
 
+void TerminalRuntime::settlePasswordPromptAtPause()
+{
+    if (!m_term)
+        return;
+    Ubiquitty::settlePasswordPrompt(*m_term, m_stream ? &m_stream->process() : nullptr);
+}
+
 bool TerminalRuntime::isEraseRedrawArriving(const Ubiquitty::Terminal& terminal, std::uint32_t nowMicros)
 {
     if (m_parsedEraseGeneration.load(std::memory_order_relaxed) == terminal.eraseDisplayGeneration) {

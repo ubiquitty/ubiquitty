@@ -1637,6 +1637,85 @@ TEST(aPublishedRichTextCatalogRequestsOneReplacementFrame)
     releaseTerminalSession(session);
 }
 
+/// An embedder's feed has no drain pass behind it, so the feed is where the
+/// pause that follows its write is read: a prompt the bytes printed is flagged
+/// when the call returns.
+TEST(aStreamlessFeedSettlesThePasswordPrompt)
+{
+    const std::unique_ptr<TerminalSession, decltype(&releaseTerminalSession)> session(
+        TerminalSession::make(), releaseTerminalSession);
+    REQUIRE(session != nullptr);
+    session->start(24, 80);
+    session->lockForRead();
+    session->terminal()->passwordDetect = true;
+    session->unlockForRead();
+    const auto isPromptActive = [&] {
+        session->lockForRead();
+        const bool isActive = session->terminal()->passwordPromptActive;
+        session->unlockForRead();
+        return isActive;
+    };
+
+    constexpr std::string_view prompt = "$ sudo make install\r\nPassword: ";
+    session->feedBytes({ prompt.data(), prompt.size() });
+    CHECK_MSG(isPromptActive(), "the prompt the feed printed is detected when it returns");
+
+    constexpr std::string_view answered = "\r\n$ ";
+    session->feedBytes({ answered.data(), answered.size() });
+    CHECK_MSG(!isPromptActive(), "the next feed's pause clears it");
+
+    constexpr std::string_view framed = "\x1b[?2026h\x1b[?2026l\r\nPassword: ";
+    session->feedBytes({ framed.data(), framed.size() });
+    CHECK_MSG(isPromptActive(), "a feed split at a synchronized-update clear is read after its last chunk");
+}
+
+/// The streamed session reads the line discipline of its stream's process, and
+/// reads it once per feed however many chunks the feed splits into.
+TEST(aStreamedFeedSettlesThePasswordPromptOncePerFeed)
+{
+    const std::unique_ptr<TerminalSession, decltype(&releaseTerminalSession)> session(
+        TerminalSession::make(), releaseTerminalSession);
+    REQUIRE(session != nullptr);
+    session->start(24, 80);
+    auto pipe = std::make_unique<Ubiquitty::PAL::StreamTestPipe>();
+    auto* stream = pipe.get();
+    stream->discipline = Ubiquitty::PAL::LineDiscipline {};
+    REQUIRE(session->adoptStream(std::move(pipe)).has_value());
+    session->lockForRead();
+    session->terminal()->passwordDetect = true;
+    session->unlockForRead();
+    const auto isPromptActive = [&] {
+        session->lockForRead();
+        const bool isActive = session->terminal()->passwordPromptActive;
+        session->unlockForRead();
+        return isActive;
+    };
+    const auto feed = [&](std::string_view bytes) {
+        const int before = stream->disciplineProbes;
+        session->feedBytes({ bytes.data(), bytes.size() });
+        return stream->disciplineProbes - before;
+    };
+
+    CHECK_EQ(feed("\r\nPassword: "), 1);
+    CHECK_MSG(!isPromptActive(), "an echoing terminal is not a password prompt");
+
+    stream->discipline->isEchoEnabled = false;
+    CHECK_EQ(feed("\r\nPIN> "), 1);
+    CHECK_MSG(isPromptActive(), "a canonical terminal with echo off is");
+
+    stream->discipline->isEchoEnabled = true;
+    CHECK_EQ(feed("\r\n$ \x1b[?2026h\x1b[?2026l\x1b[?2026h\x1b[?2026l\r\nPassword: "), 1);
+    CHECK_MSG(!isPromptActive(), "a feed split into chunks is read once, by the stream's facts");
+
+    std::string queries;
+    for (int i = 0; i < 200; ++i)
+        queries += "\x1b[6n";
+    queries += "\r\nPIN> ";
+    stream->discipline->isEchoEnabled = false;
+    CHECK_EQ(feed(queries), 1);
+    CHECK_MSG(isPromptActive(), "reply pressure inside a feed does not settle per chunk");
+}
+
 /// A session fed by its embedder, with no stream of its own, answers the host's
 /// queries through the reply sink the embedder installs: an SSH carrier on iOS
 /// feeds host bytes in and sends the replies out. Without one, the replies sit
