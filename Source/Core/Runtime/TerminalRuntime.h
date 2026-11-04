@@ -1167,6 +1167,15 @@ public:
     /// - Parameter eraseGenerationBefore: ``eraseGeneration()`` before the feed.
     void noteFeedParsed(std::uint32_t eraseGenerationBefore);
 
+    /// Reads the password prompt the program's output has left at the cursor,
+    /// for a pause in that output the caller has observed.
+    ///
+    /// A runtime with a stream reads the line discipline from the stream's
+    /// process; a streamless one falls back to the cursor row. One ioctl per
+    /// pause, so a feed calls it once for the whole write. Caller holds the
+    /// model lock.
+    void settlePasswordPromptAtPause();
+
     /// Sets whether the frontend is in a live resize.
     ///
     /// While it is, a whole-screen erase whose redraw is still arriving keeps

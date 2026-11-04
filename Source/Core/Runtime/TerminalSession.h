@@ -537,6 +537,9 @@ public:
             // Fed bytes arrive whole, so a redraw they carry behind their own
             // erase has been parsed with it rather than still being on its way.
             m_runtime->noteFeedParsed(eraseGenerationBefore);
+            // One feed is one write followed by a pause, so the prompt it may have
+            // printed is read once for the whole feed, never per chunk.
+            m_runtime->settlePasswordPromptAtPause();
             // An embedder feeding a streamless session owns the way back too.
             m_runtime->flushRepliesToSink();
             std::uint32_t eventBits = 0;
