@@ -1547,18 +1547,20 @@ void csiH_alignedTab(Terminal& terminal, char final)
 //   Drop   — emit nothing.
 //   Latin1 — reinterpret the byte as ISO-8859-1 (byte -> U+0080..U+00FF). The
 //            cell holds canonical Unicode, so codePoint == ch == the byte.
-static inline void emitInvalidUTF8(Ubiquitty::Terminal& t, uint8_t offendingByte)
+// The substitute is a graphic like any other: CCH can cancel it, so it is
+// journaled by what follows it, as `capture` says, and not by default.
+static inline void emitInvalidUTF8(Ubiquitty::Terminal& t, uint8_t offendingByte, GraphicCapture capture)
 {
     switch (t.parser.invalidUTF8Policy) {
     case Ubiquitty::Unicode::InvalidUTF8Policy::Drop:
         return;
     case Ubiquitty::Unicode::InvalidUTF8Policy::Latin1:
-        emitTranslatedGraphic(t, offendingByte, GraphicInvocationArea::GL);
+        emitTranslatedGraphic(t, offendingByte, GraphicInvocationArea::GL, capture);
         return;
     case Ubiquitty::Unicode::InvalidUTF8Policy::FFFD:
         break;
     }
-    emitCharacter(t, 0xFFFD, 0xFFFD); // U+FFFD has width 1
+    emitCharacter(t, 0xFFFD, 0xFFFD, 0, capture); // U+FFFD has width 1
 }
 
 // Close an incomplete UTF-8 sequence that the next byte cannot continue.
@@ -1569,12 +1571,15 @@ static inline void emitInvalidUTF8(Ubiquitty::Terminal& t, uint8_t offendingByte
 // silence, and the reader saw one character fewer than arrived. Unicode's
 // recommended practice is one U+FFFD for the maximal subpart, which is what the
 // configured policy substitutes here before the control acts.
-static void closeTruncatedUTF8(Ubiquitty::Terminal& t)
+//
+// - Parameter capture: Whether the substitute stays journaled for CCH, decided
+//   from the control that closes the sequence as from any other successor.
+static void closeTruncatedUTF8(Ubiquitty::Terminal& t, GraphicCapture capture)
 {
     if (t.parser.utf8.need == 0)
         return;
     resetUTF8(t);
-    emitInvalidUTF8(t, t.parser.utf8LeadByte);
+    emitInvalidUTF8(t, t.parser.utf8LeadByte, capture);
 }
 
 // A C1 control decoded from UTF-8 (U+0080..U+009F, spelled C2 80..C2 9F) has
@@ -1630,19 +1635,28 @@ static void performDecodedC1CodePoint(Ubiquitty::Terminal& t, uint32_t codePoint
                 // abandoned LEAD is what failed to decode (substitute that),
                 // then re-feed the offending byte — it may itself begin a fresh
                 // sequence (or be plain ASCII).
-                emitInvalidUTF8(t, t.parser.utf8LeadByte);
+                // The lead's substitute is journaled only when its successor
+                // can be CCH: the one lead that decodes to a C1 control is C2.
+                // Every other successor is a graphic this call emits, or a
+                // sequence that ends in one, which CCH cancels instead. The
+                // successor is read off a copy of the decoder, so the stream's
+                // order stands: the substitute first, then the re-fed byte.
+                Ubiquitty::Unicode::UTF8Decoder probe = t.parser.utf8;
+                std::uint32_t probed;
+                const bool isC1Lead = c == 0xC2 && Ubiquitty::Unicode::utf8Feed(&probe, c, &probed) == Ubiquitty::Unicode::UTF8Status::Need;
+                emitInvalidUTF8(t, t.parser.utf8LeadByte, isC1Lead ? GraphicCapture::Retain : GraphicCapture::Discard);
                 std::uint32_t codePoint2;
                 Ubiquitty::Unicode::UTF8Status st2 = Ubiquitty::Unicode::utf8Feed(&t.parser.utf8, c, &codePoint2);
                 if (st2 == Ubiquitty::Unicode::UTF8Status::Emit) {
                     if (!isC1CodePoint(codePoint2))
-                        emitTranslatedGraphic(t, codePoint2, GraphicInvocationArea::GL);
+                        emitTranslatedGraphic(t, codePoint2, GraphicInvocationArea::GL, capture);
                 } else if (st2 == Ubiquitty::Unicode::UTF8Status::Need)
                     t.parser.utf8LeadByte = c;
                 else // Invalid: c is itself a bad lead / lone continuation.
-                    emitInvalidUTF8(t, c);
+                    emitInvalidUTF8(t, c, capture);
             } else {
                 // Byte c is itself a bad lead or lone continuation.
-                emitInvalidUTF8(t, c);
+                emitInvalidUTF8(t, c, capture);
             }
         }
     }
@@ -5821,6 +5835,69 @@ static inline int nextTextRunDecodeBudget(int budget, int placedBytes, int decod
     return std::min(textRunUnlimitedDecodeBytes, 2 * budget);
 }
 
+/// The bytes one U+FFFD stands for at the start of a malformed sequence.
+///
+/// The lead and the continuations it accepts, up to the byte that breaks the
+/// sequence, which is not among them: it begins the next, as the per-byte
+/// decoder re-feeds it. A lead no sequence starts with is one byte.
+///
+/// - Parameters:
+///   - bytes: The sequence's first byte and what follows it in the input.
+///   - available: How many bytes there are.
+/// - Returns: The substitute's length, or zero for a sequence that is valid,
+///   or that the input ends inside and the decoder carries across the end.
+[[gnu::noinline]] static int malformedUTF8SubpartLength(const char* bytes, int available)
+{
+    const auto lead = static_cast<std::uint8_t>(bytes[0]);
+    if (lead < 0xC2 || lead > 0xF4)
+        return 1;
+    int need = 1;
+    std::uint8_t lowest = 0x80;
+    std::uint8_t highest = 0xBF;
+    if (lead >= 0xF0) {
+        need = 3;
+        if (lead == 0xF0)
+            lowest = 0x90;
+        else if (lead == 0xF4)
+            highest = 0x8F;
+    } else if (lead >= 0xE0) {
+        need = 2;
+        if (lead == 0xE0)
+            lowest = 0xA0;
+        else if (lead == 0xED)
+            highest = 0x9F;
+    }
+    for (int taken = 1; taken <= need; ++taken) {
+        if (taken >= available)
+            return 0;
+        const auto byte = static_cast<std::uint8_t>(bytes[taken]);
+        if (byte < lowest || byte > highest)
+            return taken;
+        lowest = 0x80;
+        highest = 0xBF;
+    }
+    return 0;
+}
+
+/// The index of the first code point of a grapheme break class in a decoded
+/// batch, or -1 when there is none.
+///
+/// Nothing below U+0300 has such a class, nor do the Greek, Cyrillic and
+/// Armenian letters, which is most of the text that reaches this, so those
+/// are answered by range and the rest read the table. Out of line: the caller
+/// is the text run, which every byte of the input passes through.
+[[gnu::noinline]] static int firstBreakClassCodePoint(std::span<const std::uint32_t> codePoints)
+{
+    for (std::size_t index = 0; index < codePoints.size(); ++index) {
+        const std::uint32_t codePoint = codePoints[index];
+        if (codePoint < 0x300 || (codePoint >= 0x370 && codePoint <= 0x482) || (codePoint >= 0x48A && codePoint <= 0x590))
+            continue;
+        if ((Ubiquitty::Unicode::graphemeBreakRawByte(codePoint) & Ubiquitty::Unicode::detail::PropGCBClassField::mask) != 0)
+            return static_cast<int>(index);
+    }
+    return -1;
+}
+
 template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, const char* buffer, int start, int length, int& decodeBudget)
 {
     Ubiquitty::Screen::State* s = t.screens.active;
@@ -5862,6 +5939,7 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
     int lastLeadColumn = column; // lead column of the last glyph placed
     int p = start;
     uint32_t lastCodePoint = 0;
+    int lastByteLength = 0; // the bytes the last placed code point stood for
     bool wrapAfter = false;
 
     // Decode only the row-fit prefix. Plain glyphs consume at least one cell, so
@@ -5870,6 +5948,43 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
     std::array<std::uint32_t, Ubiquitty::maxColumns> codePoints;
     const int codePointCapacity = std::min<int>(static_cast<int>(std::size(codePoints)), writableColumns);
     int nDec = 0;
+    // The input bytes each decoded code point stands for, kept only once a
+    // substitute is among them: a substitute's are the malformed bytes it
+    // replaces, which its own encoding does not say, and every other code
+    // point's follow from its value.
+    std::array<std::uint8_t, Ubiquitty::maxColumns> byteLengths;
+    bool hasSubstitutes = false;
+    const auto encodedLength = [](std::uint32_t codePoint) -> int {
+        return codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2
+            : codePoint < 0x10000                       ? 3
+                                                        : 4;
+    };
+    const auto noteDecodedLengths = [&](int first, int count) {
+        for (int index = first; index < first + count; ++index)
+            byteLengths[index] = static_cast<std::uint8_t>(encodedLength(codePoints[index]));
+    };
+    const auto noteSubstitute = [&](int length) {
+        if (!hasSubstitutes) {
+            noteDecodedLengths(0, nDec);
+            hasSubstitutes = true;
+        }
+        byteLengths[nDec] = static_cast<std::uint8_t>(length);
+    };
+    const auto byteLength = [&](int index) -> int { return hasSubstitutes ? byteLengths[index] : encodedLength(codePoints[index]); };
+    // The bytes a range of decoded code points stood for. Without a substitute
+    // the sum is a pure function of the code points, which the compiler
+    // vectorises; the lookup is kept to the run that needs it.
+    const auto encodedLengthOfRun = [&](int first, int count) -> int {
+        int total = 0;
+        if (hasSubstitutes) {
+            for (int index = first; index < first + count; ++index)
+                total += byteLengths[index];
+        } else {
+            for (int index = first; index < first + count; ++index)
+                total += encodedLength(codePoints[index]);
+        }
+        return total;
+    };
     int decodedEnd = start;
     {
         // The decode ends at the budget; bytes past it wait for the next run.
@@ -5885,36 +6000,84 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
         while (nDec < codePointCapacity && offset < decodeLimit) {
             const unsigned char lead = static_cast<unsigned char>(buffer[offset]);
             if (lead >= 0x20 && lead < 0x7F) {
-                // The gap absorbed here is a word BREAK, not ASCII content. An
-                // ASCII word between two multibyte ones is emitASCIIRun's, whose
-                // per-cell write is four bytes against the whole cell this path
-                // stages — taking it costs eight times the write traffic for
-                // those columns. So only blanks are crossed, and only a few.
-                constexpr int maxAbsorbedGap = 4;
-                const int gapLimit = offset + maxAbsorbedGap < decodeLimit ? offset + maxAbsorbedGap : decodeLimit;
-                int gapEnd = offset;
-                while (gapEnd < gapLimit && nDec + (gapEnd - offset) < codePointCapacity) {
-                    if (buffer[gapEnd] != ' ')
-                        break;
-                    ++gapEnd;
+                // A short ASCII piece between the run's glyphs stays in the
+                // run: text that mixes scripts character by character would
+                // pay the run's setup once per non-ASCII glyph otherwise. A
+                // word, or a tail that nothing multibyte follows, is left to
+                // emitASCIIRun, which writes it narrower than the whole cells
+                // this path stages, and a wide-led row keeps the wide path.
+                constexpr int maxAbsorbedASCII = 5;
+                int asciiEnd = offset + 1;
+                while (asciiEnd < decodeLimit && asciiEnd - offset <= maxAbsorbedASCII
+                    && static_cast<unsigned char>(buffer[asciiEnd]) >= 0x20 && static_cast<unsigned char>(buffer[asciiEnd]) < 0x7F)
+                    ++asciiEnd;
+                if (asciiEnd - offset > maxAbsorbedASCII || asciiEnd >= decodeLimit
+                    || static_cast<unsigned char>(buffer[asciiEnd]) < 0x80 || nDec + (asciiEnd - offset) > codePointCapacity)
+                    break;
+                for (; offset < asciiEnd; ++offset) {
+                    if (hasSubstitutes)
+                        byteLengths[nDec] = 1;
+                    codePoints[nDec++] = static_cast<unsigned char>(buffer[offset]);
                 }
-                if (gapEnd >= decodeLimit || static_cast<unsigned char>(buffer[gapEnd]) < 0xC2)
-                    break; // nothing multibyte follows: the tail is the ASCII run's
-                for (int gapIndex = offset; gapIndex < gapEnd; ++gapIndex)
-                    codePoints[nDec++] = static_cast<unsigned char>(buffer[gapIndex]);
-                offset = gapEnd;
                 continue;
             }
-            if (lead < 0xC2)
-                break;
+            if (lead < 0x80)
+                break; // a control or DEL ends the run
+            if (lead < 0xC2) {
+                // A stray continuation or an overlong lead: one substitute per
+                // byte, as the per-byte decoder makes it, under the policy that
+                // substitutes U+FFFD; the other policies keep the per-byte path.
+                if (t.parser.invalidUTF8Policy != Ubiquitty::Unicode::InvalidUTF8Policy::FFFD)
+                    break;
+                noteSubstitute(1);
+                codePoints[nDec++] = 0xFFFD;
+                ++offset;
+                continue;
+            }
             int runBytes = 0;
             const int decoded = Ubiquitty::Unicode::utf8DecodeRun(
                 std::span { buffer + offset, static_cast<std::size_t>(decodeLimit - offset) },
                 std::span { codePoints.data() + nDec, static_cast<std::size_t>(codePointCapacity - nDec) }, &runBytes);
-            if (decoded <= 0)
-                break;
+            if (decoded <= 0) {
+                // A malformed sequence takes one U+FFFD for the lead and the
+                // continuations it accepts, and the run goes on from the byte
+                // that broke it, as the per-byte decoder would. A sequence the
+                // input ends inside, or one that only crosses the decode
+                // budget, is left whole for the path that carries it.
+                const int subpart = t.parser.invalidUTF8Policy == Ubiquitty::Unicode::InvalidUTF8Policy::FFFD
+                    ? malformedUTF8SubpartLength(buffer + offset, length - offset)
+                    : 0;
+                if (subpart == 0)
+                    break;
+                noteSubstitute(subpart);
+                codePoints[nDec++] = 0xFFFD;
+                offset += subpart;
+                continue;
+            }
+            if (hasSubstitutes)
+                noteDecodedLengths(nDec, decoded);
+            const int batchStart = nDec;
             nDec += decoded;
             offset += runBytes;
+            // A code point of a break class ends the run where the placement
+            // ends it: it may extend the cluster before it, which the
+            // per-character path owns. Decoding past it would read a row of
+            // text to place a word of it, and a decode with no such code point
+            // can take the narrow path whole. Only a batch led by text that
+            // can take that path is read for one: ideographs, kana, Hangul
+            // syllables and pictographs are placed by the wide and staged
+            // paths whichever way the batch ends, and the pass over a row of
+            // them costs a tenth of its lane, so a mark there is left to the
+            // budget.
+            if (codePoints[batchStart] < 0x3000) {
+                const int breakIndex = firstBreakClassCodePoint(std::span { codePoints.data() + batchStart, static_cast<std::size_t>(decoded) });
+                if (breakIndex >= 0) {
+                    for (int index = batchStart + breakIndex; index < nDec; ++index)
+                        offset -= byteLength(index);
+                    nDec = batchStart + breakIndex;
+                    break;
+                }
+            }
             // Wide-led text usually fills the row before exhausting this decode.
             // Place that prefix before decoding more; mixed-width text can
             // resume in another run without consuming any unplaced code point.
@@ -5933,6 +6096,8 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
                 std::span { buffer + offset, static_cast<std::size_t>(length - offset) },
                 std::span { codePoints.data() + nDec, std::size_t { 1 } }, &runBytes);
             if (decoded > 0) {
+                if (hasSubstitutes)
+                    noteDecodedLengths(nDec, decoded);
                 nDec += decoded;
                 offset += runBytes;
             }
@@ -5967,10 +6132,14 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
         nCells = wideCodePointCount * 2;
         lastLeadColumn = column + nCells - 2;
         lastCodePoint = codePoints[wideCodePointCount - 1];
+        lastByteLength = byteLength(wideCodePointCount - 1);
         wrapAfter = column + nCells - 1 == rightMargin;
-        for (int index = 0; index < wideCodePointCount; ++index)
-            p += codePoints[index] < 0x800 ? 2 : codePoints[index] < 0x10000 ? 3
-                                                                             : 4;
+        if (hasSubstitutes)
+            p += encodedLengthOfRun(0, wideCodePointCount);
+        else // no wide glyph is ASCII, and the three-way sum vectorises
+            for (int index = 0; index < wideCodePointCount; ++index)
+                p += codePoints[index] < 0x800 ? 2 : codePoints[index] < 0x10000 ? 3
+                                                                                 : 4;
     } else
         wideCodePointCount = 0;
 
@@ -5989,11 +6158,9 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
             nCells = narrowCodePointCount;
             lastLeadColumn = column + nCells - 1;
             lastCodePoint = codePoints[narrowCodePointCount - 1];
+            lastByteLength = byteLength(narrowCodePointCount - 1);
             wrapAfter = lastLeadColumn == rightMargin;
-            for (int index = 0; index < narrowCodePointCount; ++index)
-                p += codePoints[index] < 0x80 ? 1 : codePoints[index] < 0x800 ? 2
-                    : codePoints[index] < 0x10000                             ? 3
-                                                                              : 4;
+            p += encodedLengthOfRun(0, narrowCodePointCount);
         } else {
             verifiedNarrowPrefixCount = narrowCodePointCount;
             narrowCodePointCount = 0;
@@ -6012,6 +6179,8 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
         bool isEmojiPresentation = false;
         if (ci < verifiedNarrowPrefixCount)
             width = 1;
+        else if (codePoint < 0x80)
+            width = 1; // printable ASCII: the decode admits nothing else below it
         else if (isWideIdeographFast(codePoint)) {
             width = 2; // CJK/Kana/Hangul/compat — skip the table lookups
             assert(Ubiquitty::Unicode::Width::forCodePoint(codePoint, t.ambiguousWidth) == 2 && !Ubiquitty::Unicode::Width::isEmojiPresentation(codePoint));
@@ -6077,9 +6246,8 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
         }
         lastLeadColumn = currentColumn;
         lastCodePoint = codePoint;
-        p += (codePoint < 0x80) ? 1 : (codePoint < 0x800) ? 2
-            : (codePoint < 0x10000)                       ? 3
-                                                          : 4; // bytes for this seq
+        lastByteLength = byteLength(ci);
+        p += lastByteLength;
 
         // Equality is the only reachable >= case: the placement guard above
         // already broke on glyphEndColumn > rightMargin.
@@ -6102,9 +6270,7 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
             decodeBudget = nextTextRunDecodeBudget(decodeBudget, 0, decodedEnd - start);
             return 0;
         }
-        p -= lastCodePoint < 0x80 ? 1 : lastCodePoint < 0x800 ? 2
-            : lastCodePoint < 0x10000                         ? 3
-                                                              : 4;
+        p -= lastByteLength;
         if (wideCodePointCount) {
             --wideCodePointCount;
             lastLeadColumn = column + nCells - 2;
@@ -6573,7 +6739,7 @@ static void processByteInner(Ubiquitty::Terminal& t, uint8_t c, GraphicCapture c
     // truncated character is substituted here — before the control acts, and in
     // the order the stream described.
     if (t.parser.utf8.need > 0 && c < 0x80)
-        closeTruncatedUTF8(t);
+        closeTruncatedUTF8(t, c == '\r' || c == '\n' ? GraphicCapture::Discard : GraphicCapture::Retain);
 
     if (c == 0x9C && c1StringTerminatorEnabled(t)) {
         switch (t.parser.parseState) {
@@ -6766,7 +6932,10 @@ template<bool StopAtSyncClear, VT::GraphicCapture Capture> static int processByt
                             // code point or incomplete sequence, leaving those to the
                             // per-byte path. Gated off a pending single shift, which the
                             // per-character resolve consumes, and off raw GR graphic bytes.
-                            if (static_cast<unsigned char>(c) >= 0xC2 && t.singleShift == 0 && !VT::isGRGraphicByte(t, static_cast<uint8_t>(c))) {
+                            // A stray byte the run substitutes U+FFFD for starts
+                            // a run too: malformed text is mostly text.
+                            if ((static_cast<unsigned char>(c) >= 0xC2 || (static_cast<unsigned char>(c) >= 0x80 && t.parser.invalidUTF8Policy == Ubiquitty::Unicode::InvalidUTF8Policy::FFFD))
+                                && t.singleShift == 0 && !VT::isGRGraphicByte(t, static_cast<uint8_t>(c))) {
                                 int consumed = 0;
                                 if (VT::shouldPeekClusterLead(buffer, i, length) && VT::shouldRouteUTF8LeadToClusterRun(t, buffer, i, length))
                                     consumed = VT::emitClusterRun<Capture>(t, buffer, i, length); // emoji/combining

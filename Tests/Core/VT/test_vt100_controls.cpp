@@ -1636,6 +1636,70 @@ TEST(cancelCharacterAfterALoneGraphicMatchesBytewiseInputForEverySuccessor)
     }
 }
 
+TEST(cancelCharacterAfterMalformedUTF8MatchesBytewiseInputForEverySuccessor)
+{
+    // A malformed sequence's substitute is a graphic CCH can cancel, and it
+    // decides whether to journal itself from what follows it, as any graphic
+    // does. The successor that matters most is C2 94, CCH spelled in UTF-8,
+    // which re-feeds through the same recovery as the byte that broke the
+    // sequence. Bytewise input, which never sees a successor, is the reference.
+    for (const std::string_view malformed : { "\x80", "\xBF", "\xC3", "\xE2\x82", "\xC0\xAF", "\xE0\x80\xAF", "\xED\xA0\x80",
+             "\xF4\x90\x80\x80", "\xFE", "\xFF" }) {
+        for (const std::string_view successor : { "", "Y", "\r", "\n", "\xC3\xA9", "\xE7\x95\x8C", "\xC2\x94", "\xC2", "\xE7\x95",
+                 "\xFF", "\x80", "\033[31m", "\033", "\033P", "\t" }) {
+            for (const std::string_view tail : { "", "0123456789" }) {
+                const auto stream = "AB\033[m" + std::string(malformed) + std::string(successor) + "\033T" + std::string(tail);
+                Ubiquitty::Terminal whole;
+                Ubiquitty::Terminal bytewise;
+                for (auto* terminal : { &whole, &bytewise }) {
+                    Ubiquitty::hardReset(*terminal);
+                    Ubiquitty::resize(*terminal, 2, 24, Ubiquitty::Modes::ReflowMode::Fixed);
+                }
+                feed(whole, stream);
+                for (const char& byte : stream)
+                    feed(bytewise, { &byte, 1 });
+                CHECK_EQ(whole.screens.active->cursorX, bytewise.screens.active->cursorX);
+                CHECK_EQ(whole.screens.active->cursorY, bytewise.screens.active->cursorY);
+                for (int row = 0; row < 2; ++row) {
+                    for (int column = 0; column < 24; ++column) {
+                        const auto* actual = cell(whole, row, column);
+                        const auto* expected = cell(bytewise, row, column);
+                        CHECK_EQ(actual->codePoint, expected->codePoint);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(cancelCharacterAcrossEverySplitOfTextCarryingPrefilterBytesMatchesBytewiseInput)
+{
+    // A plain T or %, and a 0x94 that continues a UTF-8 sequence, are text:
+    // a chunk holding them still takes the batched path, and every split of
+    // the stream around them cancels the same graphic as bytewise input.
+    // U+4E14 ends in 0x94.
+    const std::string stream = "T%\xE4\xB8\x94X\033T";
+    Ubiquitty::Terminal bytewise;
+    Ubiquitty::hardReset(bytewise);
+    Ubiquitty::resize(bytewise, 2, 24, Ubiquitty::Modes::ReflowMode::Fixed);
+    for (const char& byte : stream)
+        feed(bytewise, { &byte, 1 });
+    CHECK_EQ(cell(bytewise, 0, 0)->codePoint, 'T');
+    CHECK_EQ(cell(bytewise, 0, 1)->codePoint, '%');
+    CHECK_EQ(cell(bytewise, 0, 2)->codePoint, 0x4E14u);
+    CHECK_EQ(cell(bytewise, 0, 4)->codePoint, 0u); // X was cancelled
+    for (std::size_t split = 0; split <= stream.size(); ++split) {
+        Ubiquitty::Terminal divided;
+        Ubiquitty::hardReset(divided);
+        Ubiquitty::resize(divided, 2, 24, Ubiquitty::Modes::ReflowMode::Fixed);
+        feed(divided, std::string_view(stream).substr(0, split));
+        feed(divided, std::string_view(stream).substr(split));
+        CHECK_EQ(divided.screens.active->cursorX, bytewise.screens.active->cursorX);
+        for (int column = 0; column < 24; ++column)
+            CHECK_EQ(cell(divided, 0, column)->codePoint, cell(bytewise, 0, column)->codePoint);
+    }
+}
+
 TEST(cancelUnicodeWrapPreservesHistoryAcrossInputBoundaries)
 {
     const auto prepare = [](Ubiquitty::Terminal& terminal, Ubiquitty::ScreenMode screen) {

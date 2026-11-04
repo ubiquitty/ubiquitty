@@ -18,7 +18,9 @@
 #include "Harness.h"
 #include "VT100Fixture.h"
 
-#include <cstdio>
+#include <algorithm>
+#include <cstring>
+#include <iterator>
 #include <memory>
 #include <string_view>
 
@@ -1571,6 +1573,65 @@ TEST(testTheSameBytesLandTheSameGridWhateverTheChunking)
         }
     }
     CHECK_EQ(mismatches, 0);
+}
+
+// The batched text run carries ASCII between and after its glyphs and
+// substitutes U+FFFD for malformed sequences itself; bytewise input, which
+// never batches, is the reference for what lands on the screen.
+TEST(mixedScriptAndMalformedTextMatchesBytewiseInput)
+{
+    static constexpr std::string_view pieces[] = { "ab", "x", "The", "%T", "   ", "\xC3\xA9", "\xC3\xBF", "\xE4\xB8\xAD", "\xE7\x95\x8C",
+        "\x80", "\xBF", "\xC3", "\xE2\x82", "\xC0\xAF", "\xE0\x80\xAF", "\xED\xA0\x80", "\xF4\x90\x80\x80", "\xFE", "\xFF",
+        "\xC2\x94", "\xF0\x9F\x98\x80", "e\xCC\x81", "\r\n", "\n", "\033[31m", "\033[m", "\t", "\xC2\xA0",
+        "\xCC\x81", "\xE2\x80\x8D", "\xF0\x9F\x87\xA6", "\xE0\xA4\xA8\xE0\xA5\x8D\xE0\xA4\xA4", "\xE1\x84\x80\xE1\x85\xA1", "\xD0\xB0\xCC\x88\xCC\x81" };
+    std::uint64_t state = 0x9E3779B97F4A7C15ull;
+    const auto next = [&state] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    };
+    for (int round = 0; round < 24; ++round) {
+        std::string stream;
+        for (int piece = 0; piece < 400; ++piece)
+            stream += pieces[next() % std::size(pieces)];
+        for (const int columns : { 80, 160 }) {
+            Ubiquitty::Terminal whole;
+            Ubiquitty::Terminal bytewise;
+            for (auto* terminal : { &whole, &bytewise }) {
+                Ubiquitty::hardReset(*terminal);
+                Ubiquitty::resize(*terminal, 6, columns, Ubiquitty::Modes::ReflowMode::Fixed);
+            }
+            Ubiquitty::processBytes(&whole, stream);
+            for (const char& byte : stream)
+                Ubiquitty::processBytes(&bytewise, std::string_view(&byte, 1));
+            CHECK_EQ(whole.screens.active->cursorX, bytewise.screens.active->cursorX);
+            CHECK_EQ(whole.screens.active->cursorY, bytewise.screens.active->cursorY);
+            CHECK_EQ(whole.screens.active->wrapPending, bytewise.screens.active->wrapPending);
+            // A cluster that overflows the cell is a pool handle, and the two
+            // histories hand out handles in their own order: compare what
+            // the handle resolves to, with everything else in the cell.
+            const auto sameCell = [](const Ubiquitty::Terminal& a, const Ubiquitty::Cell& x, const Ubiquitty::Terminal& b, const Ubiquitty::Cell& y) {
+                if (x.codePoint != y.codePoint || x.linkID() != y.linkID() || std::memcmp(&x.pen, &y.pen, sizeof x.pen) != 0)
+                    return false;
+                std::uint32_t xs[16];
+                std::uint32_t ys[16];
+                const int nx = Ubiquitty::cellClusterCodePoints(&a, &x, xs, 16);
+                const int ny = Ubiquitty::cellClusterCodePoints(&b, &y, ys, 16);
+                return nx == ny && std::equal(xs, xs + nx, ys);
+            };
+            int mismatches = 0;
+            for (int row = 0; row < 6; ++row) {
+                for (int column = 0; column < columns; ++column) {
+                    const auto actual = whole.grid->logicalCellValueAt(Ubiquitty::Row(row), Ubiquitty::Column(column));
+                    const auto expected = bytewise.grid->logicalCellValueAt(Ubiquitty::Row(row), Ubiquitty::Column(column));
+                    if (!actual || !expected || !sameCell(whole, *actual, bytewise, *expected))
+                        ++mismatches;
+                }
+            }
+            CHECK_MSG(mismatches == 0, "a batched mixed-script stream left cells that bytewise input did not");
+        }
+    }
 }
 
 UBIQUITTY_TEST_MAIN()
