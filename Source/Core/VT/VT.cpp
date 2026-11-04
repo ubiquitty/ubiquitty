@@ -5574,7 +5574,7 @@ static int emitASCIIFill(Ubiquitty::Terminal& t, uint8_t ch, int count)
 // members, so emitTextRun can skip the Width + emoji + grapheme lookups. The
 // tables stay authoritative for every other code point; emitTextRun's debug
 // assert pins these ranges so they can't drift.
-static inline bool isWideIdeographFast(uint32_t codePoint)
+[[gnu::always_inline]] static inline bool isWideIdeographFast(uint32_t codePoint)
 {
     return (codePoint >= 0x4E00 && codePoint <= 0x9FFF) // CJK Unified Ideographs
         || (codePoint >= 0x3400 && codePoint <= 0x4DBF) // CJK Extension A
@@ -5597,7 +5597,7 @@ static inline bool isPlainWideGraphic(uint32_t codePoint, Unicode::Width::Ambigu
 // Box-drawing + block elements (U+2500..259F): all width-1, never emoji, never
 // grapheme-relevant, so emitTextRun takes the width-1 path directly. The Width /
 // grapheme tables stay authoritative — a debug assert pins this range to them.
-static inline bool isNarrowGraphicFast(uint32_t codePoint) { return codePoint >= 0x2500 && codePoint <= 0x259F; }
+[[gnu::always_inline]] static inline bool isNarrowGraphicFast(uint32_t codePoint) { return codePoint >= 0x2500 && codePoint <= 0x259F; }
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 static inline bool isPlainNarrowGraphic(uint32_t codePoint, Unicode::Width::AmbiguousWidth ambiguousWidth)
@@ -5835,6 +5835,81 @@ static inline int nextTextRunDecodeBudget(int budget, int placedBytes, int decod
     return std::min(textRunUnlimitedDecodeBytes, 2 * budget);
 }
 
+/// Whether the next sixteen bytes are all multibyte text, which is the shape
+/// the batch decoder is for.
+[[gnu::always_inline]] static inline bool isLongMultibyteStretch(const char* bytes)
+{
+    std::uint64_t first;
+    std::uint64_t second;
+    std::memcpy(&first, bytes, sizeof first);
+    std::memcpy(&second, bytes + sizeof first, sizeof second);
+    constexpr std::uint64_t highBits = 0x8080808080808080ull;
+    return (first & second & highBits) == highBits;
+}
+
+/// Decodes a short stretch of multibyte sequences, stopping at the first byte
+/// below 0xC2, the first malformed sequence, an incomplete trailing sequence
+/// or `maxOut` code points; what it accepts and rejects is what utf8DecodeRun
+/// does. In line: the stretches that text mixing scripts is made of are one
+/// or two characters, where the batch decoder's setup costs more than the
+/// decode.
+///
+/// - Parameters:
+///   - input: The bytes, starting at a lead byte.
+///   - out: Receives the code points; its size bounds the decode.
+///   - bytesConsumed: Receives the bytes the returned code points stood for.
+/// - Returns: The number of code points decoded.
+[[gnu::always_inline]] static inline int decodeShortUTF8Stretch(std::span<const char> input, std::span<std::uint32_t> out, int* bytesConsumed)
+{
+    const char* in = input.data();
+    const int length = static_cast<int>(input.size());
+    const int maxOut = static_cast<int>(out.size());
+    int p = 0;
+    int n = 0;
+    while (p < length && n < maxOut) {
+        const auto b0 = static_cast<std::uint8_t>(in[p]);
+        if (b0 < 0xC2)
+            break;
+        if (b0 < 0xE0) {
+            if (length - p < 2)
+                break;
+            const auto b1 = static_cast<std::uint8_t>(in[p + 1]);
+            if ((b1 & 0xC0) != 0x80)
+                break;
+            out[n++] = (static_cast<std::uint32_t>(b0 & 0x1F) << 6) | (b1 & 0x3F);
+            p += 2;
+            continue;
+        }
+        if (b0 < 0xF0) {
+            if (length - p < 3)
+                break;
+            const auto b1 = static_cast<std::uint8_t>(in[p + 1]);
+            const auto b2 = static_cast<std::uint8_t>(in[p + 2]);
+            const std::uint8_t lowest = b0 == 0xE0 ? 0xA0 : 0x80;
+            const std::uint8_t highest = b0 == 0xED ? 0x9F : 0xBF;
+            if (b1 < lowest || b1 > highest || (b2 & 0xC0) != 0x80)
+                break;
+            out[n++] = (static_cast<std::uint32_t>(b0 & 0x0F) << 12) | (static_cast<std::uint32_t>(b1 & 0x3F) << 6) | (b2 & 0x3F);
+            p += 3;
+            continue;
+        }
+        if (b0 > 0xF4 || length - p < 4)
+            break;
+        const auto b1 = static_cast<std::uint8_t>(in[p + 1]);
+        const auto b2 = static_cast<std::uint8_t>(in[p + 2]);
+        const auto b3 = static_cast<std::uint8_t>(in[p + 3]);
+        const std::uint8_t lowest = b0 == 0xF0 ? 0x90 : 0x80;
+        const std::uint8_t highest = b0 == 0xF4 ? 0x8F : 0xBF;
+        if (b1 < lowest || b1 > highest || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80)
+            break;
+        out[n++] = (static_cast<std::uint32_t>(b0 & 0x07) << 18) | (static_cast<std::uint32_t>(b1 & 0x3F) << 12)
+            | (static_cast<std::uint32_t>(b2 & 0x3F) << 6) | (b3 & 0x3F);
+        p += 4;
+    }
+    *bytesConsumed = p;
+    return n;
+}
+
 /// The bytes one U+FFFD stands for at the start of a malformed sequence.
 ///
 /// The lead and the continuations it accepts, up to the byte that breaks the
@@ -6035,9 +6110,15 @@ template<GraphicCapture Capture> static int emitTextRun(Ubiquitty::Terminal& t, 
                 continue;
             }
             int runBytes = 0;
-            const int decoded = Ubiquitty::Unicode::utf8DecodeRun(
-                std::span { buffer + offset, static_cast<std::size_t>(decodeLimit - offset) },
-                std::span { codePoints.data() + nDec, static_cast<std::size_t>(codePointCapacity - nDec) }, &runBytes);
+            const int remaining = decodeLimit - offset;
+            // A long stretch is the batch decoder's; a short one, which is
+            // what text that mixes scripts is made of, is decoded in place.
+            const int decoded = remaining >= 16 && isLongMultibyteStretch(buffer + offset)
+                ? Ubiquitty::Unicode::utf8DecodeRun(
+                      std::span { buffer + offset, static_cast<std::size_t>(remaining) },
+                      std::span { codePoints.data() + nDec, static_cast<std::size_t>(codePointCapacity - nDec) }, &runBytes)
+                : decodeShortUTF8Stretch(std::span { buffer + offset, static_cast<std::size_t>(remaining) },
+                      std::span { codePoints.data() + nDec, static_cast<std::size_t>(codePointCapacity - nDec) }, &runBytes);
             if (decoded <= 0) {
                 // A malformed sequence takes one U+FFFD for the lead and the
                 // continuations it accepts, and the run goes on from the byte

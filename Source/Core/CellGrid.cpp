@@ -954,7 +954,7 @@ void CellGrid::setRowSpan(Row r, Column firstColumn, RowView span)
     // Changed: copy and detect blink/shape in one pass, with an unconditional store and no per-cell branch.
     Ubiquitty::VT::AttributeSet spanAttributes {};
     bool hasShape = false;
-    bool hasSizedCell = false;
+    std::uint8_t extendedRaw = 0;
     bool doesSpanDifferFromBlank = false;
     for (int c = lo; c <= hi; ++c) {
         const Cell& srcCell = src[c - lo];
@@ -968,11 +968,12 @@ void CellGrid::setRowSpan(Row r, Column firstColumn, RowView span)
         // them and the masking happens once.
         spanAttributes.add(cellPen(srcCell).attributes);
         hasShape |= Unicode::mayNeedShaping(srcCell.codePoint);
-        // Ored like the rest and not folded into spanAttributes: the
+        // Ored raw like the rest and not folded into spanAttributes: the
         // specification id is a subfield of the EXTENDED attributes, so the
-        // union above does not carry it.
-        hasSizedCell |= cellPen(srcCell).extendedAttributes.textSizeSpecID() != 0;
+        // union above does not carry it, and the field is read once below.
+        extendedRaw |= cellPen(srcCell).extendedAttributes.flags.toRaw();
     }
+    const bool hasSizedCell = Ubiquitty::VT::ExtendedAttributes::TextSizeSpecField::get(extendedRaw) != 0;
     // Blanks stored over a logically blank row: the physical bytes now match
     // what materializing would have written, and the hints stay untouched
     // exactly as the memcmp no-op lane leaves them.
@@ -1034,13 +1035,14 @@ void CellGrid::setRowSpan(ScreenMode screen, Row r, Column firstColumn, RowView 
     Cell* dst = rowPtrAtSlot(screenIndex, slot);
     Ubiquitty::VT::AttributeSet spanAttributes {};
     bool hasShape = false;
-    bool hasSizedCell = false;
+    std::uint8_t extendedRaw = 0;
     for (int c = lo; c <= hi; ++c) {
         dst[c] = src[c - lo];
         hasShape |= Unicode::mayNeedShaping(src[c - lo].codePoint);
         spanAttributes.add(cellPen(src[c - lo]).attributes);
-        hasSizedCell |= cellPen(src[c - lo]).extendedAttributes.textSizeSpecID() != 0;
+        extendedRaw |= cellPen(src[c - lo]).extendedAttributes.flags.toRaw();
     }
+    const bool hasSizedCell = Ubiquitty::VT::ExtendedAttributes::TextSizeSpecField::get(extendedRaw) != 0;
     noteFilledSlot(screenIndex, slot, hi + 1);
     // The inactive screen arms the sized hint though it does not arm the blink
     // one: a blink cell off screen animates nothing, while a sized cell off
