@@ -97,5 +97,6 @@ UbiquittyIOS.xcworkspace/xcuserdata/
 Tests/Snapshots/.ubiquitty-configs-*/
 Tests/Snapshots/.ubiquitty-regressions-*/
 Tests/Snapshots/.shim-snapshot-*
+Tests/Snapshots/.shim-fontconfig-*
 Tests/Snapshots/tmp*/
 Tests/Snapshots/tmp*

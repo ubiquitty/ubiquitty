@@ -79,7 +79,54 @@ STAGED_BASE=$(mktemp "$ROOT/Tests/Snapshots/.shim-snapshot-XXXXXX")
 rm -f "$STAGED_BASE"
 STAGED_ABSOLUTE="$STAGED_BASE.png"
 STAGED="Tests/Snapshots/${STAGED_ABSOLUTE##*/}"
-trap 'rm -f "$STAGED_BASE" "$STAGED_ABSOLUTE"' EXIT
+
+# The fontconfig the container renders with, staged inside the mount for the
+# same reason the output is: the container sees the repository and nothing of
+# the host's temporary directories.
+#
+# Two things the container would otherwise get wrong, both silent:
+#
+# The runner points FONTCONFIG_FILE at a host temporary file that registers
+# Tests/Snapshots/fixtures/fonts. Neither the variable nor that path reaches the
+# container, so a case naming a fixture face renders in whatever fontconfig
+# substitutes — a different face, and a frame that differs from the golden by a
+# glyph shape nobody will attribute to the environment. The runner's file is
+# carried in with its repository paths moved under /src and its host cache
+# directory replaced by one the container can write.
+#
+# The goldens are drawn with grayscale antialiasing and no LCD filter. The
+# image's Ubuntu fontconfig ships 10-sub-pixel-rgb.conf and
+# 11-lcdfilter-default.conf, so Pango draws RGB fringes into every proportional
+# run. Assigned after the system include, in both the pattern and font phases,
+# because a later assignment wins in either and the Ubuntu rule lives in the
+# system include.
+STAGED_FONTCONFIG_BASE=$(mktemp "$ROOT/Tests/Snapshots/.shim-fontconfig-XXXXXX")
+rm -f "$STAGED_FONTCONFIG_BASE"
+STAGED_FONTCONFIG_ABSOLUTE="$STAGED_FONTCONFIG_BASE.conf"
+STAGED_FONTCONFIG="Tests/Snapshots/${STAGED_FONTCONFIG_ABSOLUTE##*/}"
+trap 'rm -f "$STAGED_BASE" "$STAGED_ABSOLUTE" "$STAGED_FONTCONFIG_BASE" "$STAGED_FONTCONFIG_ABSOLUTE"' EXIT
+{
+    if [ -n "${FONTCONFIG_FILE:-}" ] && [ -f "$FONTCONFIG_FILE" ]; then
+        sed -e "s|$ROOT/|/src/|g" \
+            -e 's|<cachedir>[^<]*</cachedir>|<cachedir>/tmp/ubiquitty-fontconfig-cache</cachedir>|' \
+            -e '/<\/fontconfig>/d' "$FONTCONFIG_FILE"
+    else
+        printf '%s\n' \
+            '<?xml version="1.0"?>' \
+            '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">' \
+            '<fontconfig>' \
+            '  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>' \
+            '  <cachedir>/tmp/ubiquitty-fontconfig-cache</cachedir>'
+    fi
+    for target in pattern font; do
+        printf '%s\n' \
+            "  <match target=\"$target\">" \
+            '    <edit name="rgba" mode="assign"><const>none</const></edit>' \
+            '    <edit name="lcdfilter" mode="assign"><const>lcdnone</const></edit>' \
+            '  </match>'
+    done
+    printf '%s\n' '</fontconfig>'
+} > "$STAGED_FONTCONFIG_ABSOLUTE"
 
 # Rebuilt as positional parameters, never as a string. A feed is one argument
 # that contains newlines, and a command line assembled by quoting into a string
@@ -138,8 +185,9 @@ fi
 # file, and printed with the refusal below when no frame came back. A failure
 # whose only record is "no file" is a failure nobody can read.
 RENDER_OUTPUT=$("$ROOT/Scripts/run-linux.sh" sh -c \
-    'xvfb-run -a "$0" "$@" 2>&1 | grep -viE "Gdk-WARNING|powervr|drm devices|Loader Message" || true' \
-    "./$CONTAINER_BINARY" --snapshot "/src/$STAGED" "$@" 2>&1) || true
+    'fontconfig=$0; binary=$1; shift
+     FONTCONFIG_FILE=$fontconfig xvfb-run -a "$binary" "$@" 2>&1 | grep -viE "Gdk-WARNING|powervr|drm devices|Loader Message" || true' \
+    "/src/$STAGED_FONTCONFIG" "./$CONTAINER_BINARY" --snapshot "/src/$STAGED" "$@" 2>&1) || true
 if [ -n "${UBIQUITTY_SHIM_LOG:-}" ]; then
     printf '%s\n--\n' "$RENDER_OUTPUT" >> "$UBIQUITTY_SHIM_LOG"
 fi
