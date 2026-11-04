@@ -135,6 +135,11 @@ def isCallSite(prefix):
     trimmed = prefix.rstrip()
     if not trimmed:
         return True
+    # A name right after a separator or an opener stands in an expression: an
+    # argument, an initializer element, a subscript, the right of an
+    # assignment or a condition. No declaration of an operation reads so.
+    if trimmed[-1] in ",({[=?!":
+        return True
     match = re.search(r"([A-Za-z_][\w<>:,\s]*?)[\s*&]+$", prefix)
     if match is None:
         return True
@@ -231,6 +236,8 @@ def selfTest():
         failures.append("a recorded operation that gained a caller was not flagged")
     if judge(operations, shipping + "\nvoid setPrintSinkPath(Terminal* t, const char* s);"):
         failures.append("a declaration line was counted as a caller")
+    if not judge(operations, shipping + "\nlink.publish({ term.epoch, setPrintSinkPath(t, s) });"):
+        failures.append("a call standing as an initializer element was not counted")
 
     headerText = Path(HEADER).read_text()
     parsed = declaredOperations(headerText)
