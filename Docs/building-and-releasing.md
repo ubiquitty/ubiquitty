@@ -708,6 +708,31 @@ them. It imports no disk-space and no active-keyboard API.
   renewed by `Scripts/pgo-retrain-check.sh --retrain` weekly or when the gate
   warns; `Support/pgo/README.md` has the rules.
 
+### Linux arms of the pre-push hook from a Mac
+
+The hook's Linux arms (the GTK smokes, the frontend compile, the Core and host
+suite of the `linux` tier, and the Linux snapshot arm) run in an arm64 Ubuntu
+container on a Mac. The Linux goldens are minted on a native x86_64 host, so a
+clone can name one instead:
+
+```sh
+git config ubiquitty.linuxHost <ssh host>   # standing choice for this clone and its worktrees
+UBIQUITTY_LINUX_HOST=<ssh host> git push    # one push; an empty value forces the container
+```
+
+`Scripts/linux-host.sh` runs those arms as the CI stages `quic`, `host-tests`,
+`linux-build`, `linux-smokes` and `linux-snapshots` (`ci_batteries.py run linux
+--only <stage>`) on the host. It syncs the tree, uncommitted edits included, to a
+per-run directory under `~/ubiquitty-linux-runs` on the host, brings the stage logs
+and any snapshot failure images back, and removes the directory afterwards, also
+when a stage fails or the push is interrupted. The host's own Vulkan driver is
+used (`UBQ_CI_LINUX_VULKAN=native`), because lavapipe, which CI forces on hosted
+runners, cannot export dma-buf. The host needs the packages the "GTK/Vulkan toolchain"
+stage of `ci_batteries.py` checks for, `rsync`, `ccache` and 10 GB free under its home (`UBQ_LINUX_HOST_MIN_FREE_GB`).
+With no host configured, or one that does not answer `ssh -o BatchMode=yes` within five seconds,
+the hook says so and uses the container. The container's snapshot arm differs from
+the goldens by font files and is not a substitute for the host's verdict.
+
 ### Build
 ```sh
 ./Scripts/build-linux-gtk.sh            # Debug, quiet

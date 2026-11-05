@@ -30,7 +30,12 @@
 # relevant build environment, and toolchain identity; failures and skips are
 # never cached. Set UBIQUITTY_PREPUSH_CACHE=off to force every selected gate.
 #
-# The linux tier runs through Scripts/run-linux.sh, so the Linux-only breaks a
+# Every Linux arm runs on a native Linux host when this clone names one that
+# answers ssh (git config ubiquitty.linuxHost; UBIQUITTY_LINUX_HOST overrides it
+# for one push), through Scripts/linux-host.sh, and otherwise in the container.
+# The hook prints which it used. The goldens are minted on a native host.
+#
+# The container arm runs through Scripts/run-linux.sh, so the Linux-only breaks a
 # macOS compiler never sees are caught here: libstdc++ against libc++, GNU ld's
 # left-to-right archive scan against Apple's whole-set search, -Werror arms gcc
 # raises and clang does not, all of which reach main when nothing compiles that
@@ -321,7 +326,28 @@ gate_pgo_drift() {
     run "pgo total drift" python3 Scripts/check-pgo-applies.py --recorded-budget
 }
 
-# ci.yml: host-linux + linux-frontend. Needs Docker (OrbStack or Docker Desktop); absent is SKIPPED.
+# Where the Linux arms run, decided once per push: a Linux host that answers ssh
+# (git config ubiquitty.linuxHost, or UBIQUITTY_LINUX_HOST), else the container
+# on this machine. The goldens are minted on a native host, so a native host is
+# the machine whose renders agree with them; the container is the fallback and
+# differs from them by font files. Sets UBQ_LINUX_HOST_ROUTE, which the gates
+# this hook starts (check-style's GTK smokes) read instead of asking again, and
+# UBQ_LINUX_HOST, empty for the container. Called in the main shell: a command
+# substitution would lose the assignments.
+ubq_linux_route() {
+    if [ -z "${UBQ_LINUX_HOST_ROUTE:-}" ]; then
+        UBQ_LINUX_HOST_ROUTE="$("$ROOT/Scripts/linux-host.sh" route)"
+        export UBQ_LINUX_HOST_ROUTE
+        printf '  %-34s %s\n' "linux arms run on" "$UBQ_LINUX_HOST_ROUTE"
+    fi
+    UBQ_LINUX_HOST=""
+    case "$UBQ_LINUX_HOST_ROUTE" in
+        "host "*) UBQ_LINUX_HOST="${UBQ_LINUX_HOST_ROUTE#host }" ;;
+    esac
+}
+
+# ci.yml: host-linux + linux-frontend. Needs Docker (OrbStack or Docker Desktop) or a
+# Linux host (Scripts/linux-host.sh); neither is SKIPPED.
 # The container runtime takes a whole core for the length of both builds, so a
 # loaded machine may switch it off.
 #
@@ -337,6 +363,14 @@ gate_linux() {
     if [ "${UBIQUITTY_LINUX_GATE:-on}" = "off" ]; then
         SKIPPED+=("linux build (paused; UBIQUITTY_LINUX_GATE=off pauses it)")
         printf '  %-34s %s\n' "linux build" "PAUSED (UBIQUITTY_LINUX_GATE=off)"
+        return
+    fi
+    ubq_linux_route
+    if [ -n "$UBQ_LINUX_HOST" ]; then
+        # CI's own stages, in CI's order: the QUIC dependencies, then the host
+        # suite that links them, then the frontend.
+        run "Core + host on Linux ($UBQ_LINUX_HOST)" ./Scripts/linux-host.sh stages quic host-tests
+        run "GTK frontend on Linux ($UBQ_LINUX_HOST)" ./Scripts/linux-host.sh stages linux-build
         return
     fi
     if ! command -v docker >/dev/null 2>&1; then
@@ -370,6 +404,15 @@ gate_linux_compile() {
     if [ "${UBIQUITTY_LINUX_GATE:-on}" = "off" ]; then
         SKIPPED+=("linux compile (paused; UBIQUITTY_LINUX_GATE=off pauses it)")
         printf '  %-34s %s\n' "linux compile" "PAUSED (UBIQUITTY_LINUX_GATE=off)"
+        return
+    fi
+    ubq_linux_route
+    if [ -n "$UBQ_LINUX_HOST" ]; then
+        # The host has no warm tree to be cold: its compiler cache is shared by
+        # every run directory, so the build is the stage CI runs.
+        run_scoped "GTK frontend compiles on Linux ($UBQ_LINUX_HOST)" \
+            "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/linux-host.sh Scripts/ci_batteries.py Scripts/gate_framework.py Scripts/fetch-quic-deps.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/check-linux-build-prerequisites.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
+            ./Scripts/linux-host.sh stages linux-build
         return
     fi
     if ! command -v docker >/dev/null 2>&1; then
@@ -520,6 +563,16 @@ gate_renderer_snapshots() {
             SKIPPED+=("snapshot arm: linux (paused; UBIQUITTY_LINUX_GATE=off pauses it)")
             continue
         fi
+        # The linux arm renders where the hook's Linux arms run (ubq_linux_route).
+        # On a Linux host it is CI's own pair of stages, the build and the
+        # native render, and nothing there can be a stale binary: it is built
+        # from this tree first.
+        local arm_host=""
+        if [ "$arm" = "linux" ]; then
+            ubq_linux_route
+            arm_host="$UBQ_LINUX_HOST"
+            [ -z "$arm_host" ] || printf '  %-34s %s\n' "snapshot arm: linux" "rendering on $arm_host"
+        fi
         # One arm needs its invocation as well as its name. build/linux/ is the
         # path INSIDE the container; on the host the module is under
         # build/linux-container/linux/, and the shim is what bridges the two and
@@ -538,8 +591,12 @@ gate_renderer_snapshots() {
         # "${extra[@]}" as unbound and kills the hook on a stock-bash host. The
         # +-expansion form expands to nothing when the array is empty and to
         # the elements when it is not, on every bash this repository meets.
-        python3 "$ROOT/Tests/Snapshots/run.py" --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
-        if [ "$status" = "2" ]; then
+        if [ -n "$arm_host" ]; then
+            "$ROOT/Scripts/linux-host.sh" stages linux-build linux-snapshots >"$arm_log" 2>&1 || status=$?
+        else
+            python3 "$ROOT/Tests/Snapshots/run.py" --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
+        fi
+        if [ "$status" = "2" ] && [ -z "$arm_host" ]; then
             # One rebuild before refusing. The commonest status-2 cause is a
             # binary staled by a rebase, a checkout or a fresh worktree — the
             # reader's mechanical response is the printed rebuild command, so
@@ -879,12 +936,19 @@ gate_forks() {
 UBQ_CI_ROOT="${TMPDIR:-/tmp}"
 UBQ_CI_ROOT="$(mktemp -d "${UBQ_CI_ROOT%/}/ubiquitty-ci-XXXXXX")" || exit 1
 export UBQ_CI_ROOT
+# The Linux arms that run on a Linux host share one remote tree and build for
+# the length of this run (Scripts/linux-host.sh); the exit trap below removes it.
+UBQ_LINUX_HOST_RUN="push-$$-$(date +%s)"
+export UBQ_LINUX_HOST_RUN
 
 # On exit rather than at the two verdicts, so an interrupted push or a run
 # that set -u ends does not leave a root behind either. An interrupt exits
 # with its own status, so it reads as the failure it is rather than as a pass.
 ubq_ci_root_finish() {
     local status=$?
+    # The remote directory a Linux host run made, when one did; a no-op when no
+    # Linux arm ran there. Before the artifact root goes, which records it.
+    "$ROOT/Scripts/linux-host.sh" release >/dev/null 2>&1 || true
     # Kept only when a failed run left something in it; an empty root names
     # nothing a reader could open.
     if [ "$status" -ne 0 ] && [ -n "$(ls -A "$UBQ_CI_ROOT" 2>/dev/null)" ]; then

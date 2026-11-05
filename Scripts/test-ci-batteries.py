@@ -247,6 +247,16 @@ class BatteryTests(unittest.TestCase):
             apple = batteries.platform_environment("apple", {"RUNNER_TEMP": "/temporary"})
         self.assertEqual(apple["UBQ_TEST_FAIL_FAST"], "1")
 
+    def test_linux_vulkan_is_lavapipe_unless_the_machine_names_its_own_driver(self):
+        base = {"RUNNER_WORKSPACE": "/runner", "RUNNER_TEMP": "/temporary",
+                "RUNNER_TOOL_CACHE": "/tools", "PATH": "/bin"}
+        software = batteries.platform_environment("linux", dict(base))
+        self.assertIn("lvp_icd", software["VK_ICD_FILENAMES"])
+        self.assertEqual(software["LIBGL_ALWAYS_SOFTWARE"], "1")
+        native = batteries.platform_environment("linux", dict(base, UBQ_CI_LINUX_VULKAN="native"))
+        self.assertNotIn("VK_ICD_FILENAMES", native)
+        self.assertNotIn("LIBGL_ALWAYS_SOFTWARE", native)
+
     def test_equivalent_cached_gcc_spelling_is_retained(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "BuildHostTests/ctest/CMakeCache.txt"
@@ -330,6 +340,15 @@ class BatteryTests(unittest.TestCase):
             self.assertEqual(finding["file"], "Tests/aggregate.cpp")
             self.assertEqual(finding["line"], 3)
             self.assertEqual(finding["gate"], "check-aggregate-cases")
+
+    def test_only_selects_named_stages_in_manifest_order_and_refuses_unknown_keys(self):
+        manifest = batteries.stages("linux")
+        selected = batteries.select_stages(manifest, ["linux-smokes", "linux-build"])
+        self.assertEqual([stage.key for stage in selected], ["linux-build", "linux-smokes"])
+        self.assertEqual(selected[0].command, next(
+            stage.command for stage in manifest if stage.key == "linux-build"))
+        with self.assertRaises(ValueError):
+            batteries.select_stages(manifest, ["linux-build", "linux-bulid"])
 
     def test_first_failure_stops_and_records_remaining_stages(self):
         manifest = tuple(batteries.Stage(str(index), f"stage {index}", "true") for index in range(4))

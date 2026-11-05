@@ -9234,6 +9234,14 @@ if wanted build_wrappers; then
     python3 "$ROOT/Scripts/test-build-wrappers.py" || exit 1
 fi
 
+# The Linux host route, against a stand-in ssh and rsync: which machine a
+# Linux arm runs on, and that the remote directory goes whatever the stage did.
+if wanted linux_host; then
+    echo "=== linux_host ==="
+    RAN=$((RAN + 1))
+    python3 "$ROOT/Scripts/test-linux-host.py" || exit 1
+fi
+
 # Build lanes against a throwaway repository: lock contention, a worktree's
 # uncommitted changes, a dirty lane reset, release on failure and on a signal,
 # and clean-build-roots keeping lane roots. Nothing is compiled.

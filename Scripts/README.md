@@ -78,6 +78,7 @@ Running the test suites and the harnesses they use. See [Tests](../Tests/README.
 | [`ios-simulator.sh`](ios-simulator.sh) | The simulator a checkout owns: found or made, booted for the run, and shut down again when the run that booted it ends. |
 | [`ios-snapshot-shim.sh`](ios-snapshot-shim.sh) | Renders a snapshot inside the iOS simulator app and copies the PNG out. |
 | [`ligature-determinism.py`](ligature-determinism.py) | Holds a busy screen to one rendering of the text that did not change. |
+| [`linux-host.sh`](linux-host.sh) | Runs CI's Linux stages on a native Linux host over ssh, from a synced per-run directory that is removed afterwards; the hook's Linux arms use it when `ubiquitty.linuxHost` names a host that answers. |
 | [`linux-snapshot-shim.sh`](linux-snapshot-shim.sh) | The Linux renderer, callable from a Mac. |
 | [`mutate.py`](mutate.py) | Applies one source mutation for check-mutants.sh. |
 | [`record-pty-corpus.sh`](record-pty-corpus.sh) | Re-record the real-program entries of the Sync corpus. |
@@ -116,6 +117,7 @@ Running the test suites and the harnesses they use. See [Tests](../Tests/README.
 | [`test-gate-subjects.py`](test-gate-subjects.py) | Tests probe ownership, isolation, discovery, and refusal in gate_subjects.py. |
 | [`test-install-hooks.sh`](test-install-hooks.sh) | The hook install, against a throwaway clone with a linked worktree. |
 | [`test-libubiquittycore-package.sh`](test-libubiquittycore-package.sh) | Builds, installs, and consumes the Core and Kit package from a relocated prefix. |
+| [`test-linux-host.py`](test-linux-host.py) | Tests the Linux host route against a stand-in ssh and rsync. |
 | [`test-personal-paths.py`](test-personal-paths.py) | Tests notice attribution allowances in the privacy gate. |
 | [`test-run-hygiene.py`](test-run-hygiene.py) | Checks what a test run leaves behind: processes and files in the user's state directory. |
 | [`test-run-hygiene.sh`](test-run-hygiene.sh) | Sourced by tests that start processes, so a run leaves nothing behind. |

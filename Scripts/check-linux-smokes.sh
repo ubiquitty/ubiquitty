@@ -74,6 +74,29 @@ if [ "${UBIQUITTY_LINUX_GATE:-on}" = "off" ]; then
     reportSkip "the Linux container is paused (UBIQUITTY_LINUX_GATE=off pauses it)."
 fi
 
+# A Linux host that answers (Scripts/linux-host.sh) runs CI's own two stages, the
+# frontend build and the smoke battery, on a machine with a GPU driver the
+# dma-buf smokes need. The container logic below is for a machine with no host:
+# it checks a binary built in this checkout's container, and here the binary is
+# built from this tree on the host, so there is nothing stale to guard against.
+linuxRoute="${UBQ_LINUX_HOST_ROUTE:-$("$ROOT/Scripts/linux-host.sh" route)}"
+case "$linuxRoute" in
+    "host "*)
+        linuxHost="${linuxRoute#host }"
+        hostLog="$(mktemp)"
+        if "$ROOT/Scripts/linux-host.sh" stages linux-build linux-smokes >"$hostLog" 2>&1; then
+            hostSummary="$(grep -E '^run-linux-smokes: [0-9]+ passed' "$hostLog" | tail -n 1 | sed 's/^run-linux-smokes: //')"
+            rm -f "$hostLog"
+            echo "check-linux-smokes: ok (on $linuxHost: $hostSummary; no verdict/exit disagreements or silent verdicts)"
+            exit 0
+        fi
+        grep -vE '^  ok ' "$hostLog" | tail -n 60 >&2
+        rm -f "$hostLog"
+        echo "check-linux-smokes: FAILED — the GTK smokes did not all pass on $linuxHost." >&2
+        exit 1
+        ;;
+esac
+
 if ! command -v docker >/dev/null 2>&1; then
     reportSkip "docker is not installed (install OrbStack or Docker Desktop), so the GTK build cannot run."
 fi
