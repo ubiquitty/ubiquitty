@@ -27,7 +27,13 @@ the artifact reader agree whatever started them. Unset, the root is
 RUNNER_TEMP; two batteries run by hand at once share that one, so a driver
 that runs more than one at a time sets `UBQ_CI_ROOT` (the pre-push gate does).
 
+`run --only <stage>` runs just the named stages, in manifest order, with the
+same environment, commands and logs the whole battery gives them. A machine that
+stands in for the CI runner for part of a push (Scripts/linux-host.sh) runs the
+stages it covers this way, so the commands it runs are CI's own.
+
 Usage: python3 Scripts/ci_batteries.py run|report|list preflight|linux|apple
+       python3 Scripts/ci_batteries.py run linux --only linux-build --only linux-smokes
 """
 
 import argparse
@@ -228,6 +234,19 @@ python3 Scripts/test-ci-batteries.py --workflow .github/workflows/ci.yml'''),
     raise ValueError(f"unknown battery: {platform}")
 
 
+def select_stages(manifest, keys):
+    """The manifest's stages named by keys, in manifest order.
+
+    An unknown key is an error rather than an empty selection: a stage renamed
+    in the manifest would otherwise leave a caller running nothing and passing.
+    """
+    known = {stage.key for stage in manifest}
+    unknown = [key for key in keys if key not in known]
+    if unknown:
+        raise ValueError(f"unknown stage: {', '.join(unknown)} (have: {', '.join(sorted(known))})")
+    return tuple(stage for stage in manifest if stage.key in keys)
+
+
 def condition_reason(stage, environment, which=shutil.which):
     if stage.condition == "code" and environment.get("UBQ_CI_CODE", "true") != "true":
         return "change contains only snapshot goldens"
@@ -261,8 +280,13 @@ def platform_environment(platform, environment):
     if platform == "linux":
         result["UBQ_BUILD_ROOT"] = str(Path(result["RUNNER_WORKSPACE"]) / "build")
         result["CC"], result["CXX"] = "gcc", "g++"
-        result["VK_ICD_FILENAMES"] = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
-        result["LIBGL_ALWAYS_SOFTWARE"] = "1"
+        # Mesa's lavapipe, because a hosted runner has no GPU. A machine that
+        # has one sets UBQ_CI_LINUX_VULKAN=native and runs its own driver:
+        # lavapipe cannot export dma-buf, so the dma-buf smokes fail on it
+        # whatever the tree does.
+        if result.get("UBQ_CI_LINUX_VULKAN") != "native":
+            result["VK_ICD_FILENAMES"] = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
+            result["LIBGL_ALWAYS_SOFTWARE"] = "1"
         installed = Path("/data/emsdk/emsdk_env.sh")
         result["EMSDK_ENV"] = str(installed if installed.is_file() else Path(result["RUNNER_TOOL_CACHE"]) / "emsdk-6.0.9/emsdk_env.sh")
     else:
@@ -587,8 +611,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("run", "report", "list"))
     parser.add_argument("platform", choices=("preflight", "linux", "apple"))
+    parser.add_argument("--only", action="append", default=[], metavar="STAGE",
+                        help="with run: execute only this stage (repeatable)")
     arguments = parser.parse_args()
     manifest = stages(arguments.platform)
+    if arguments.only:
+        if arguments.operation != "run":
+            parser.error("--only applies to run")
+        try:
+            manifest = select_stages(manifest, arguments.only)
+        except ValueError as error:
+            parser.error(str(error))
     if arguments.operation == "list":
         for stage in manifest:
             print(f"{stage.key}: {stage.label} [{stage.condition}; {stage.toolchain}]")
