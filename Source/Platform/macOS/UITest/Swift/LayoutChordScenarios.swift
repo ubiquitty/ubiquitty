@@ -316,23 +316,64 @@ enum LayoutChordScenarios {
                 (0x21, 0x5B, "ANSI LeftBracket reports '['"),
                 (0x2C, 0x2F, "ANSI Slash reports '/'"),
                 (0x32, 0x60, "ANSI Grave reports '`'"),
+                (0x0A, 0x60, "ISO Section, the top-left key of an ISO keyboard, reports '`'"),
                 (0x7A, 0, "F1 has no US printable identity and reports 0"),
             ]
             for row in table {
-                let reported = KeyboardLayout.usANSICharacter(forKeyCode: row.keyCode)
+                let reported = KeyboardLayout.usANSICharacter(forKeyCode: row.keyCode, isISOKeyboard: false)
                 t.expect(Int(reported), equals: Int(row.expected), desc: row.name)
             }
+            // The key beside left Shift on an ISO keyboard reports the ANSI
+            // grave code and carries no PC-101 character of its own.
+            t.expect(
+                Int(KeyboardLayout.usANSICharacter(forKeyCode: 0x32, isISOKeyboard: true)),
+                equals: 0x3C,
+                desc: "the ISO key beside left Shift reports '<'"
+            )
             // A Latin layout's own letter is never asked of the ASCII-capable
             // layout: German z on the US Y key, and French a on the US Q key,
             // report the position, whatever layout the runner has selected.
             for (keyCode, letter, position) in [(UInt16(0x10), UInt32(0x7A), UInt32(0x79)), (0x0C, 0x61, 0x71)] {
-                let reported = KeyboardLayout.baseLayoutCharacter(forKeyCode: keyCode, unshifted: letter, shifted: letter)
+                let reported = KeyboardLayout.baseLayoutCharacter(
+                    forKeyCode: keyCode,
+                    unshifted: letter,
+                    shifted: letter,
+                    isISOKeyboard: false
+                )
                 t.expect(
                     Int(reported),
                     equals: Int(position),
                     desc: "a Latin letter on key \(String(keyCode, radix: 16)) reports the US position"
                 )
             }
+            // A key whose unshifted character is ASCII and whose shifted one
+            // is not still reports its position: French `)` on the US minus
+            // key (shifted `°`), and German `3` on the US 3 key (shifted `§`).
+            // Whatever the runner's ASCII-capable layout is, the answer is the
+            // US character, never the active layout's own `)`.
+            for (keyCode, unshifted, shifted, position) in [
+                (UInt16(0x1B), UInt32(0x29), UInt32(0xB0), UInt32(0x2D)),
+                (0x14, 0x33, 0xA7, 0x33),
+            ] {
+                let reported = KeyboardLayout.baseLayoutCharacter(
+                    forKeyCode: keyCode,
+                    unshifted: unshifted,
+                    shifted: shifted,
+                    isISOKeyboard: false
+                )
+                t.expect(
+                    Int(reported),
+                    equals: Int(position),
+                    desc: "an ASCII key with a non-ASCII shifted character on key \(String(keyCode, radix: 16)) reports the US position"
+                )
+            }
+            // A key beyond ASCII under a Latin layout reports the US position
+            // too: German ü on the US [ key.
+            t.expect(
+                Int(KeyboardLayout.baseLayoutCharacter(forKeyCode: 0x21, unshifted: 0xFC, shifted: 0xDC, isISOKeyboard: false)),
+                equals: 0x5B,
+                desc: "German ü reports the US '[' position"
+            )
         }
 
         UBUITestRegister("swift_shell_chords_follow_the_key_across_a_layout_switch") { context in
