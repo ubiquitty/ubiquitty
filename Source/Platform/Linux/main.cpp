@@ -13789,11 +13789,16 @@ int smokeImageVulkanPlaceholders()
         g_printerr("smoke-image-vk-placeholders: CPU rasterize failed\n");
         return 1;
     }
-    // The centre of the first block's first cell: row 2, column 3.
+    // The centre of the red tile, the image's top-left quarter, in the first
+    // block, whose box starts at row 2, column 3. The square image is fitted
+    // into its 2x2 box of cells with its aspect kept and centred on the axis
+    // it does not fill, so in a cell that is not square the tile is off the
+    // first cell's centre.
     const int cellWidth = app().rasterContext.cellWidth();
     const int cellHeight = app().rasterContext.cellHeight();
-    const int sampleX = 2 * cellWidth + cellWidth / 2;
-    const int sampleY = 1 * cellHeight + cellHeight / 2;
+    const int imageSide = 2 * std::min(cellWidth, cellHeight);
+    const int sampleX = 2 * cellWidth + (2 * cellWidth - imageSide) / 2 + imageSide / 4;
+    const int sampleY = 1 * cellHeight + (2 * cellHeight - imageSide) / 2 + imageSide / 4;
     if (sampleX >= width || sampleY >= height) {
         g_printerr("smoke-image-vk-placeholders: the frame is smaller than the block\n");
         return 1;
