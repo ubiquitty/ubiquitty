@@ -1667,6 +1667,9 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     # archives twice when their module dependencies also autolink them.
     target_link_libraries(ubiquitty-core-ios-link PRIVATE UbiquittyKitModule)
     set_property(TARGET ubiquitty-core-ios-link PROPERTY LINKER_LANGUAGE Swift)
+    # The C++-only probe uses Swift's driver, which supplies libc++ when
+    # interoperability is explicit, as it is for the app and framework.
+    target_link_options(ubiquitty-core-ios-link PRIVATE -cxx-interoperability-mode=default)
 
     set(UBIQUITTY_IOS_APP_SOURCES
         Source/Platform/iOS/App/UbiquittyApp.swift
@@ -1776,12 +1779,6 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     add_executable(UbiquittyIOSApp MACOSX_BUNDLE ${UBIQUITTY_IOS_APP_SOURCES})
     ubiquitty_ios_swift_whole_module(UbiquittyIOSApp)
     ubiquitty_bundle_license_notices(UbiquittyIOSApp)
-    # The target mixes CXX and Swift; CMake links it through swiftc and appends
-    # the implicit C++ stdlib for the CXX side too, so "-lc++" lands on the link
-    # line twice and ld warns "ignoring duplicate libraries" — the same doubling
-    # the macOS app silences the same way (Source/Platform/macOS/CMakeLists.txt).
-    target_link_options(UbiquittyIOSApp PRIVATE
-        "SHELL:-Xlinker -no_warn_duplicate_libraries")
     # Every file BundledFonts.h names. A family in that table whose file is not
     # here resolves to a path that does not exist, and the frontend does not
     # stop there: it falls through to the embedded Unifont, which renders, so

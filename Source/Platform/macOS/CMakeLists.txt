@@ -1160,15 +1160,6 @@ elseif(UBIQUITTY_SPARKLE)
         "Run Scripts/fetch-sparkle.sh to enable it.")
 endif()
 
-# The target mixes CXX and Swift; CMake links it through swiftc, which brings
-# the C++ stdlib for its interop while CMake appends CXX's implicit one, so
-# "-lc++" can land on the link line twice and ld warns "ignoring duplicate
-# libraries". The dup is harmless (ld drops the second), but pruning CMake's
-# per-language implicit libs is brittle — silence it at the linker instead. swiftc forwards via
-# -Xlinker; SHELL: keeps the flag pair intact through CMake de-duplication.
-target_link_options(Ubiquitty PRIVATE
-    "SHELL:-Xlinker -no_warn_duplicate_libraries")
-
 # ThinLTO defers code generation to the link, so a C-family .o holds bitcode
 # and carries no DWARF: the debug map's OSO entries name the object files ld64
 # writes for the LTO backend instead of the ones the compiler produced. Those
