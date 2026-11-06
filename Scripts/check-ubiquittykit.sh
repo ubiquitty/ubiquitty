@@ -1433,7 +1433,7 @@ xcrun swiftc "$CLEAR_DIR/main.swift" \
     -framework UbiquittyKit \
     -Xlinker -rpath -Xlinker "$FRAMEWORK_DIR"
 
-"$CLEAR_DIR/clear-consumer" "$CLEAR_DIR/pane-program" "$CLEAR_DIR/input"
+run_consumer "$CLEAR_DIR/clear-consumer" "$CLEAR_DIR/pane-program" "$CLEAR_DIR/input"
 echo "check-ubiquittykit: ok (external consumer ran Clear Buffer, Clear Scrollback and Clear Screen)"
 
 # The generated header and archive this build just produced are the only place a
