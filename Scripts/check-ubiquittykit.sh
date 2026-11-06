@@ -2543,7 +2543,10 @@ xcrun swiftc "$HOST_DIR/resize.swift" \
 
 RESIZE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/ubiquittykit-resize.XXXXXX")"
 resize_status=0
-env -i HOME="$RESIZE_HOME" TMPDIR="$RESIZE_HOME" PATH=/usr/bin:/bin "$HOST_DIR/resize-consumer" || resize_status=$?
+# AppKit's view animator follows the display even in this covered window.
+# Wake a sleeping display and keep it awake only while the consumer runs;
+# otherwise its frame animation never starts and the five-second check fails.
+/usr/bin/caffeinate -du env -i HOME="$RESIZE_HOME" TMPDIR="$RESIZE_HOME" PATH=/usr/bin:/bin "$HOST_DIR/resize-consumer" || resize_status=$?
 rm -rf "$RESIZE_HOME"
 [ "$resize_status" -eq 0 ] || exit "$resize_status"
 echo "check-ubiquittykit: ok (panes moved in code reported each grid once, settled on the grid of their final frame, and kept a picture of their text)"
