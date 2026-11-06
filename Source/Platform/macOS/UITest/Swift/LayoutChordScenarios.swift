@@ -303,6 +303,38 @@ private enum InputSource {
 enum LayoutChordScenarios {
     /// Registers every scenario in this file.
     static func register() {
+        // The Kitty base-layout key is the physical key's US (ANSI) identity
+        // and does not vary with the active layout: that fixed identity is what
+        // lets a client match a shortcut layout-independently. A key with no
+        // US printable identity reports 0, which keeps the base off the wire.
+        // The key codes are ANSI virtual key codes.
+        UBUITestRegister("base_layout_key_is_us_ansi_identity") { context in
+            guard let t = context else { return }
+            let table: [(keyCode: UInt16, expected: UInt32, name: String)] = [
+                (0x00, 0x61, "ANSI A reports 'a'"),
+                (0x12, 0x31, "ANSI 1 reports '1'"),
+                (0x21, 0x5B, "ANSI LeftBracket reports '['"),
+                (0x2C, 0x2F, "ANSI Slash reports '/'"),
+                (0x32, 0x60, "ANSI Grave reports '`'"),
+                (0x7A, 0, "F1 has no US printable identity and reports 0"),
+            ]
+            for row in table {
+                let reported = KeyboardLayout.usANSICharacter(forKeyCode: row.keyCode)
+                t.expect(Int(reported), equals: Int(row.expected), desc: row.name)
+            }
+            // A Latin layout's own letter is never asked of the ASCII-capable
+            // layout: German z on the US Y key, and French a on the US Q key,
+            // report the position, whatever layout the runner has selected.
+            for (keyCode, letter, position) in [(UInt16(0x10), UInt32(0x7A), UInt32(0x79)), (0x0C, 0x61, 0x71)] {
+                let reported = KeyboardLayout.baseLayoutCharacter(forKeyCode: keyCode, unshifted: letter, shifted: letter)
+                t.expect(
+                    Int(reported),
+                    equals: Int(position),
+                    desc: "a Latin letter on key \(String(keyCode, radix: 16)) reports the US position"
+                )
+            }
+        }
+
         UBUITestRegister("swift_shell_chords_follow_the_key_across_a_layout_switch") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
