@@ -30,6 +30,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 # shellcheck source=Scripts/release-bundle.sh
 . "$ROOT/Scripts/release-bundle.sh"
 
@@ -128,7 +130,7 @@ fi
 
 if [ -z "$SOURCE_APP" ]; then
     # shellcheck source=Scripts/build-root.sh
-    . "$ROOT/Scripts/build-root.sh"
+    . "$CORE_ROOT/Scripts/build-root.sh"
     "$ROOT/Scripts/build-macos.sh" --release
     SOURCE_APP="$UBQ_BUILD_ROOT/macos/Source/Platform/macOS/Ubiquitty.app"
 fi

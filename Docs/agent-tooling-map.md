@@ -30,13 +30,15 @@ directory-specific entries.
 
 A new worktree's root is empty, so building the app or the UI-test bundle there
 starts from nothing. Build in a lane instead: a long-lived worktree whose root
-stays warm. `Scripts/build-lane.py` takes a free lane, brings it to your
+stays warm. `Libraries/ubiquitty-core/Scripts/build-lane.py` takes a free lane, brings it to your
 worktree's HEAD and uncommitted changes, runs the command there, and lets it go:
 
 ```sh
-python3 Scripts/build-lane.py run --wait 3600 --from "$PWD" -- Scripts/run-ui-tests.sh <scenario>
-python3 Scripts/build-lane.py run --wait 3600 --from "$PWD" -- Scripts/build-tests.sh
-python3 Scripts/build-lane.py status
+python3 Libraries/ubiquitty-core/Scripts/build-lane.py run --wait 3600 --from "$PWD" -- \
+  sh -c 'git submodule update --init --recursive && Scripts/run-ui-tests.sh "$@"' sh <scenario>
+python3 Libraries/ubiquitty-core/Scripts/build-lane.py run --wait 3600 --from "$PWD" -- \
+  sh -c 'git submodule update --init --recursive && Libraries/ubiquitty-core/Scripts/build-tests.sh'
+python3 Libraries/ubiquitty-core/Scripts/build-lane.py status
 ```
 
 The command runs in the lane, so name scripts relative to the checkout root.

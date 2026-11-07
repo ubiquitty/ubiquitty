@@ -18,7 +18,8 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gate_report  # noqa: E402 — the path above is what makes it importable
+import library_scripts  # noqa: F401, E402 — makes the libraries' modules importable
+import gate_report  # noqa: E402
 
 GATE = "check-ui-scenarios"
 

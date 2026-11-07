@@ -47,6 +47,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 
 # Seconds to wait for the host before the container is used instead.
 CONNECT_TIMEOUT="${UBQ_LINUX_HOST_CONNECT_TIMEOUT:-5}"
@@ -144,17 +146,47 @@ validRunIdentifier() {
 # working tree is left out rather than failing the sync, and a directory entry
 # (a submodule) is not a file.
 treeFiles() {
-    git -C "$ROOT" ls-files -z --cached --others --exclude-standard \
-        | python3 -c '
-import os, sys
-root = sys.argv[1]
-for name in sys.stdin.buffer.read().split(b"\0"):
-    if not name:
-        continue
-    path = os.path.join(root.encode(), name)
-    if os.path.islink(path) or os.path.isfile(path):
-        sys.stdout.buffer.write(name + b"\0")
-' "$ROOT"
+    python3 - "$ROOT" <<'FILES'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1]).resolve()
+environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+def git(where, *arguments):
+    return subprocess.check_output(["git", "-C", str(where), *arguments], env=environment)
+
+def files(where, prefix=b""):
+    top = git(where, "rev-parse", "--show-toplevel").decode().strip()
+    if Path(top).resolve() != where.resolve():
+        raise ValueError(f"required submodule is not initialized: {where}")
+    tracked = git(where, "ls-files", "--stage", "-z")
+    modules = set()
+    for entry in tracked.split(b"\0"):
+        if entry:
+            header, name = entry.split(b"\t", 1)
+            if header.split()[0] == b"160000":
+                modules.add(name)
+    names = set(git(where, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0"))
+    for name in sorted(names - {b""}):
+        path = where / os.fsdecode(name)
+        if name in modules:
+            if path.is_symlink() or not path.is_dir():
+                raise ValueError(f"required submodule is not initialized: {path}")
+            yield from files(path, prefix + name + b"/")
+        elif path.is_symlink() or path.is_file():
+            yield prefix + name
+
+try:
+    # Resolve the complete list before rsync can consume a partial composition.
+    entries = list(files(root))
+except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    print(f"linux-host: source sync refused: {error}", file=sys.stderr)
+    sys.exit(2)
+sys.stdout.buffer.write(b"\0".join(entries) + b"\0")
+FILES
 }
 
 prepareRemote() { # <host> <run identifier>
@@ -179,6 +211,21 @@ REMOTE
 
 syncTree() { # <host> <run identifier>
     local host="$1" identifier="$2"
+    local expectedCore="$ROOT" expectedKit="$ROOT"
+    [ ! -e "$ROOT/Libraries/ubiquitty-core" ] || expectedCore="$ROOT/Libraries/ubiquitty-core"
+    [ ! -e "$ROOT/Libraries/ubiquitty-kit" ] || expectedKit="$ROOT/Libraries/ubiquitty-kit"
+    if [ "$(cd "$CORE_ROOT" && pwd -P)" != "$(cd "$expectedCore" && pwd -P)" ] \
+        || [ "$(cd "$KIT_ROOT" && pwd -P)" != "$(cd "$expectedKit" && pwd -P)" ]; then
+        echo "linux-host: remote checks require the checkout's pinned library mounts; external source overrides are not synchronized" >&2
+        return 2
+    fi
+    # Only this run's gitless source tree is replaced. Build/cache/log siblings
+    # stay warm, while a deleted tracked or untracked library file cannot
+    # survive into a later stage of the shared run.
+    ssh "${sshOptions[@]}" "$host" bash -s -- "$RUNS_DIRECTORY/$identifier/ubiquitty" <<'REMOTE'
+set -eu
+find "$HOME/$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+REMOTE
     treeFiles | rsync -a --from0 --files-from=- -e "ssh ${sshOptions[*]}" \
         "$ROOT/" "$host:$RUNS_DIRECTORY/$identifier/ubiquitty/"
 }
@@ -203,8 +250,8 @@ runStages() { # <host> <run identifier> <stage>…
     # export (ci_batteries.py names the variable).
     local prelude="export UBQ_CI_LINUX_VULKAN=native"$'\n'
     if command -v cmake >/dev/null 2>&1; then
-        prelude+="export UBIQUITTY_BUILD_VERSION=$(printf '%q' "$("$ROOT/Scripts/build-version.sh" version)")"$'\n'
-        prelude+="export UBIQUITTY_BUILD_IDENTITY=$(printf '%q' "$("$ROOT/Scripts/build-version.sh" identity)")"$'\n'
+        prelude+="export UBIQUITTY_BUILD_VERSION=$(printf '%q' "$(UBQ_VERSION_TREE="$ROOT" "$CORE_ROOT/Scripts/build-version.sh" version)")"$'\n'
+        prelude+="export UBIQUITTY_BUILD_IDENTITY=$(printf '%q' "$(UBQ_VERSION_TREE="$ROOT" "$CORE_ROOT/Scripts/build-version.sh" identity)")"$'\n'
     fi
     if [ -n "${UBQ_BUILD_JOBS:-}" ]; then
         prelude+="export UBQ_BUILD_JOBS=$(printf '%q' "$UBQ_BUILD_JOBS")"$'\n'
@@ -223,12 +270,15 @@ export UBQ_CI_ROOT="$scratch/ci"
 # to the same objects wherever they are checked out.
 export CCACHE_BASEDIR="$scratch" CCACHE_NOHASHDIR=1
 cd "$scratch/ubiquitty"
+unset UBQ_CORE_ROOT UBQ_KIT_ROOT UBIQUITTY_CORE_SOURCE_DIR UBIQUITTY_KIT_SOURCE_DIR
+. ./Scripts/library-scripts.sh
 # The QUIC dependency prefix is built once per version of its fetch script and
 # kept outside the run directory; the run reaches it through the path CI uses.
-quicKey=$(sha256sum Scripts/fetch-quic-deps.sh | cut -c1-12)
+quicKey=$(sha256sum "$CORE_ROOT/Scripts/fetch-quic-deps.sh" | cut -c1-12)
 mkdir -p "$cacheDirectory/quic-deps-$quicKey"
 ln -sfn "$cacheDirectory/quic-deps-$quicKey" "$scratch/build-gcc/quic-deps"
-exec python3 Scripts/ci_batteries.py run linux "$@"
+exec python3 "$CORE_ROOT/Scripts/ci_batteries.py" run linux \
+    --source-root "$PWD" --core-source-root "$CORE_ROOT" --kit-source-root "$KIT_ROOT" "$@"
 REMOTE
     } | ssh "${sshOptions[@]}" "$host" bash -s -- "$RUNS_DIRECTORY/$identifier" "$CACHE_DIRECTORY" \
         ${onlyArguments[@]+"${onlyArguments[@]}"}

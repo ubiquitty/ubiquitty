@@ -4,7 +4,7 @@
 // outline-rows.mjs — does the page's renderer draw the rows Core spells?
 //
 // Source/Platform/Web/outline.js draws a session outline's rows and is meant
-// to decide nothing. The rows here are Tests/Web/outline-rows.json, which a
+// to decide nothing. The rows here are Tests/Core/App/outline-rows.json, which a
 // Core test holds to App::outlineJSON byte for byte, so this reads the fields
 // Core writes under the names Core writes them: a field Core renames leaves
 // the fixture, and the row this draws from it goes missing here.
@@ -21,7 +21,8 @@ import { fileURLToPath } from 'url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const { renderOutlineRows, outlineIndentPixels } = await import(path.join(here, '../../Source/Platform/Web/outline.js'));
-const outline = JSON.parse(fs.readFileSync(path.join(here, 'outline-rows.json'), 'utf8'));
+const coreRoot = process.env.UBIQUITTY_CORE_SOURCE_DIR || path.join(here, '../..');
+const outline = JSON.parse(fs.readFileSync(path.join(coreRoot, 'Tests/Core/App/outline-rows.json'), 'utf8'));
 
 class StubElement {
   constructor(tagName) {

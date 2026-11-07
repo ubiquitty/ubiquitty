@@ -33,9 +33,12 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TABLE = ROOT / "Source" / "Core" / "Rendering" / "BundledFonts.h"
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import library_scripts  # noqa: E402 — the table and the font files are Core's
+
+TABLE = pathlib.Path(library_scripts.locate("Source/Core/Rendering/BundledFonts.h"))
 CMAKE = ROOT / "CMakeLists.txt"
-FONTS = ROOT / "Resources" / "fonts"
+FONTS = pathlib.Path(library_scripts.locate("Resources/fonts"))
 NAME = "check-bundled-fonts"
 
 # The list each frontend copies, and the name to print when one is short.

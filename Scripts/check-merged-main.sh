@@ -38,11 +38,12 @@
 # What this does not build
 #
 # Tests/. UBIQUITTY_BUILD_TESTS defaults off and cannot be turned on in this
-# configuration: CMakeLists.txt makes it a fatal error beside NDEBUG, because
-# CellGrid.h declares members under #ifndef NDEBUG and the two halves would
-# disagree about sizeof(CellGrid). RelWithDebInfo carries NDEBUG, so reaching
-# the test tree takes a second configure at Debug — Scripts/build-tests.sh —
-# which is a different build rather than a flag on this one.
+# configuration: Scripts/cmake/UbiquittyToolchain.cmake makes it a fatal error
+# beside NDEBUG, because CellGrid.h declares members under #ifndef NDEBUG and
+# the two halves would disagree about sizeof(CellGrid). RelWithDebInfo carries
+# NDEBUG, so reaching the test tree takes a second configure at Debug —
+# Libraries/ubiquitty-core/Scripts/build-tests.sh — which is a different build rather than a flag on this
+# one.
 #
 # So the combination class this script exists for is closed for what ships and
 # open for Tests/. Pre-push does compile the test tree, but against the tree the
@@ -64,13 +65,15 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 
 # How many compilers this machine can run at once; see Scripts/build-jobs.sh.
 # shellcheck source=Scripts/build-jobs.sh
-. "$ROOT/Scripts/build-jobs.sh"
+. "$CORE_ROOT/Scripts/build-jobs.sh"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 cd "$ROOT" || exit 1
 
 REF="${1:-origin/main}"

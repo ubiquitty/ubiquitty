@@ -177,7 +177,7 @@ the local daemon's own screen holds, under the same account.
 
 ## Tests
 
-`./Scripts/run-tests.sh neovim_sync_decode` builds the fixture that records
+`./Libraries/ubiquitty-core/Scripts/run-tests.sh neovim_sync_decode` builds the fixture that records
 the host's attach and update stream, and feeds it
 to the plugin headlessly (`Tests/Platform/neovim_sync_decode_test.lua`). The
 test also records everything the plugin sends, which the fixture reads back

@@ -31,15 +31,18 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 
 BUILD="$UBQ_BUILD_ROOT/ios-iphonesimulator"
 STAGE="$BUILD/sync-conformance"
 # The device this checkout owns, booted for this run and shut down when it
 # ends; see Scripts/ios-simulator.sh.
 # shellcheck source=Scripts/ios-simulator.sh
-. "$ROOT/Scripts/ios-simulator.sh"
+. "$KIT_ROOT/Scripts/ios-simulator.sh"
 DEVICE_NAME="$(ubq_ios_device_name)"
 ARCHIVE="$BUILD/libubiquitty-core-ios.a"
 
@@ -113,8 +116,8 @@ for source in "${TESTS[@]}"; do
     binary="$STAGE/$name"
     if ! xcrun clang++ -std=c++23 -fno-exceptions -fno-rtti \
         -target "arm64-apple-ios${IOS_DEPLOYMENT_FLOOR}-simulator" -isysroot "$SDK" \
-        -I "$ROOT/Source" -I "$ROOT/Tests" \
-        -o "$binary" "$ROOT/$source" "$ARCHIVE" "$CRYPTO" > "$STAGE/$name.build.log" 2>&1; then
+        -I "$ROOT/Source" -I "$KIT_ROOT/Source" -I "$CORE_ROOT/Source" -I "$CORE_ROOT/Tests" \
+        -o "$binary" "$CORE_ROOT/$source" "$ARCHIVE" "$CRYPTO" > "$STAGE/$name.build.log" 2>&1; then
         printf '  FAIL  %s (did not compile for iOS)\n' "$name"
         sed 's/^/        /' "$STAGE/$name.build.log" | head -12
         fail=$((fail + 1))

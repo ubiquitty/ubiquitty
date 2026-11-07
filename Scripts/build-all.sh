@@ -22,9 +22,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 HEADLESS=0
 SMOKE=0
 PASS=""   # flags forwarded to each sub-build (no spaces, so word-splitting is fine)
@@ -38,9 +40,9 @@ for arg in "$@"; do
 done
 
 echo "== build-all: host daemon =="
-"$ROOT/Scripts/build-host.sh" $PASS
+"$CORE_ROOT/Scripts/build-host.sh" $PASS
 echo "== build-all: agent client =="
-"$ROOT/Scripts/build-agent.sh" $PASS
+"$CORE_ROOT/Scripts/build-agent.sh" $PASS
 if [ "$HEADLESS" = "0" ]; then
     echo "== build-all: macOS app =="
     "$ROOT/Scripts/build-macos.sh" $PASS
@@ -50,10 +52,10 @@ if [ "$SMOKE" = "1" ]; then
     echo "== build-all: smokes on the fresh host + agent =="
     export UBIQUITTY_HOST_BIN="$UBQ_BUILD_ROOT/host/ubiquitty-host"
     export UBQ_BIN="$UBQ_BUILD_ROOT/agent/ubq"
-    "$ROOT/Tests/Host/smoke.sh"
-    "$ROOT/Tests/Agent/smoke.sh"
-    "$ROOT/Tests/Agent/mcp_smoke.sh"
-    "$ROOT/Tests/Agent/auth_smoke.sh"
+    "$CORE_ROOT/Tests/Host/smoke.sh"
+    "$CORE_ROOT/Tests/Agent/smoke.sh"
+    "$CORE_ROOT/Tests/Agent/mcp_smoke.sh"
+    "$CORE_ROOT/Tests/Agent/auth_smoke.sh"
     # The app lane drives the fresh macOS build over its control socket; it
     # SKIPs where there is no app to launch.
     "$ROOT/Tests/Control/control_gate_lane.sh"

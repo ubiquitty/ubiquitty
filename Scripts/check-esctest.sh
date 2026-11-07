@@ -46,6 +46,8 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 PROFILE="macos-local"
 UPDATE=0
 NATIVE=0
@@ -81,7 +83,7 @@ RUNNER=("$ROOT/Scripts/run-esctest.sh")
 LOG="$ROOT/BuildEsctest/esctest.log"
 if [ "$PROFILE" = "linux-container" ]; then
     # shellcheck source=Scripts/build-root.sh
-    . "$ROOT/Scripts/build-root.sh"
+    . "$CORE_ROOT/Scripts/build-root.sh"
     RUNNER=("$ROOT/Scripts/run-esctest-linux.sh")
     [ "$NATIVE" = "1" ] && RUNNER+=(--native)
     LOG="$UBQ_BUILD_ROOT/linux-container/esctest-linux.log"

@@ -1,6 +1,0 @@
-%begin 0
-%e
-Œend 0 1 0
-%outpu%
-e
-Œend 0 033[A

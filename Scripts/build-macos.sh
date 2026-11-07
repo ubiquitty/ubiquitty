@@ -44,6 +44,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 
 # Bound the compile fan-out. `cmake --build -j` with no number hands ninja its
 # default of cores + 2, and several checkouts may build on one machine at
@@ -51,11 +54,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # and the machine stops responding.
 # How many compilers this machine can run at once; see Scripts/build-jobs.sh.
 # shellcheck source=Scripts/build-jobs.sh
-. "$ROOT/Scripts/build-jobs.sh"
+. "$CORE_ROOT/Scripts/build-jobs.sh"
 BUILD_JOBS="$(ubq_build_jobs)"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 # Build dir + extra configure args are overridable (run-ui-tests.sh points at a
 # separate $UBQ_BUILD_ROOT/macos-uitest with -DUBIQUITTY_UI_TESTS=ON). Default: the normal build.
 CLEAN=0
@@ -140,8 +143,8 @@ if ! xcrun -f metal >/dev/null 2>&1; then
     exit 1
 fi
 
-# Pin the sysroot to the SDK the ACTIVE toolchain resolves. CMakeLists.txt
-# auto-resolves CMAKE_OSX_SYSROOT only when the cached value is unset or its
+# Pin the sysroot to the SDK the ACTIVE toolchain resolves.
+# Scripts/cmake/UbiquittyPreProject.cmake auto-resolves CMAKE_OSX_SYSROOT only when the cached value is unset or its
 # directory no longer exists — but a switch of the selected toolchain (e.g.
 # `xcode-select` moving from CommandLineTools to Xcode.app) leaves both SDK dirs
 # present, so a cache baked against the old one survives. CMake then reconfigures
@@ -150,8 +153,8 @@ fi
 # system-header status, and their deprecated typedefs (ApplicationServices ▸
 # QD.framework ▸ ColorSyncDeprecated.h) flood -Wdeprecated-declarations, failing
 # -Werror. Passing the freshly-resolved SDK on the configure line overrides any
-# stale cache every run; CMakeLists.txt treats a caller-supplied valid sysroot as
-# authoritative, so this composes with it rather than fighting it. UBIQUITTY_CMAKE_EXTRA
+# stale cache every run; UbiquittyPreProject.cmake treats a caller-supplied valid
+# sysroot as authoritative, so this composes with it rather than fighting it. UBIQUITTY_CMAKE_EXTRA
 # comes last on the cmake line, so an explicit caller override still wins.
 SDK_ARGS=()
 if MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null)" && [ -d "$MACOS_SDK" ]; then
@@ -163,16 +166,17 @@ fi
 # adding a virtual to PAL::Stream left a warm build producing an app
 # that failed --smoke-surface ("shell declined to launch") while a clean build
 # passed — a stale C++ artifact (an archive not relinked, or a POST_BUILD copy).
-# PAL is not in the Swift module map, so the SWIFT_IMPORT_HASH invalidation below
-# does not cover it. The exact artifact is unproven, so this forces a full clean
-# rather than dropping a named output. Keyed on the CONTENT of Source/PAL/*.h,
-# which change rarely for a base layer, so the clean build fires seldom — where
-# fingerprinting all of Core would tax every macOS build for a bug only a
-# base-type change causes. A missing fingerprint (the first build after this
-# landed) records and does not force, so it costs nobody a rebuild for a staleness
-# they may not have; a real base-type edit after that is what trips it.
+# The interop stamp (cmake/SwiftInteropStamp.cmake) rebuilds the Swift modules on
+# a PAL header edit and reaches no C++ artifact. The exact artifact is unproven,
+# so this forces a full clean rather than dropping a named output. Keyed on the
+# CONTENT of Source/PAL/*.h, which change rarely for a base layer, so the clean
+# build fires seldom — where fingerprinting all of Core would tax every macOS
+# build for a bug only a base-type change causes. A missing fingerprint (the
+# first build after this landed) records and does not force, so it costs nobody
+# a rebuild for a staleness they may not have; a real base-type edit after that
+# is what trips it.
 PAL_FINGERPRINT_FILE="$BUILD/.pal-fingerprint-sha256"
-PAL_FINGERPRINT="$(cat "$ROOT"/Source/PAL/*.h 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)"
+PAL_FINGERPRINT="$(cat "$CORE_ROOT"/Source/PAL/*.h 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)"
 PAL_CHANGED=0
 if [ -n "$PAL_FINGERPRINT" ] && [ -f "$PAL_FINGERPRINT_FILE" ] \
         && [ "$PAL_FINGERPRINT" != "$(cat "$PAL_FINGERPRINT_FILE" 2>/dev/null)" ]; then
@@ -256,32 +260,31 @@ fi
 # harness (a ubench checkout) builds one fresh tree per swept commit and QUIC
 # contributes nothing to what it measures.
 #
-# PGO: when the checked-in training profile exists, feed it to every C-family
-# TU (-fprofile-use), on top of -O3+ThinLTO. The two -Wno flags are the
-# tolerance contract: TUs the training battery never executes (platform
-# sources, third-party), functions that drifted since the last retrain, and same-name
-# CFG mismatches (the trainer's bench main vs the app main) compile clean at
-# plain -O3 placement instead of erroring — clang discards mismatched counts,
-# and -Wbackend-plugin under this target's -Werror would otherwise turn that
-# note into a build failure. Regenerate with Scripts/pgo-train.sh (its own
-# commit). UBIQUITTY_PGO=OFF is the A/B
-# escape hatch and must keep producing the pre-PGO flag set exactly. It reaches
-# CMake as the UBIQUITTY_PGO cache variable too: with the flags below empty,
-# CMakeLists.txt otherwise places the default profile itself, and a cache
-# variable is not seeded from the environment.
-# UBQ_PGO_PROFILE, as in run-bench.sh and build-perf-bench.sh: an A/B that has
-# to swap the tracked artifact in and out of Support/pgo/ loses an arm to the
-# next branch switch.
-PGO_PROFILE="${UBQ_PGO_PROFILE:-$ROOT/Support/pgo/portable-core.profdata}"
+# PGO: when the checked-in training profile exists, feed it to every C-family TU
+# (-fprofile-use), on top of -O3+ThinLTO. The two -Wno flags are the tolerance
+# contract: TUs the training battery never executes (platform sources,
+# third-party), functions that drifted since the last retrain, and same-name CFG
+# mismatches (the trainer's bench main vs the app main) compile clean at plain
+# -O3 placement instead of erroring — clang discards mismatched counts, and
+# -Wbackend-plugin under this target's -Werror would otherwise turn that note
+# into a build failure. Regenerate with Scripts/pgo-train.sh (its own commit).
+# UBIQUITTY_PGO=OFF is the A/B escape hatch and must keep producing the pre-PGO
+# flag set exactly. It reaches CMake as the UBIQUITTY_PGO cache variable too:
+# with the flags below empty, Scripts/cmake/UbiquittyOptimize.cmake otherwise
+# places the default profile itself, and a cache variable is not seeded from the
+# environment. UBQ_PGO_PROFILE, as in run-bench.sh and build-perf-bench.sh: an
+# A/B that has to swap the tracked artifact in and out of Support/pgo/ loses an
+# arm to the next branch switch.
+PGO_PROFILE="${UBQ_PGO_PROFILE:-$CORE_ROOT/Support/pgo/portable-core.profdata}"
 # shellcheck source=Scripts/pgo-flags.sh
-source "$ROOT/Scripts/pgo-flags.sh"
+source "$CORE_ROOT/Scripts/pgo-flags.sh"
 # A leading space: the flag string is concatenated into a longer one below.
-PGO_FLAGS="$(ubiquitty_pgo_flags "$ROOT" "${CMAKE_CXX_COMPILER:-c++}")"
+PGO_FLAGS="$(ubiquitty_pgo_flags "$CORE_ROOT" "${CMAKE_CXX_COMPILER:-c++}")"
 PGO_FLAGS="${PGO_FLAGS:+ $PGO_FLAGS}"
 if [ -n "$PGO_FLAGS" ]; then
     # shellcheck source=Scripts/pgo-staleness.sh
-    source "$ROOT/Scripts/pgo-staleness.sh"
-    pgo_staleness_warning "$ROOT" "${PGO_PROFILE#"$ROOT"/}"
+    source "$CORE_ROOT/Scripts/pgo-staleness.sh"
+    pgo_staleness_warning "$CORE_ROOT" "${PGO_PROFILE#"$CORE_ROOT"/}"
 fi
 # Swift PGO: a separate profile from a separate corpus. The C-family profile
 # trains on bench_stack, which links no Swift; the Swift renderer's counters
@@ -306,11 +309,11 @@ if [ -f "$SWIFT_PGO_PROFILE" ] && [ "${UBIQUITTY_SWIFT_PGO:-OFF}" = "ON" ] && [ 
     SWIFT_PGO_FLAGS="-profile-use=$SWIFT_PGO_PROFILE -DUBIQUITTY_SWIFT_PGO_STAMP_$SWIFT_PGO_STAMP"
     echo "Swift PGO:  using $SWIFT_PGO_PROFILE (UBIQUITTY_PGO=OFF to disable)"
     # shellcheck source=Scripts/pgo-staleness.sh
-    source "$ROOT/Scripts/pgo-staleness.sh"
+    source "$CORE_ROOT/Scripts/pgo-staleness.sh"
     pgo_staleness_warning "$ROOT" "${SWIFT_PGO_PROFILE#"$ROOT"/}"
 fi
 # shellcheck source=Scripts/build-provenance.sh
-source "$ROOT/Scripts/build-provenance.sh"
+source "$CORE_ROOT/Scripts/build-provenance.sh"
 build_provenance_warning "$ROOT" "$BUILD" "Scripts/build-macos.sh --clean"
 # The installed or shipped identity carries the updater. Without the framework
 # CMake builds an app with no updater and says so only in a configure status
@@ -327,6 +330,7 @@ fi
 # way: CMake defaults to the build root's sparkle directory, where
 # fetch-sparkle.sh writes, and UBIQUITTY_SPARKLE_PREFIX names another.
 cmake -B "$BUILD" -S "$ROOT" -G Ninja -DUBIQUITTY_FRONTEND=macOS \
+    "-DUBIQUITTY_CORE_SOURCE_DIR=$CORE_ROOT" "-DUBIQUITTY_KIT_SOURCE_DIR=$KIT_ROOT" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     ${UBIQUITTY_QUIC_PREFIX:+"-DUBIQUITTY_QUIC_PREFIX=$UBIQUITTY_QUIC_PREFIX"} \
     ${UBIQUITTY_SPARKLE_PREFIX:+"-DUBIQUITTY_SPARKLE_PREFIX=$UBIQUITTY_SPARKLE_PREFIX"} \
@@ -345,80 +349,6 @@ cmake -B "$BUILD" -S "$ROOT" -G Ninja -DUBIQUITTY_FRONTEND=macOS \
 # The default build's database is the one clangd reads; an --asan, --unused or
 # UBIQUITTY_BUILD_DIR tree is a variant and does not claim the checkout's link.
 [ "$BUILD" = "$UBQ_BUILD_ROOT/macos" ] && ubq_link_compile_database "$BUILD" "$ROOT"
-# Swift does not track the C++ headers it imports, so a Core header change
-# leaves every Swift module up to date as far as ninja is concerned: after
-# editing Source/Core/CellGrid.h, `ninja UbiquittyKitModule` runs one link step
-# and recompiles nothing. The module then keeps whatever interface it was built
-# with, so the arm can read green while it cannot build from scratch, and a Core
-# rename can leave a frontend caller behind it.
-#
-# CMake cannot express the edge here — measured, not assumed. OBJECT_DEPENDS is
-# dropped because a wholemodule Swift target compiles and archives in ONE ninja
-# statement with no per-object rule to hang it on, and LINK_DEPENDS is ignored
-# for static libraries; both spellings left zero Core headers among that
-# statement's inputs when read back out of build.ninja. Feeding the headers in
-# as a generated Swift source does create the edge, and then never converges:
-# swiftc leaves an unchanged module's outputs alone, so they stay older than
-# whatever rebuilt them and ninja repeats the work on every later build.
-#
-# So the invalidation is here, keyed on CONTENT rather than timestamps. A
-# header touched with no edit changes nothing; a header edited drops the Swift
-# modules, and the next build rewrites them against what the header now says.
-# The header list is the include closure the modules actually compile against,
-# derived with `clang -MM`, not just the headers the module map names by hand. A
-# named header reaches headers it includes but does not name — Source/Base,
-# Source/Forward, Source/Platform, and Source/Core beyond the named set — and a
-# struct-layout edit to one of those changes the Swift interface while leaving
-# every named header's bytes untouched, so a named-only hash would hold over a
-# real ABI change. Deriving the set means it cannot be scoped wrong the way an
-# enumerated list of subtrees can, and a header exported to Swift joins it
-# without anyone remembering to add it.
-# Source/PAL in the closure is also covered by the PAL fingerprint above; the
-# overlap is harmless.
-SWIFT_DIR="$ROOT/Source/Platform/macOS/App"
-if [ -f "$SWIFT_DIR/module.modulemap" ]; then
-    SWIFT_IMPORT_HASH_FILE="$BUILD/.swift-imported-headers-hash"
-    SWIFT_NAMED_HEADERS=()
-    while IFS= read -r relative; do
-        [ -f "$SWIFT_DIR/$relative" ] && SWIFT_NAMED_HEADERS+=("$SWIFT_DIR/$relative")
-    done < <(awk -F'"' '/^[[:space:]]*header[[:space:]]*"/ { print $2 }' "$SWIFT_DIR/module.modulemap")
-    if [ "${#SWIFT_NAMED_HEADERS[@]}" -eq 0 ]; then
-        # No readable named headers is a broken module map, not an empty import
-        # set; also, expanding an empty array under `set -u` aborts bash 3.2.
-        echo "build-macos.sh: the module map names no readable headers — refusing a partial invalidation hash." >&2
-        exit 1
-    fi
-    if ! SWIFT_MM_OUTPUT="$(clang -MM -xc++ -std=c++23 \
-            -I"$ROOT/Source" -I"$ROOT/Source/ThirdParty/simdutf" -I"$SWIFT_DIR" \
-            "${SWIFT_NAMED_HEADERS[@]}" 2>/dev/null)"; then
-        echo "build-macos.sh: clang -MM could not resolve the Swift imports — refusing a partial invalidation hash." >&2
-        exit 1
-    fi
-    # -MM prints one make rule per named header; the right-hand sides are the
-    # include paths, of which we keep those under the repo tree.
-    SWIFT_IMPORT_CLOSURE="$(printf '%s\n' "$SWIFT_MM_OUTPUT" | tr ' \\' '\n\n' \
-        | grep -E '\.h$' | grep -F "$ROOT/Source/" | sort -u)"
-    if [ -z "$SWIFT_IMPORT_CLOSURE" ]; then
-        # Empty means the derivation broke, not that nothing is imported; a hash
-        # of nothing never invalidates, which is the gap this exists to close.
-        echo "build-macos.sh: the Swift import closure came out empty — refusing a partial invalidation hash." >&2
-        exit 1
-    fi
-    SWIFT_IMPORT_HASH="$({
-        cat "$SWIFT_DIR/module.modulemap"
-        printf '%s\n' "$SWIFT_IMPORT_CLOSURE" | while IFS= read -r header; do
-            [ -f "$header" ] && cat "$header"
-        done
-    } | shasum -a 256 | cut -d' ' -f1)"
-    if [ -f "$SWIFT_IMPORT_HASH_FILE" ] && [ "$(cat "$SWIFT_IMPORT_HASH_FILE")" != "$SWIFT_IMPORT_HASH" ]; then
-        echo "Swift imports: a header in the module's include closure changed — rebuilding the Swift modules"
-        rm -f "$BUILD/Source/Platform/macOS/UbiquittyRenderKit.swiftmodule" \
-              "$BUILD/Source/Platform/macOS/UbiquittyKit.swiftmodule" \
-              "$BUILD/Source/Platform/macOS/libUbiquittyRenderKit.a" \
-              "$BUILD/Source/Platform/macOS/libUbiquittyKitModule.a"
-    fi
-    printf '%s\n' "$SWIFT_IMPORT_HASH" > "$SWIFT_IMPORT_HASH_FILE"
-fi
 
 echo "Build type: $BUILD_TYPE"
 [ "$ASAN" = "1" ] && echo "Sanitizer:  AddressSanitizer"
@@ -524,7 +454,21 @@ echo "Built: $APP"
 # CMake gap and makes a SHADER COMPILE ERROR a hard build failure. Runs before
 # signing so the resource is covered by the signature.
 METALLIB="$APP/Contents/Resources/default.metallib"
-SHADER="$ROOT/Source/UbiquittyRenderKit/UBShaders.metal"
+# The checkout a source root names: the one this build was configured with, or
+# this tree, the root CMake takes when the configure names none. CMake resolves
+# a relative root against this tree.
+configured_source_root() { # <UBIQUITTY_CORE_SOURCE_DIR | UBIQUITTY_KIT_SOURCE_DIR>
+    local root
+    root="$(sed -n "s/^$1:[A-Z]*=//p" "$BUILD/CMakeCache.txt" 2>/dev/null)"
+    case "$root" in
+        "") printf '%s\n' "$ROOT" ;;
+        /*) printf '%s\n' "$root" ;;
+        *) printf '%s\n' "$ROOT/$root" ;;
+    esac
+}
+SHADER="$(configured_source_root UBIQUITTY_KIT_SOURCE_DIR)/Source/UbiquittyRenderKit/UBShaders.metal"
+# The shader includes Core's Tek raster by its path under Core's Source root.
+SHADER_INCLUDES="$(configured_source_root UBIQUITTY_CORE_SOURCE_DIR)/Source"
 # always recompile the metallib via xcrun. CMake's Metal step is unreliable (it
 # silently skips / leaves a stale metallib) and `cmake --build` touches the
 # bundle metallib so its mtime ends up NEWER than the shader — which would defeat
@@ -533,12 +477,13 @@ SHADER="$ROOT/Source/UbiquittyRenderKit/UBShaders.metal"
 # unconditionally: the .metal source is the single source of truth.
 if true; then
     echo "Compiling default.metallib via xcrun metal ..."
-    # Version-min matches the app's CMAKE_OSX_DEPLOYMENT_TARGET (top-level
-    # CMakeLists.txt): without it the metal compiler targets the newest Metal
+    # Version-min matches the app's CMAKE_OSX_DEPLOYMENT_TARGET
+    # (Scripts/cmake/UbiquittyPreProject.cmake): without it the metal compiler targets the newest Metal
     # language version and the metallib refuses to load on older macOS.
-    MACOS_MIN="${UBIQUITTY_MACOS_MIN:-"$(sed -n 's/^cxx=//p' "$ROOT/Scripts/macos-deployment-target.txt")"}"
+    MACOS_MIN="${UBIQUITTY_MACOS_MIN:-"$(sed -n 's/^cxx=//p' "$CORE_ROOT/Scripts/macos-deployment-target.txt")"}"
     AIR="$(mktemp -t mtshaders.XXXXXX).air"
-    if ! xcrun -sdk macosx metal -mmacosx-version-min="$MACOS_MIN" -O3 -c "$SHADER" -o "$AIR"; then
+    if ! xcrun -sdk macosx metal -mmacosx-version-min="$MACOS_MIN" -O3 -I "$SHADER_INCLUDES" \
+            -c "$SHADER" -o "$AIR"; then
         echo "ERROR: Metal shader compile failed: $SHADER" >&2
         rm -f "$AIR"; exit 1
     fi
@@ -639,7 +584,7 @@ if [ "$HELPERS_BUNDLE" = "1" ]; then
         local script="$2"
         shift 2
         mkdir -p "$UBQ_BUILD_ROOT"
-        if ! "$ROOT/Scripts/$script" "$@" 2>&1 | tee "$log" | awk -v name="$name" '{ print name ": " $0; fflush() }'; then
+        if ! "$CORE_ROOT/Scripts/$script" "$@" 2>&1 | tee "$log" | awk -v name="$name" '{ print name ": " $0; fflush() }'; then
             echo "ERROR: $script failed; the end of its log ($log):" >&2
             tail -n 40 "$log" >&2
             exit 1

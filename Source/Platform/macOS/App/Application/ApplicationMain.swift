@@ -100,7 +100,7 @@ enum ApplicationMain {
             let verdict: Bool
             switch flag {
             case "--smoke-swift-runtime": verdict = SwiftRuntimeSmokeEntry.run()
-            case "--smoke-surface": verdict = SurfaceSmokeEntry.run()
+            case "--smoke-surface": verdict = SurfaceSmokeEntry.run(windowShellLegs: SurfaceSmokeEntry.windowShellLegs(device:library:))
             case "--smoke-shell": verdict = ShellSmokeEntry.run()
             case "--smoke-draw-entry": verdict = DrawEntrySmokeEntry.run()
             case "--smoke-grid-cache": verdict = GridCacheSmokeEntry.run()

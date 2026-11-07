@@ -31,9 +31,12 @@ BUILD_JOBS="${UBQ_BUILD_JOBS:-$( (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 
 BUILD_TYPE=Release
 SDKS=(iphonesimulator iphoneos)
@@ -74,7 +77,7 @@ GEN="Unix Makefiles"
 command -v ninja >/dev/null 2>&1 && GEN="Ninja"
 
 # shellcheck source=Scripts/build-provenance.sh
-source "$ROOT/Scripts/build-provenance.sh"
+source "$CORE_ROOT/Scripts/build-provenance.sh"
 
 for sdk in "${SDKS[@]}"; do
     BUILD="$UBQ_BUILD_ROOT/ios-$sdk"
@@ -104,6 +107,7 @@ for sdk in "${SDKS[@]}"; do
     cmake -B "$BUILD" -S "$ROOT" -G "$GEN" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DUBIQUITTY_FRONTEND=iOS \
+        "-DUBIQUITTY_CORE_SOURCE_DIR=$CORE_ROOT" "-DUBIQUITTY_KIT_SOURCE_DIR=$KIT_ROOT" \
         -DUBIQUITTY_QUIC="${UBIQUITTY_QUIC:-ON}" \
         ${UBIQUITTY_QUIC_PREFIX:+"-DUBIQUITTY_QUIC_PREFIX=$UBIQUITTY_QUIC_PREFIX"} \
         -DUBIQUITTY_IOS_UI_TESTS="$UI_TESTS" \

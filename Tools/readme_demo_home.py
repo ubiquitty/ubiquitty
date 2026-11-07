@@ -27,6 +27,18 @@ COPIES = {
     "Docs/sync.md": "Docs/sync.md",
 }
 
+def repository_file(root, source):
+    """A repository file, from the checkout that holds it.
+
+    The libraries the app carries are checkouts of their own under Libraries/;
+    in a checkout that holds every repository the file is in `root`.
+    """
+    for checkout in (Path(root), Path(root) / "Libraries" / "ubiquitty-core", Path(root) / "Libraries" / "ubiquitty-kit"):
+        if (checkout / source).is_file():
+            return checkout / source
+    return Path(root) / source
+
+
 EXECUTABLES = ("bin/status-run", "bin/pst-hook", "bin/bench-sync")
 
 ZSHRC = r'''PROMPT='%F{4}demo%f %F{12}%1~%f $ '
@@ -712,5 +724,5 @@ def files(root, typography_feed):
     }
     result = {path: text.encode("utf-8") for path, text in result.items()}
     for path, source in COPIES.items():
-        result[path] = (Path(root) / source).read_bytes()
+        result[path] = repository_file(root, source).read_bytes()
     return result

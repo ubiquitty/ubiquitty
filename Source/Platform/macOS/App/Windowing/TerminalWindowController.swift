@@ -1103,7 +1103,7 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         // because padding moves the box the grid fits and a window that chose
         // its size keeps its grid at the new padding.
         let configuration = windowRenderConfiguration
-        var adopted = SurfaceStyle(configuration: configuration, systemTransparency: Self.systemTransparency)
+        var adopted = SurfaceStyle(configuration: configuration, systemTransparency: TerminalSurface.systemTransparency)
         adopted.paddingTopPoints = ChromelessWindowChrome.contentTopPadding(isChromeless: hidesTitleBar, configuration: configuration)
         applyCellMetricChange {
             for surface in projectedSurfaces {
@@ -1217,7 +1217,7 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         guard
             let renderer = TerminalSurface.makeRenderer(
                 configuration: Ubiquitty.Preferences.Effective.liveRenderConfiguration(),
-                systemTransparency: systemTransparency
+                systemTransparency: TerminalSurface.systemTransparency
             )
         else {
             return nil
@@ -1560,7 +1560,7 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
             return nil
         }
         let renderer: any TerminalSurfaceRenderer
-        switch TerminalSurface.buildRenderer(configuration: configuration, systemTransparency: systemTransparency) {
+        switch TerminalSurface.buildRenderer(configuration: configuration, systemTransparency: TerminalSurface.systemTransparency) {
         case .success(let built):
             renderer = built
         case .failure(let reason):
@@ -2877,7 +2877,7 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
                     }
             } ?? Ubiquitty.Themes.ThemeAppearance()
         let values = Ubiquitty.Preferences.values()
-        let effects = Ubiquitty.Preferences.Effective.backgroundEffects(values.pointee, Self.systemTransparency, appearance)
+        let effects = Ubiquitty.Preferences.Effective.backgroundEffects(values.pointee, TerminalSurface.systemTransparency, appearance)
         let isBlurred = effects.isBlurred
         let isNowTranslucent = effects.isTranslucent
         isTranslucent = isNowTranslucent
@@ -3012,20 +3012,6 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         guard let window else { return }
         WindowBlurBackdrop.lastRequestedRadiusForTesting[window.windowNumber] = nil
     }
-
-    /// What the Reduce Transparency switch says, read through
-    /// `SystemDisplayOptions` like every other display option, or what a
-    /// scenario forces here: one answer, so the style a surface is created with
-    /// and the ground a window realizes read the same one.
-    static var systemTransparency: Ubiquitty.Preferences.Effective.SystemTransparency {
-        if let forced = systemTransparencyOverrideForTesting {
-            return forced
-        }
-        return SystemDisplayOptions.shouldReduceTransparency ? .Reduced : .Allowed
-    }
-
-    /// Forces the switch for a scenario; nil reads the machine.
-    package static var systemTransparencyOverrideForTesting: Ubiquitty.Preferences.Effective.SystemTransparency?
 
     // The alpha the Metal body carries, which the title row matches while the
     // window is translucent: one strip painted opaque over a see-through grid
@@ -3239,8 +3225,9 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
     /// colour at an alpha, a themed one takes the terminal's foreground.
     internal var isUsingNativeTitlebar: Bool { usesNativeTitlebar || isTranslucent || usesSystemTheme }
     // Whether the launch fold hid the title bar; a hidden bar has no slot for
-    // a proxy icon.
-    private var hidesTitleBar = false
+    // a proxy icon. The window holds the record, so the surfaces in it read
+    // the answer this controller does.
+    private var hidesTitleBar: Bool { (window as? TerminalWindow)?.isTitleBarHidden ?? false }
 
     /// Whether this window hides its title bar.
     ///
@@ -5259,8 +5246,8 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
     ///
     /// - Parameter isHidden: Whether the title bar is hidden.
     private func applyHideTitleBar(_ isHidden: Bool) {
-        guard let window else { return }
-        hidesTitleBar = isHidden
+        guard let window = window as? TerminalWindow else { return }
+        window.isTitleBarHidden = isHidden
         ChromelessWindowChrome.apply(isHidden, to: window)
         if inspectorSplit != nil {
             window.styleMask.insert(.fullSizeContentView)
@@ -7114,7 +7101,7 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         guard
             let renderer = TerminalSurface.makeRenderer(
                 configuration: Ubiquitty.Preferences.Effective.liveRenderConfiguration(),
-                systemTransparency: Self.systemTransparency
+                systemTransparency: TerminalSurface.systemTransparency
             )
         else { return nil }
         let created = model.extractPaneToSurface(workspaceSurface, pane)
@@ -7567,6 +7554,10 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         fatalError("TerminalWindowController is created in code, never from a nib")
     }
 }
+
+/// The commands a surface sends this window: paste, font size, clear, reset
+/// and the palette, each answered where its menu item's action is.
+extension TerminalWindowController: TerminalWindowCommands {}
 
 /// The `[keys]`-changed notice, for Objective-C: the app delegate posts it and
 /// Objective-C views observe it, and the name they use is the one the Kit's

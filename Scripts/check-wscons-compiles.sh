@@ -29,20 +29,34 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
+# shellcheck source=Scripts/library-scripts.sh
+. "$(dirname "$0")/library-scripts.sh"
 
 CXX="${CXX:-c++}"
 # Through the launcher, as the compile-launcher gate requires: an uncached
 # syntax-only sweep is a slower suite nobody attributes to a change. Unquoted, so
 # an empty launcher contributes no argument.
 launcher="${UBQ_COMPILER_LAUNCHER-}"
-STUBS="Tests/Stubs"
+STUBS="$KIT_ROOT/Tests/Stubs"
 
 if [ ! -f "$STUBS/dev/wscons/wsconsio.h" ]; then
     echo "check-wscons: FAIL - $STUBS/dev/wscons/wsconsio.h is missing, so nothing was checked" >&2
     exit 1
 fi
 
-sources=$(find Source/Platform/Wscons -name '*.cpp' | sort)
+# The frontend's translation units are spread over the repositories; each is
+# compiled from the checkout that holds it, once.
+sources=""
+seen=$'\n'
+for root in "$APP_ROOT" "$KIT_ROOT" "$CORE_ROOT"; do
+    while IFS= read -r unit; do
+        case "$seen" in
+            *$'\n'"$unit"$'\n'*) continue ;;
+        esac
+        seen="$seen$unit"$'\n'
+        sources="$sources$root/$unit"$'\n'
+    done < <(cd "$root" && find Source/Platform/Wscons -name '*.cpp' 2>/dev/null | sort)
+done
 if [ -z "$sources" ]; then
     echo "check-wscons: FAIL - no translation units found under Source/Platform/Wscons" >&2
     exit 1
@@ -52,7 +66,8 @@ failed=0
 checked=0
 for source in $sources; do
     if $launcher $CXX -std=c++23 -fsyntax-only \
-            -I Source -I Source/ThirdParty/simdutf -I "$STUBS" \
+            -I Source -I "$CORE_ROOT/Source" -I "$KIT_ROOT/Source" \
+            -I "$CORE_ROOT/Source/ThirdParty/simdutf" -I "$STUBS" \
             -fno-exceptions -fno-rtti \
             -Wall -Wextra -Wno-deprecated-declarations -Wno-multichar -Wno-comment \
             "$source" 2>&1; then

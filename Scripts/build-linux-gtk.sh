@@ -24,12 +24,16 @@ BUILD_JOBS="${UBQ_BUILD_JOBS:-$( (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/
 # Output: $UBQ_BUILD_ROOT/linux/ubiquitty-linux
 #
 set -euo pipefail
-source "$(dirname "$0")/gate-report-lib.sh"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
+# shellcheck source=Scripts/gate-report-lib.sh
+source "$CORE_ROOT/Scripts/gate-report-lib.sh"
 BUILD="$UBQ_BUILD_ROOT/linux"
 BUILD_TYPE="${1:-Debug}"
 LOG="$BUILD/build.log"
@@ -37,7 +41,7 @@ VERBOSE="${VERBOSE:-0}"
 
 # Names the development package a machine lacks, where cmake would name only
 # the module it could not find.
-"$ROOT/Scripts/check-linux-build-prerequisites.sh"
+"$KIT_ROOT/Scripts/check-linux-build-prerequisites.sh"
 
 GEN="Unix Makefiles"
 command -v ninja >/dev/null 2>&1 && GEN="Ninja"
@@ -65,6 +69,7 @@ esac
 if ! run cmake -B "$BUILD" -S "$ROOT" -G "$GEN" \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DUBIQUITTY_FRONTEND=Linux \
+    "-DUBIQUITTY_CORE_SOURCE_DIR=$CORE_ROOT" "-DUBIQUITTY_KIT_SOURCE_DIR=$KIT_ROOT" \
     -DUBIQUITTY_QUIC="${UBIQUITTY_QUIC:-OFF}" \
     -DUBIQUITTY_LINUX_GPU_SHADERS="${UBIQUITTY_LINUX_GPU_SHADERS:-ON}" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \

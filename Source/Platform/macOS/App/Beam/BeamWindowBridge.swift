@@ -19,7 +19,7 @@ public final class BeamBridge: NSObject {
     /// this is installed summons nothing.
     @objc
     public static func installBeamPresenter() {
-        TerminalWindowController.beamPresenter = BeamPresenter(
+        TerminalSurface.beamPresenter = BeamPresenter(
             toggle: { window, foreground, background, accent, cursor in
                 MainActor.assumeIsolated {
                     BeamController.toggle(in: window, foreground: foreground, background: background, accent: accent, cursor: cursor)
