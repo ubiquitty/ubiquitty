@@ -7,10 +7,10 @@
 # passed: nothing goes red, so the tree looks green while nothing has executed.
 # These gates are the ones that decide whether a push is sound.
 #
-# This is the list for a checkout that holds every repository: the app, its
-# frontends and the arms that build them, over the families ubiquitty-core's
-# Scripts/pre-push-gates-core.sh defines. The tiers, the runner and the summary
-# are Scripts/pre-push-gates-lib.sh's.
+# This list composes the app and its pinned Core and Kit: its frontends and the
+# arms that build them, over the families ubiquitty-core's
+# Scripts/pre-push-gates-core.sh defines. The tiers, runner and summary are
+# Scripts/pre-push-gates-lib.sh's.
 
 # The tiers, the runner and the families are ubiquitty-core's, found in the
 # checkout that holds them.
@@ -247,10 +247,17 @@ ubq_arm_rebuild() {
     esac
 }
 
+ubq_app_snapshot_sources() {
+    local failuresBefore="${#FAILED[@]}"
+    # The App composes the three owners; it need not contain their files in
+    # one Git tree. Validate the selected roots before any rebuild or render.
+    run "snapshot source roots" python3 "$UBQ_CORE_ROOT/Scripts/ubq_roots.py" shell-context \
+        --source-root "$ROOT" --core-source-root "$UBQ_CORE_ROOT" --kit-source-root "$UBQ_KIT_ROOT"
+    [ "${#FAILED[@]}" -eq "$failuresBefore" ]
+}
+
 gate_renderer_snapshots() {
-    # The harness reads its goldens, waivers and cases from the three
-    # repositories together.
-    ubq_whole_here "renderer snapshots" || return 0
+    ubq_app_snapshot_sources || return 0
     local arms
     arms="$(ubq_renderer_arms)"
     if [ -z "$arms" ]; then
@@ -304,7 +311,9 @@ gate_renderer_snapshots() {
         if [ -n "$arm_host" ]; then
             "$ROOT/Scripts/linux-host.sh" stages linux-build linux-snapshots >"$arm_log" 2>&1 || status=$?
         else
-            python3 "$UBQ_CORE_ROOT/Tests/Snapshots/run.py" --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
+            python3 "$UBQ_CORE_ROOT/Tests/Snapshots/run.py" \
+                --source-root "$ROOT" --core-source-root "$UBQ_CORE_ROOT" --kit-source-root "$UBQ_KIT_ROOT" \
+                --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
         fi
         if [ "$status" = "2" ] && [ -z "$arm_host" ]; then
             # One rebuild before refusing. The commonest status-2 cause is a
@@ -319,7 +328,9 @@ gate_renderer_snapshots() {
             rebuild_command="$(ubq_arm_rebuild "$arm")"
             if (cd "$ROOT" && eval "$rebuild_command" >"$UBQ_CI_ROOT/snapshot-arm-$arm-rebuild.log" 2>&1); then
                 status=0
-                python3 "$UBQ_CORE_ROOT/Tests/Snapshots/run.py" --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
+                python3 "$UBQ_CORE_ROOT/Tests/Snapshots/run.py" \
+                    --source-root "$ROOT" --core-source-root "$UBQ_CORE_ROOT" --kit-source-root "$UBQ_KIT_ROOT" \
+                    --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
             fi
         fi
         if [ "$status" = "0" ]; then
@@ -518,12 +529,35 @@ gate_wasm() {
     run "portable Core on wasm" ./Scripts/build-web.sh
 }
 
+ubq_optional_web_snapshots() {
+    local status=2
+    if [ -f "$UBQ_BUILD_ROOT/web-dist/ubiquitty.wasm" ]; then
+        status=0
+        python3 "$UBQ_CORE_ROOT/Tests/Snapshots/run.py" \
+            --source-root "$ROOT" --core-source-root "$UBQ_CORE_ROOT" --kit-source-root "$UBQ_KIT_ROOT" \
+            --backend web --quiet || status=$?
+    fi
+    if [ "$status" = 2 ] && [ "${SNAPSHOT:-}" != demand ]; then
+        echo "app-snapshots: SKIPPED — Web tier unavailable; rebuild with Scripts/build-web.sh (SNAPSHOT=demand requires it)"
+        return 0
+    fi
+    return "$status"
+}
+
 gate_snapshots() {
-    ubq_whole_here "snapshot regressions" || return 0
+    ubq_app_snapshot_sources || return 0
     if [ "$(uname -s)" = "Darwin" ]; then
         run "macOS app build" ./Scripts/build-macos.sh --no-helpers
+        run "snapshot regressions" python3 "$UBQ_CORE_ROOT/Scripts/ci_batteries.py" run apple \
+            --only portable-build --only snapshots \
+            --source-root "$ROOT" --core-source-root "$UBQ_CORE_ROOT" --kit-source-root "$UBQ_KIT_ROOT"
+    else
+        run "portable snapshot build" "$UBQ_CORE_ROOT/Scripts/build-core-snapshot.sh"
+        run "snapshot regressions" python3 "$UBQ_CORE_ROOT/Tests/Snapshots/run.py" \
+            --source-root "$ROOT" --core-source-root "$UBQ_CORE_ROOT" --kit-source-root "$UBQ_KIT_ROOT" \
+            --backend portable --quiet
+        run "Web snapshot regressions" ubq_optional_web_snapshots
     fi
-    run "snapshot regressions" "$UBQ_CORE_ROOT/Scripts/run-tests.sh" snapshots
 }
 
 # esctest2 read from OUTSIDE the whole stack: it runs as a child of the terminal

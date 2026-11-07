@@ -4,6 +4,7 @@
 """Checks the GTK gate's actual App/Core/Kit inputs and verdict cache."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -276,6 +277,205 @@ SKIPPED=()
         for status in (1, 128):
             with self.subTest(status=status):
                 self.assertEqual(self.renderer_arms("Libraries/ubiquitty-core", status=status), [])
+
+
+class ComposedSnapshotRouting(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="ubiquitty-composed-snapshots-")
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name).resolve()
+        self.app = self.directory / "App owner"
+        self.core = self.directory / "Core owner"
+        self.kit = self.directory / "Kit owner"
+        for role, root in (("app", self.app), ("core", self.core), ("kit", self.kit)):
+            (root / "Scripts").mkdir(parents=True)
+            (root / "Scripts/repository.txt").write_text(role + "\n")
+            (root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.13)\n")
+        for name in ("ci_batteries.py", "gate_framework.py", "gate_report.py", "ubq_roots.py", "build_root.py"):
+            shutil.copyfile(CORE_ROOT / "Scripts" / name, self.core / "Scripts" / name)
+        self.calls = self.directory / "calls.jsonl"
+        tool = '''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+kind = Path(sys.argv[0]).name
+record = {"tool": kind, "arguments": sys.argv[1:], "cwd": os.getcwd(),
+          "subject": os.environ.get("UBQ_TESTS_ROOT"), "core": os.environ.get("UBQ_CORE_ROOT"),
+          "kit": os.environ.get("UBQ_KIT_ROOT")}
+with open(os.environ["SNAPSHOT_CALLS"], "a") as output:
+    output.write(json.dumps(record) + "\\n")
+status = 0
+if kind == "run.py":
+    backend = sys.argv[sys.argv.index("--backend") + 1]
+    status = json.loads(os.environ.get("SNAPSHOT_STATUSES", "{}" )).get(backend, 0)
+    print("VERDICT  " + ("PASSED" if status == 0 else "REFUSED" if status == 2 else "FAILED"))
+raise SystemExit(status)
+'''
+        for path in (self.core / "Scripts/build-core-snapshot.sh", self.app / "Scripts/build-macos.sh",
+                     self.core / "Tests/Snapshots/run.py"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(tool)
+            path.chmod(0o755)
+        binary = self.directory / "bin"
+        binary.mkdir()
+        uname = binary / "uname"
+        uname.write_text('#!/bin/sh\nprintf "%s\\n" "$SNAPSHOT_HOST"\n')
+        uname.chmod(0o755)
+        self.environment = {key: value for key, value in os.environ.items()
+                            if not key.startswith(("GIT_", "GITHUB_", "UBQ_", "UBIQUITTY_"))}
+        self.environment.update(PATH=str(binary) + os.pathsep + os.environ.get("PATH", ""),
+                                ROOT=str(self.app), UBQ_CORE_ROOT=str(self.core), UBQ_KIT_ROOT=str(self.kit),
+                                UBQ_BUILD_ROOT=str(self.directory / "build"),
+                                UBQ_CI_ROOT=str(self.directory / "ci"), RUNNER_TEMP=str(self.directory / "temp"),
+                                RUNNER_WORKSPACE=str(self.directory), SNAPSHOT_CALLS=str(self.calls),
+                                SNAPSHOT_HOST="Darwin", SNAPSHOT_ARMS="portable swift web linux",
+                                ACTUAL_CORE_ROOT=str(CORE_ROOT), TIER="quick")
+        Path(self.environment["RUNNER_TEMP"]).mkdir()
+        Path(self.environment["UBQ_CI_ROOT"]).mkdir()
+        self.environment["TMPDIR"] = self.environment["RUNNER_TEMP"]
+
+    def function(self, name):
+        source = (ROOT / "Scripts/pre-push-gates.sh").read_text()
+        start = source.find(name + "() {\n")
+        if start < 0:
+            return ""
+        return source[start:source.index("\n}\n", start) + 3]
+
+    def execute(self, name, *, host="Darwin", arms="portable swift web linux", statuses=None, demand=False):
+        self.calls.unlink(missing_ok=True)
+        environment = self.environment.copy()
+        environment.update(SNAPSHOT_HOST=host, SNAPSHOT_ARMS=arms,
+                           SNAPSHOT_STATUSES=json.dumps(statuses or {}))
+        if demand:
+            environment["SNAPSHOT"] = "demand"
+        script = '''set -euo pipefail
+. "$ACTUAL_CORE_ROOT/Scripts/ubq-roots.sh"
+. "$ACTUAL_CORE_ROOT/Scripts/pre-push-cache.sh"
+. "$ACTUAL_CORE_ROOT/Scripts/pre-push-runner.sh"
+UBQ_GATE_CACHE_ENABLED=0
+ubq_renderer_arms() { printf '%s' "$SNAPSHOT_ARMS"; }
+ubq_linux_route() { UBQ_LINUX_HOST=""; }
+'''
+        for function in ("ubq_arm_rebuild", "ubq_app_snapshot_sources", "ubq_optional_web_snapshots", name):
+            script += self.function(function) + "\n"
+        script += name + '''
+printf 'RESULT:%s|%s|%s\\n' "${FAILED[*]-}" "${SKIPPED[*]-}" "${ELSEWHERE[*]-}"
+[ "${#FAILED[@]}" -eq 0 ]
+'''
+        checked = subprocess.run(["bash", "-c", script], cwd=self.app, env=environment,
+                                 text=True, capture_output=True, timeout=40)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+        self.assertIn("RESULT:", checked.stdout, checked.stdout + checked.stderr)
+        result = checked.stdout.rsplit("RESULT:", 1)[1].splitlines()[0].split("|")
+        return checked, calls, result
+
+    def backends(self, calls):
+        return [call["arguments"][call["arguments"].index("--backend") + 1]
+                for call in calls if call["tool"] == "run.py"]
+
+    def assert_roots(self, calls):
+        for call in calls:
+            if call["tool"] != "run.py":
+                continue
+            for flag, root in (("--source-root", self.app), ("--core-source-root", self.core),
+                               ("--kit-source-root", self.kit)):
+                self.assertIn(flag, call["arguments"])
+                self.assertEqual(call["arguments"][call["arguments"].index(flag) + 1], str(root))
+            self.assertEqual(call["cwd"], str(self.app))
+
+    def test_normal_gate_runs_selected_arms_in_a_real_gitless_composition(self):
+        checked, calls, result = self.execute("gate_renderer_snapshots")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(self.backends(calls), ["portable", "swift", "web", "linux"])
+        self.assert_roots(calls)
+        self.assertEqual(result, ["", "", ""])
+        for call in calls:
+            if call["tool"] == "run.py":
+                self.assertEqual("--require-ceilings" in call["arguments"],
+                                 call["arguments"][call["arguments"].index("--backend") + 1] != "linux")
+
+    def test_normal_gate_preserves_empty_selection_and_required_arm_failure(self):
+        checked, calls, result = self.execute("gate_renderer_snapshots", arms="")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(calls, [])
+        self.assertEqual(result, ["", "", ""])
+        for status in (1, 2):
+            with self.subTest(status=status):
+                checked, calls, result = self.execute("gate_renderer_snapshots", arms="swift", statuses={"swift": status})
+                self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                self.assertIn("snapshot arm: swift", result[0])
+                self.assertEqual(result[1:], ["", ""])
+                self.assertEqual(self.backends(calls), ["swift"] * (2 if status == 2 else 1))
+                self.assertEqual([call["arguments"] for call in calls if call["tool"] == "build-macos.sh"],
+                                 [["--clean"]] if status == 2 else [])
+
+    def test_normal_gate_uses_canonical_library_mounts_too(self):
+        canonical_core = self.app / "Libraries/ubiquitty-core"
+        canonical_kit = self.app / "Libraries/ubiquitty-kit"
+        shutil.copytree(self.core, canonical_core)
+        shutil.copytree(self.kit, canonical_kit)
+        self.core, self.kit = canonical_core, canonical_kit
+        self.environment.update(UBQ_CORE_ROOT=str(self.core), UBQ_KIT_ROOT=str(self.kit))
+        checked, calls, result = self.execute("gate_renderer_snapshots", arms="portable swift")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(self.backends(calls), ["portable", "swift"])
+        self.assert_roots(calls)
+        self.assertEqual(result, ["", "", ""])
+
+    def test_missing_or_wrong_owner_refuses_before_building_or_rendering(self):
+        for owner in (self.core, self.kit):
+            for missing in (True, False):
+                with self.subTest(owner=owner.name, missing=missing):
+                    path = owner / ("CMakeLists.txt" if missing else "Scripts/repository.txt")
+                    original = path.read_text()
+                    if missing:
+                        path.unlink()
+                    else:
+                        path.write_text("app\n")
+                    try:
+                        for gate in ("gate_renderer_snapshots", "gate_snapshots"):
+                            checked, calls, result = self.execute(gate)
+                            self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                            self.assertEqual(calls, [])
+                            self.assertIn("snapshot source roots", result[0])
+                            self.assertEqual(result[1:], ["", ""])
+                    finally:
+                        path.write_text(original)
+
+    def test_full_darwin_uses_the_official_battery_and_all_native_catalogs(self):
+        module = Path(self.environment["UBQ_BUILD_ROOT"]) / "web-dist/ubiquitty.wasm"
+        module.parent.mkdir(parents=True)
+        module.write_bytes(b"fixture")
+        checked, calls, result = self.execute("gate_snapshots")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(self.backends(calls), ["portable", "macos", "swift", "web"])
+        self.assert_roots(calls)
+        self.assertEqual([call["arguments"] for call in calls if call["tool"] == "build-macos.sh"], [["--no-helpers"]])
+        self.assertEqual([call["tool"] for call in calls[:2]], ["build-macos.sh", "build-core-snapshot.sh"])
+        records = list((self.directory / "ci/apple").glob("battery-*.json"))
+        self.assertEqual(len(records), 1)
+        stages = json.loads(records[0].read_text())
+        self.assertEqual([(stage["key"], stage["state"]) for stage in stages],
+                         [("portable-build", "completed"), ("snapshots", "completed")])
+        self.assertEqual(result, ["", "", ""])
+
+    def test_full_linux_keeps_portable_and_optional_web_without_apple_backends(self):
+        for demand in (False, True):
+            with self.subTest(demand=demand):
+                checked, calls, result = self.execute("gate_snapshots", host="Linux", demand=demand)
+                self.assertEqual(checked.returncode, 1 if demand else 0, checked.stdout + checked.stderr)
+                self.assertEqual(self.backends(calls), ["portable"])
+                self.assertNotIn("build-macos.sh", [call["tool"] for call in calls])
+                self.assert_roots(calls)
+                self.assertIn("Web snapshot regressions", result[0] if demand else result[1])
+        module = Path(self.environment["UBQ_BUILD_ROOT"]) / "web-dist/ubiquitty.wasm"
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_bytes(b"fixture")
+        checked, calls, result = self.execute("gate_snapshots", host="Linux")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(self.backends(calls), ["portable", "web"])
+        self.assertEqual(result, ["", "", ""])
 
 
 if __name__ == "__main__":
