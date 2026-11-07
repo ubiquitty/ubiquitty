@@ -1,6 +1,6 @@
 [submodule "Libraries/ubiquitty-core"]
 	path = Libraries/ubiquitty-core
-	url = https://github.com/ubiquitty/ubiquitty-core.git
+	url = https://github.com/ubiquitty/core.git
 [submodule "Libraries/ubiquitty-kit"]
 	path = Libraries/ubiquitty-kit
-	url = https://github.com/ubiquitty/ubiquitty-kit.git
+	url = https://github.com/ubiquitty/kit.git

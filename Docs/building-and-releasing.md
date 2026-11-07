@@ -8,7 +8,7 @@ For prerequisites and commands for every frontend and library, start with the
 Apple projects, the iOS archive, packaging, and macOS/Linux releases. Update-mechanism specifics (Sparkle, AppImage
 self-update, signing keys) live in [`auto-update.md`](auto-update.md); this is
 the build/distribute overview. Core's
-[shared script index](https://github.com/ubiquitty/ubiquitty-core/blob/main/Scripts/README.md)
+[shared script index](https://github.com/ubiquitty/core/blob/main/Scripts/README.md)
 lists shared tools; the App build entry points are listed below.
 
 ## Components
@@ -556,7 +556,7 @@ built elsewhere.
   `UBIQUITTY_RELEASE_SIGNING=ON` makes the host accept as its successor, its app and its relay only code the
   release team signed, as `ubiquitty-host` or the released app, and refuses an unsigned or ad hoc binary
   wherever it lies. Every other build's host also trusts the files it was installed as
-  ([`sync.md` §6.13](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/sync.md#613-host-handover-live-sessions-survive-a-host-upgrade)).
+  ([`sync.md` §6.13](https://github.com/ubiquitty/core/blob/main/Docs/sync.md#613-host-handover-live-sessions-survive-a-host-upgrade)).
 - Notarized archive of this commit: `./Scripts/archive-macos.sh` fetches Sparkle, builds with Developer ID signing,
   notarizes, staples and checks the app, then keeps the zip, its dSYM, the build log and an `archive.json`
   record under `~/Library/Developer/Ubiquitty/Archives/` (`UBQ_ARCHIVE_ROOT` names another).

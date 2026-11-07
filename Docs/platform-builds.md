@@ -147,8 +147,8 @@ that QUIC dependency stack.
 Both default to Release; each accepts `--debug`. The executables are
 `$UBQ_BUILD_ROOT/host/ubiquitty-host` and `$UBQ_BUILD_ROOT/agent/ubq`.
 Building does not install or start a daemon. See
-[host operation](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/host-management.md)
-and the [CLI reference](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/ubq.md).
+[host operation](https://github.com/ubiquitty/core/blob/main/Docs/host-management.md)
+and the [CLI reference](https://github.com/ubiquitty/core/blob/main/Docs/ubq.md).
 
 The Linux local-handover admission gate needs headers exposing `SO_PEERPIDFD`
 and a kernel implementing it (Linux 6.5 or a backport). A build or kernel without
@@ -279,9 +279,9 @@ cmake --build "$UBQ_BUILD_ROOT/core" \
 Link the CMake target `ubiquitty-core` or the session facade
 `ubiquitty-kit`, not one archive in isolation; the targets carry the model,
 behavior, and backend dependencies. See the
-[Core embedding reference](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/libubiquittycore.md)
-and [UbiquittyKit API](https://github.com/ubiquitty/ubiquitty-kit/blob/main/Docs/ubiquittykit-api.md).
+[Core embedding reference](https://github.com/ubiquitty/core/blob/main/Docs/libubiquittycore.md)
+and [UbiquittyKit API](https://github.com/ubiquitty/kit/blob/main/Docs/ubiquittykit-api.md).
 
 The separate `ubiquitty-snapshot` target is the portable render tool;
 `./Libraries/ubiquitty-core/Scripts/build-core-snapshot.sh` builds it for the
-[snapshot test catalog](https://github.com/ubiquitty/ubiquitty-core/blob/main/Tests/Snapshots/README.md).
+[snapshot test catalog](https://github.com/ubiquitty/core/blob/main/Tests/Snapshots/README.md).
