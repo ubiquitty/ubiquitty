@@ -47,7 +47,9 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 
 # The deployment target has one home: a binary built for a newer floor than the
 # app's Info.plist declares installs on a machine that cannot launch it.
-UBQ_MACOS_MIN="$(sed -n 's/^cxx=//p' "$root/Scripts/macos-deployment-target.txt")"
+# The checkout holding the deployment floors: see CMakeLists.txt.
+coreRoot="${UBIQUITTY_CORE_SOURCE_DIR:-$root/Libraries/ubiquitty-core}"
+UBQ_MACOS_MIN="$(sed -n 's/^cxx=//p' "$coreRoot/Scripts/macos-deployment-target.txt")"
 buildRoot="$root/build/xcode"
 quic=ON
 withIOS=1

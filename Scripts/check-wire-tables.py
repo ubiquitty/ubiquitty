@@ -28,8 +28,23 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gate_report  # noqa: E402 — the path above is what makes it importable
+import library_scripts  # noqa: F401, E402 — makes the libraries' modules importable
+import gate_report  # noqa: E402
 import wire_tables  # noqa: E402
+
+
+
+def read(path):
+    """A file of the app's checkout, where the generated outputs and the clients live.
+
+    The headers are read from Core's checkout by `wire_tables.read`.
+    """
+    try:
+        with open(os.path.join(library_scripts.APP_ROOT, path), encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
 
 EMACS_CLIENT = os.path.join("Source", "Platform", "Emacs", "ubiquitty-sync.el")
 NEOVIM_CLIENT = os.path.join("Source", "Platform", "Neovim", "lua", "ubiquitty_sync", "init.lua")
@@ -112,14 +127,14 @@ def handWrittenFailures(texts, emacsClient, neovimClient):
 def failures():
     """Every offender in the tree as it stands."""
     texts = wire_tables.sources()
-    checkedIn = {path: wire_tables.read(path) for path, _writer in wire_tables.OUTPUTS}
-    return staleFailures(texts, checkedIn) + handWrittenFailures(texts, wire_tables.read(EMACS_CLIENT), wire_tables.read(NEOVIM_CLIENT))
+    checkedIn = {path: read(path) for path, _writer in wire_tables.OUTPUTS}
+    return staleFailures(texts, checkedIn) + handWrittenFailures(texts, read(EMACS_CLIENT), read(NEOVIM_CLIENT))
 
 
 def selfTest():
     problems = []
     texts = wire_tables.sources()
-    checkedIn = {path: wire_tables.read(path) for path, _writer in wire_tables.OUTPUTS}
+    checkedIn = {path: read(path) for path, _writer in wire_tables.OUTPUTS}
     standing = failures()
     if standing:
         problems.append("the tree's own outputs fail: %s" % "; ".join(standing))
@@ -177,8 +192,8 @@ def selfTest():
 
     # A client that keeps a copy of a generated number, and one that does not
     # read its file at all.
-    emacs = wire_tables.read(EMACS_CLIENT)
-    neovim = wire_tables.read(NEOVIM_CLIENT)
+    emacs = read(EMACS_CLIENT)
+    neovim = read(NEOVIM_CLIENT)
     copies = [
         ("an Emacs copy of a kind", emacs + '\n(defconst ubiquitty-sync--kind-raw 69 "A copy.")\n', neovim, EMACS_CLIENT),
         ("an Emacs client that does not require its file", EMACS_READS.sub("(ignore", emacs), neovim, EMACS_CLIENT),

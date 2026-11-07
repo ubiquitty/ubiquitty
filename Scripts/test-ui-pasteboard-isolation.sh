@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 RUN_REAL_GENERAL=0
 if [[ "${1:-}" == "--real-general-pasteboard" && "$#" == 1 ]]; then
     RUN_REAL_GENERAL=1
@@ -20,12 +22,12 @@ ARTIFACTS="$(mktemp -d "${TMPDIR:-/tmp}/ubiquitty-pasteboard-isolation.XXXXXX")"
 trap 'rm -rf "$ARTIFACTS"' EXIT
 HELPER="$ROOT/Source/Platform/macOS/UITest/Swift/PasteboardIsolation.swift"
 DRIVER="$ROOT/Tests/Platform/test_ui_pasteboard_isolation.swift"
-WRITER="$ROOT/Source/Platform/macOS/App/TerminalView/SelectionPasteboard.swift"
+WRITER="$(locate_file Source/Platform/macOS/App/TerminalView/SelectionPasteboard.swift)"
 # The PAL clipboard seam, compiled in so the driver can call it by name: it is
 # the one clipboard writer whose board is chosen inside it rather than passed
 # to it, so isolation is the only thing keeping an OSC 52 payload off the
 # operator's clipboard.
-SEAM="$ROOT/Source/Platform/macOS/ClipboardPasteboard.swift"
+SEAM="$(locate_file Source/Platform/macOS/ClipboardPasteboard.swift)"
 
 compile_driver() {
     xcrun swiftc -swift-version 6 -O -parse-as-library "$1" "$WRITER" "$SEAM" "$DRIVER" -o "$2"

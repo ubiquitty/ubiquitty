@@ -6,7 +6,9 @@
 # Run on each release architecture with Docker; output is outside the checkout.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$ROOT/Scripts/build-root.sh"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+. "$CORE_ROOT/Scripts/build-root.sh"
 ARCH="$(docker run --rm alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd uname -m)"
 case "$ARCH" in x86_64 | aarch64) ;; *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; esac
 WORK="$UBQ_BUILD_ROOT/appimage-support-build/$ARCH"

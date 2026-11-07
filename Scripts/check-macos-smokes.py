@@ -27,7 +27,11 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gate_framework import Gate
+import library_scripts  # noqa: E402,F401 — makes the libraries' modules importable
+import ubq_roots  # noqa: E402
+from gate_framework import Gate  # noqa: E402
+
+APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 #: The trees the app is built from. A change under one of these is what a skip leaves uncovered.
 APP_SOURCES = ("Source/Platform/macOS", "Source/Platform/Apple",
@@ -52,6 +56,12 @@ WAIVED = {}
 class MacOSSmokes(Gate):
     name = "check-macos-smokes"
     subject = "the app is built from"
+
+    def __init__(self, argv=None):
+        super().__init__(argv)
+        # The framework roots a gate at its own checkout, which is Core's where
+        # Core is a library; this gate reads the app's tree.
+        self.root = APP_ROOT
 
     def examine(self):
         build = os.path.join(self.buildRoot(), "macos")
@@ -95,9 +105,9 @@ class MacOSSmokes(Gate):
         # Linux runner would only ever skip.
         differential = "grid-cache-differential"
         log = os.path.join(logs, differential + ".log")
-        config = os.path.join(self.root, "Tests", "Snapshots", "configs", "native", "jetbrains_mono_13.toml")
+        config = library_scripts.locate("Tests/Snapshots/configs/native/jetbrains_mono_13.toml")
         with open(log, "wb") as handle:
-            finished = subprocess.run([sys.executable, os.path.join(self.root, "Scripts/check-grid-cache-differential.py"),
+            finished = subprocess.run([sys.executable, library_scripts.locate("Scripts/check-grid-cache-differential.py"),
                                        binary, config], stdout=handle, stderr=subprocess.STDOUT, check=False)
         outcomes[differential] = finished.returncode
         if finished.returncode == 0:
@@ -209,15 +219,12 @@ class MacOSSmokes(Gate):
         tip attributes to this branch every file someone else moved since it
         forked.
         """
-        base = self.git("merge-base", "HEAD", "origin/main")
-        if not base:
-            return []
-        changed = self.git("diff", "--name-only", f"{base}...HEAD", "--", *APP_SOURCES)
-        return changed.splitlines()
+        # A library mount that moved is read as the files between its pins.
+        return ubq_roots.changed_paths("origin/main", self.root, APP_SOURCES) or []
 
     def buildRoot(self):
         """Where builds land, which is outside the checkout."""
-        return subprocess.run([sys.executable, os.path.join(self.root, "Scripts", "build_root.py")],
+        return subprocess.run([sys.executable, library_scripts.locate("Scripts/build_root.py")],
                               capture_output=True, text=True, check=False).stdout.strip()
 
     def git(self, *arguments):

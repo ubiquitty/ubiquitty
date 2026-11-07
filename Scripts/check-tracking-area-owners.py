@@ -62,12 +62,22 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import library_scripts  # noqa: F401, E402 — makes the libraries' modules importable
 import gate_report  # noqa: E402
 
 GATE = "check-tracking-area-owners"
 
 REPO = Path(__file__).resolve().parent.parent
-SOURCE = REPO / "Source"
+
+
+def swiftFiles():
+    """Every Swift file under Source/ in the app and in the libraries it builds on.
+
+    A tracking area's owner derives from types the Kit declares, so the chain is
+    followed through the checkouts that hold them.
+    """
+    return sorted(path for directory in library_scripts.directories("Source")
+                  for path in Path(directory).rglob("*.swift"))
 
 # The AppKit classes that already inherit the rollover callbacks. A local type
 # deriving from any of them is a responder; a local type deriving from another
@@ -423,7 +433,7 @@ def platformAliases():
     - Returns: a dict of alias -> underlying type name.
     """
     aliases = {}
-    for path in sorted(SOURCE.rglob("*.swift")):
+    for path in swiftFiles():
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
@@ -453,7 +463,7 @@ def declaredBases():
     - Returns: a dict of type name -> list of base names.
     """
     bases = {}
-    for path in sorted(SOURCE.rglob("*.swift")):
+    for path in swiftFiles():
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
@@ -470,14 +480,14 @@ def swiftSites():
     - Returns: a list of Site.
     """
     sites = []
-    for path in sorted(SOURCE.rglob("*.swift")):
+    for path in swiftFiles():
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
         if "NSTrackingArea" not in text:
             continue
-        sites.extend(sitesIn(str(path.relative_to(REPO)), text))
+        sites.extend(sitesIn(library_scripts.relative(path), text))
     return sites
 
 

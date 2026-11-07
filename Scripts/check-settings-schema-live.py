@@ -45,7 +45,8 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gate_report  # noqa: E402 — the path above is what makes it importable
+import library_scripts  # noqa: F401, E402 — makes the libraries' modules importable
+import gate_report  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
@@ -72,7 +73,7 @@ def rows(text):
 
 def read(path):
     try:
-        with open(os.path.join(REPO, path), encoding="utf-8", errors="replace") as handle:
+        with open(library_scripts.locate(path), encoding="utf-8", errors="replace") as handle:
             return handle.read()
     except OSError:
         return ""
@@ -175,10 +176,14 @@ def main():
               "changed, or the file moved." % SCHEMA, file=sys.stderr)
         return 1
 
-    listing = subprocess.run(["git", "-C", REPO, "ls-files"],
-                             capture_output=True, text=True)
-    others = [p for p in listing.stdout.split("\n")
-              if p.endswith(SEARCHED) and p != SCHEMA]
+    # A setting may be named by any repository's files: Core holds the table and
+    # the app's Settings pane reads it.
+    tracked = set()
+    for checkout in library_scripts.checkouts():
+        listing = subprocess.run(["git", "-C", checkout, "ls-files"],
+                                 capture_output=True, text=True)
+        tracked.update(listing.stdout.split("\n"))
+    others = sorted(p for p in tracked if p.endswith(SEARCHED) and p != SCHEMA)
     haystack = "\n".join(read(p) for p in others)
     if not haystack:
         print("check-settings-schema-live: FAILED — no other source read, so "

@@ -2,6 +2,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.13)
+
+# The checkouts this build reads besides its own tree: ubiquitty-core
+# (libubiquitty and the multiplexer) and ubiquitty-kit (the renderers and the
+# drop-in terminal views). Every path below names the checkout of the
+# repository that owns the file; a file every repository carries is read from
+# this tree. Both default to the submodules under Libraries/, and both are ABSOLUTE
+# rather than REALPATH, so a compile line spells a root the way its caller did.
+#
+# Core's build modules are read from Core's checkout, at this top directory:
+# Scripts/cmake/UbiquittyCoreRoot.cmake says why and in which order.
+if(NOT DEFINED UBIQUITTY_CORE_SOURCE_DIR)
+    set(UBIQUITTY_CORE_SOURCE_DIR "${CMAKE_SOURCE_DIR}/Libraries/ubiquitty-core")
+endif()
+include("${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyCoreRoot.cmake")
+if(NOT DEFINED UBIQUITTY_KIT_SOURCE_DIR)
+    set(UBIQUITTY_KIT_SOURCE_DIR "${CMAKE_SOURCE_DIR}/Libraries/ubiquitty-kit")
+endif()
+get_filename_component(UBIQUITTY_KIT_SOURCE_DIR "${UBIQUITTY_KIT_SOURCE_DIR}" ABSOLUTE)
+# The version is this tree's: its commit and its VERSION file, not Core's.
+if(NOT DEFINED UBIQUITTY_VERSION_SOURCE_DIR)
+    set(UBIQUITTY_VERSION_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
+endif()
+# The header root, once per distinct checkout, Core's first: a single directory
+# when every root is this tree.
+set(UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source" "${UBIQUITTY_KIT_SOURCE_DIR}/Source" "${CMAKE_SOURCE_DIR}/Source")
+list(REMOVE_DUPLICATES UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES)
+
 # The Swift 6 language mode, for every Swift target in both Apple arms: its
 # data-race checking is the enforcement that keeps the tree at zero
 # concurrency diagnostics, as a build failure rather than a warning. The Xcode
@@ -12,33 +40,6 @@ if(CMAKE_GENERATOR MATCHES "Xcode")
     set(CMAKE_XCODE_ATTRIBUTE_SWIFT_VERSION 6)
 else()
     set(CMAKE_Swift_LANGUAGE_VERSION 6)
-endif()
-
-# Route compilation through ccache when it is installed. Vendored ThirdParty
-# never changes, so compiling it again on every clean configure is pure repeat
-# cost. Silently absent is fine: an unset launcher is the
-# stock build, so nobody has to install anything for the tree to work.
-#
-# Ahead of the project() call because CMAKE_<LANG>_COMPILER_LAUNCHER is read
-# when a language is enabled, not when a target is defined.
-#
-# The sloppiness setting is carried here rather than left to the operator's
-# environment, because without it the cache misses much of the tree and
-# silently so. ccache will not reuse a compilation that consumed a precompiled
-# header unless pch_defines lets it skip verifying the PCH's own macro state,
-# and the test suite shares one PCH across nearly every target.
-#
-# time_macros covers __DATE__/__TIME__, which nothing here depends on.
-if(NOT DEFINED CMAKE_CXX_COMPILER_LAUNCHER)
-    find_program(UBIQUITTY_CCACHE ccache)
-    if(UBIQUITTY_CCACHE)
-        set(_ubq_ccache_launcher
-            ${CMAKE_COMMAND} -E env CCACHE_SLOPPINESS=pch_defines,time_macros
-            ${UBIQUITTY_CCACHE})
-        set(CMAKE_C_COMPILER_LAUNCHER ${_ubq_ccache_launcher})
-        set(CMAKE_CXX_COMPILER_LAUNCHER ${_ubq_ccache_launcher})
-        message(STATUS "Ubiquitty: compiling through ccache (${UBIQUITTY_CCACHE})")
-    endif()
 endif()
 
 #
@@ -73,147 +74,9 @@ endif()
 # The Core builds as C++23 with -fno-exceptions and -fno-rtti (WebKit
 # style), which also keeps binary size bounded.
 
-# Minimum supported macOS. Must be set before project() so the compiler /
-# SDK probes pick it up. Ignored on non-Apple hosts. Override the C++ floor with
-# -DCMAKE_OSX_DEPLOYMENT_TARGET=...
-#
-# Scripts/macos-deployment-target.txt holds two floors and says why each is the
-# number it is. `cxx` becomes CMAKE_OSX_DEPLOYMENT_TARGET, so every C-family
-# target inherits it: the portable Core, UbiquittyKit, the bundled
-# ubiquitty-host and ubq helpers, and the Metal shader library; the
-# vendored QUIC builds and the generated Xcode workspace read the same line.
-# `app` is higher and is the floor a user meets: the app bundle's
-# LSMinimumSystemVersion and the Swift frontend's target. Every consumer reads
-# its number from that file rather than restating it.
-file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/Scripts/macos-deployment-target.txt" _ubqFloors
-     REGEX "^(cxx|app)=")
-foreach(_ubqLine IN LISTS _ubqFloors)
-    if(_ubqLine MATCHES "^cxx=(.+)$")
-        set(UBIQUITTY_MACOS_MIN "${CMAKE_MATCH_1}")
-    elseif(_ubqLine MATCHES "^app=(.+)$")
-        set(UBIQUITTY_MACOS_APP_MIN "${CMAKE_MATCH_1}")
-    endif()
-endforeach()
-if(NOT UBIQUITTY_MACOS_MIN OR NOT UBIQUITTY_MACOS_APP_MIN)
-    message(FATAL_ERROR "Scripts/macos-deployment-target.txt must define cxx= and app=")
-endif()
-
-# An iOS configure reads the same file and must take neither number.
-# CMAKE_OSX_DEPLOYMENT_TARGET names the deployment target of whichever Apple
-# platform is being built, so the macOS floor written into an iOS build declares
-# iOS 13.3 — a version no SDK in this toolchain still builds for, and one no
-# diagnostic attributes to a file named for macOS. The iOS floor is its own
-# number, set first so the macOS reconciliation below is inert for this build
-# rather than merely harmless.
-#
-# Every iOS product shares the same deployment floor: the first release of the
-# previous major, which is what a phone that has not taken this year's update
-# runs. What the shell reaches for above it — the bar items' overflow
-# priorities (27.0) and the arrangement view that lays a Duo's pane pair clear
-# of the fold (27.1) — is gated on availability, and an older device lays the
-# same items and the same pair out without them.
-set(UBIQUITTY_IOS_MIN "26.0")
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "${UBIQUITTY_IOS_MIN}" CACHE STRING
-            "Minimum iOS version the binaries support")
-    elseif(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "${UBIQUITTY_IOS_MIN}")
-        message(STATUS "Ubiquitty: iOS deployment target ${CMAKE_OSX_DEPLOYMENT_TARGET} is below this tree's ${UBIQUITTY_IOS_MIN}; raising it")
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "${UBIQUITTY_IOS_MIN}" CACHE STRING
-            "Minimum iOS version the binaries support" FORCE)
-    endif()
-endif()
-
-# A directory configured before that file changed keeps the OLD value:
-# CMAKE_OSX_DEPLOYMENT_TARGET is a cache variable, `if(NOT DEFINED)` never
-# revisits it, and CMake says nothing. The compiler then rejects a header nobody
-# edited, naming neither the cache nor the change.
-#
-# So the value this tree last chose is remembered beside it. When they differ, a
-# cached target equal to the PREVIOUS choice came from here rather than from the
-# person building, and is updated. One equal to neither was passed with -D and is
-# left alone — which is what makes this safe to run on every configure.
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    # This build's floor was set above. Both arms below compare a target against
-    # the macOS number, and an iOS target is not on that scale.
-elseif(DEFINED CACHE{UBIQUITTY_MACOS_MIN_CHOSEN})
-    if(NOT "$CACHE{UBIQUITTY_MACOS_MIN_CHOSEN}" STREQUAL "${UBIQUITTY_MACOS_MIN}"
-       AND "${CMAKE_OSX_DEPLOYMENT_TARGET}" STREQUAL "$CACHE{UBIQUITTY_MACOS_MIN_CHOSEN}")
-        message(STATUS "Ubiquitty: deployment target $CACHE{UBIQUITTY_MACOS_MIN_CHOSEN} -> ${UBIQUITTY_MACOS_MIN}; this directory predates the change")
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "${UBIQUITTY_MACOS_MIN}" CACHE STRING
-            "Minimum macOS version the binaries support" FORCE)
-    endif()
-elseif(DEFINED CMAKE_OSX_DEPLOYMENT_TARGET
-       AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "${UBIQUITTY_MACOS_MIN}")
-    # A directory configured before this marker existed carries no record of
-    # what chose its target, so the two cases cannot be told apart and the
-    # comparison has to stand in for the record: BELOW the tree's floor is the
-    # one value that cannot compile, whoever set it. Raising it is the only
-    # action that leaves a buildable directory either way.
-    message(STATUS "Ubiquitty: deployment target ${CMAKE_OSX_DEPLOYMENT_TARGET} is below this tree's ${UBIQUITTY_MACOS_MIN}; raising it")
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "${UBIQUITTY_MACOS_MIN}" CACHE STRING
-        "Minimum macOS version the binaries support" FORCE)
-endif()
-set(UBIQUITTY_MACOS_MIN_CHOSEN "${UBIQUITTY_MACOS_MIN}" CACHE INTERNAL
-    "The target this tree last chose, so a moved default is distinguishable from an override")
-
-if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "${UBIQUITTY_MACOS_MIN}" CACHE STRING
-        "Minimum macOS version the binaries support")
-endif()
-
-# Pin the macOS SDK so the compiler gets a real -isysroot. Without it CMake
-# resolves system frameworks under a bare -F (a USER framework path), which
-# demotes Apple's own headers to non-system and floods the build with
-# deprecation / unused-parameter warnings from inside AppKit / Foundation /
-# ApplicationServices — noise that would also block -Werror. A resolved
-# -isysroot restores their system-header status. Host-side only; the Linux
-# frontend builds on Linux where this is a no-op.
-#
-# An iOS build is excluded by name rather than by the CMAKE_OSX_SYSROOT test
-# alone: `xcrun --show-sdk-path` answers with the macOS SDK whatever is being
-# built, so a configure that reached here would pin an iOS target to macOS
-# headers and fail on the first UIKit import with a message about a missing
-# framework.
-if(CMAKE_HOST_APPLE AND NOT CMAKE_OSX_SYSROOT
-        AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    execute_process(COMMAND xcrun --sdk macosx --show-sdk-path
-        OUTPUT_VARIABLE UBIQUITTY_MACOS_SDK
-        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    if(UBIQUITTY_MACOS_SDK AND IS_DIRECTORY "${UBIQUITTY_MACOS_SDK}")
-        set(CMAKE_OSX_SYSROOT "${UBIQUITTY_MACOS_SDK}" CACHE PATH
-            "macOS SDK sysroot (resolved via xcrun)" FORCE)
-    endif()
-endif()
-
-# The version of this build, derived from the commit it is built from: the
-# nearest `vMAJOR.MINOR.PATCH` tag and the commits past it, or the VERSION file
-# where the tree cannot say. The rule, its bounds and its refusals are in
-# Scripts/cmake/BuildVersion.cmake.
-include(${CMAKE_CURRENT_SOURCE_DIR}/Scripts/cmake/BuildVersion.cmake)
-ubiquitty_resolve_build_version("${CMAKE_CURRENT_SOURCE_DIR}")
-message(STATUS "Ubiquitty version: ${UBIQUITTY_VERSION} (${UBIQUITTY_BUILD_IDENTITY})")
-set(UBIQUITTY_BUILD_VERSION_DIR "${CMAKE_BINARY_DIR}/generated/version")
-set(UBIQUITTY_BUILD_VERSION_RECONFIGURE_STAMP "${UBIQUITTY_BUILD_VERSION_DIR}/reconfigure.stamp")
-file(MAKE_DIRECTORY "${UBIQUITTY_BUILD_VERSION_DIR}")
-if(NOT EXISTS "${UBIQUITTY_BUILD_VERSION_RECONFIGURE_STAMP}")
-    file(WRITE "${UBIQUITTY_BUILD_VERSION_RECONFIGURE_STAMP}" "")
-endif()
-# The version is baked into bundle metadata when the build is configured, so
-# whatever moves it re-runs the configure: VERSION and the rule themselves, the
-# worktree's HEAD and its log, and the stamp the build step writes when it
-# finds the tree on another version than the one configured. The portable-Core
-# source SSOT is read with file(STRINGS) at configure time, so it needs the
-# same treatment — without it, adding a Core .cpp silently leaves every
-# configured build tree linking the stale source list until a manual
-# reconfigure.
-ubiquitty_build_version_configure_inputs("${CMAKE_CURRENT_SOURCE_DIR}" _ubq_version_configure_inputs)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Scripts/cmake/BuildVersion.cmake"
-    "${UBIQUITTY_BUILD_VERSION_RECONFIGURE_STAMP}"
-    ${_ubq_version_configure_inputs}
-    "${CMAKE_CURRENT_SOURCE_DIR}/Scripts/portable-core-sources.txt")
+# The compiler launcher, the deployment floors, the SDK and the version, which
+# project() reads.
+include("${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyPreProject.cmake")
 
 # CMake uses the top-level project name as the generated IDE-project filename.
 # Keep the product-facing default stable, while allowing the multi-frontend
@@ -237,30 +100,10 @@ if(NOT UBIQUITTY_CMAKE_PROJECT_NAME MATCHES "^[A-Za-z][A-Za-z0-9_]*$")
 endif()
 project(${UBIQUITTY_CMAKE_PROJECT_NAME} VERSION "${UBIQUITTY_VERSION_NAMED}" LANGUAGES C CXX)
 
-# The compiler is known from here on, and nothing has been compiled yet: a
-# compiler below the floor is refused now, with the remedy, rather than once per
-# translation unit by Source/Base/ToolchainFloor.h.
-include(${CMAKE_CURRENT_SOURCE_DIR}/Scripts/cmake/ToolchainFloor.cmake)
-ubiquitty_check_toolchain_floor("${CMAKE_CXX_COMPILER_ID}" "${CMAKE_CXX_COMPILER_VERSION}")
-
-# A translation unit whose whole body sits behind a build flag — PerfCounters.cpp
-# under UBIQUITTY_PERF_DIAG=OFF — compiles to an object with no symbols, and
-# Apple's ranlib says so for every archive that holds one: "has no symbols",
-# once per library per configure. The object is right; the symbol table is what
-# ar builds and ranlib rebuilds, so ar is told to skip it (S) and ranlib to keep
-# quiet about an empty member. GNU tools have no such warning and keep CMake's
-# default recipe.
-if(APPLE)
-    foreach(_ubq_lang C CXX)
-        set(CMAKE_${_ubq_lang}_ARCHIVE_CREATE "<CMAKE_AR> Scr <TARGET> <LINK_FLAGS> <OBJECTS>")
-        set(CMAKE_${_ubq_lang}_ARCHIVE_FINISH "<CMAKE_RANLIB> -no_warning_for_no_symbols -c <TARGET>")
-    endforeach()
-endif()
-
-# Xcode archives with libtool rather than ar and ranlib, so the recipe above
-# does not reach it. Its flag says the same thing, set per static library below
-# because the generator writes an empty OTHER_LIBTOOLFLAGS on every target and
-# that overrides a project-wide value.
+# Xcode archives with libtool rather than ar and ranlib, so the recipe
+# UbiquittyToolchain.cmake sets does not reach it. Its flag says the same thing,
+# set per static library below because the generator writes an empty
+# OTHER_LIBTOOLFLAGS on every target and that overrides a project-wide value.
 #
 # The App Intents metadata step has nothing to extract: no target here declares
 # an intent, and the step otherwise reports "Metadata extraction skipped" for
@@ -269,108 +112,6 @@ endif()
 if(CMAKE_GENERATOR MATCHES "Xcode")
     set(CMAKE_XCODE_ATTRIBUTE_LM_SKIP_METADATA_EXTRACTION YES)
 endif()
-
-# An empty CMAKE_BUILD_TYPE is not a neutral default: CMake passes no
-# optimisation flag at all, so a hand-configured build directory produces a -O0
-# binary that looks and runs like any other. In a terminal whose whole claim is
-# throughput that is a trap -- an unoptimised host serialises its scrollback
-# byte at a time under libc++ container annotations, burns a core, and every
-# number measured against it is wrong in a way nothing reports.
-#
-# The build scripts always pass one. This is for `cmake -B <dir> -D...` by hand,
-# which is how benchmarks and bisects get configured, and where the mistake
-# costs the most.
-#
-# A test tree defaults to Debug instead: Release carries NDEBUG, NDEBUG changes
-# sizeof(CellGrid), and the gate below rejects that combination outright. It also
-# compiles out the assertions the suite exists to trip -- a Release test tree
-# reports every case passing while a checked-pointer violation goes unnoticed,
-# which is this same trap wearing the other face.
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    if(UBIQUITTY_BUILD_TESTS)
-        set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build type" FORCE)
-    else()
-        set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
-    endif()
-    message(WARNING
-        "CMAKE_BUILD_TYPE was empty, which means NO optimisation, not a default.\n"
-        "  Defaulting to Release. Pass -DCMAKE_BUILD_TYPE=Debug if that is what you meant.")
-endif()
-message(STATUS "Ubiquitty build type: ${CMAKE_BUILD_TYPE}")
-
-# The version reaches a binary through one generated header, which one
-# translation unit includes (Source/Core/BuildVersion.cpp). It is
-# never a compile definition: a definition rides every translation unit's
-# command line, and a version that moves with each commit would then recompile
-# the tree on every pull. The header lives in the build directory, so nothing
-# that hashes Source/ sees it change.
-#
-# The configure writes it, and a step that runs in every build rewrites it when
-# its text would change: a commit, or a first edit to a tracked file, which the
-# build identity names. The include directory is the same on every command line
-# in every build, so it invalidates nothing.
-set(UBIQUITTY_BUILD_VERSION_HEADER "${UBIQUITTY_BUILD_VERSION_DIR}/UbiquittyBuildVersion.h")
-ubiquitty_write_build_version_header(
-    "${UBIQUITTY_BUILD_VERSION_HEADER}" "${UBIQUITTY_VERSION}" "${UBIQUITTY_BUILD_IDENTITY}")
-include_directories("${UBIQUITTY_BUILD_VERSION_DIR}")
-# What this configure derived, for the build step to hold the tree against. A
-# file rather than an argument below, so the build graph is the same text at
-# every commit.
-file(WRITE "${UBIQUITTY_BUILD_VERSION_DIR}/configured-version.txt" "${UBIQUITTY_VERSION}\n")
-add_custom_target(ubiquitty-build-version
-    COMMAND "${CMAKE_COMMAND}"
-        "-DUBIQUITTY_VERSION_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
-        "-DUBIQUITTY_VERSION_HEADER=${UBIQUITTY_BUILD_VERSION_HEADER}"
-        "-DUBIQUITTY_VERSION_CONFIGURED_FILE=${UBIQUITTY_BUILD_VERSION_DIR}/configured-version.txt"
-        "-DUBIQUITTY_VERSION_RECONFIGURE_STAMP=${UBIQUITTY_BUILD_VERSION_RECONFIGURE_STAMP}"
-        -P "${CMAKE_SOURCE_DIR}/Scripts/cmake/BuildVersion.cmake"
-    BYPRODUCTS "${UBIQUITTY_BUILD_VERSION_HEADER}"
-    COMMENT "Checking the build version"
-    VERBATIM)
-
-# Embed the canonical shell-completion scripts (Resources/shell-integration/*)
-# into a generated header so `ubq completions bash|zsh` can print
-# them with no install footprint. Single source of truth: the Resource files.
-# A long raw-string delimiter that cannot appear inside a shell script keeps
-# arbitrary script bytes literal.
-function(ubiquitty_generate_completions_header out_header)
-    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Resources/shell-integration/ubq.bash" _bash)
-    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Resources/shell-integration/ubq.zsh" _zsh)
-    set(_content "// Generated by CMake from Resources/shell-integration/*. DO NOT EDIT.\n")
-    string(APPEND _content "#pragma once\n")
-    string(APPEND _content "namespace Ubiquitty { namespace Agent {\n")
-    string(APPEND _content "inline const char* bashCompletion = R\"UBQCOMPLETION(${_bash})UBQCOMPLETION\";\n")
-    string(APPEND _content "inline const char* zshCompletion = R\"UBQCOMPLETION(${_zsh})UBQCOMPLETION\";\n")
-    string(APPEND _content "} }\n")
-    file(WRITE "${out_header}" "${_content}")
-endfunction()
-
-# Embed the shell-integration scripts (Resources/shell-integration/*) in the
-# host binary, which writes them to its control directory for the shells it
-# starts: a host copied to another machine carries no Resources directory. The
-# file is rewritten only when its bytes change, and editing a script
-# reconfigures.
-function(ubiquitty_generate_shell_integration_source out_source)
-    set(_content "// Generated by CMake from Resources/shell-integration/*. DO NOT EDIT.\n")
-    string(APPEND _content "#include \"Platform/Host/ShellIntegrationFiles.h\"\n\n")
-    string(APPEND _content "namespace Ubiquitty::Host {\n\n")
-    string(APPEND _content "std::span<const ShellIntegrationScript> shellIntegrationScripts()\n{\n")
-    string(APPEND _content "    static constexpr ShellIntegrationScript scripts[] {\n")
-    foreach(_name bash.sh zsh.sh fish.fish)
-        set(_path "${CMAKE_CURRENT_SOURCE_DIR}/Resources/shell-integration/${_name}")
-        file(READ "${_path}" _body)
-        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_path}")
-        string(APPEND _content "        { \"${_name}\", R\"UBQINTEGRATION(${_body})UBQINTEGRATION\" },\n")
-    endforeach()
-    string(APPEND _content "    };\n    return scripts;\n}\n\n} // namespace Ubiquitty::Host\n")
-    set(_existing "")
-    if(EXISTS "${out_source}")
-        file(READ "${out_source}" _existing)
-    endif()
-    if(NOT _existing STREQUAL _content)
-        file(WRITE "${out_source}" "${_content}")
-    endif()
-endfunction()
 
 # ----------------------------------------------------------------------
 # Frontend selection.
@@ -390,707 +131,12 @@ set(UBIQUITTY_FRONTEND "${UBIQUITTY_FRONTEND}" CACHE STRING
     "Frontend to build (macOS, iOS, Host, Agent, Linux, Wscons, Core)")
 message(STATUS "Ubiquitty frontend: ${UBIQUITTY_FRONTEND}")
 
-# Treat compiler warnings as errors in every first-party compile: -Werror for
-# C, C++ and Objective-C (set per target, beside each target's warning list),
-# -warnings-as-errors for Swift (set once here, so every Swift target in this
-# directory and below inherits it, and the Xcode generator carries it into
-# OTHER_SWIFT_FLAGS). ON by default to keep the tree warning-clean; flip OFF
-# (-DUBIQUITTY_WERROR=OFF) if a new SDK/compiler version introduces warnings in
-# code you can't touch yet, so a toolchain bump never hard-blocks a build.
-option(UBIQUITTY_WERROR "Treat compiler warnings as errors" ON)
-add_compile_options(
-    "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<BOOL:${UBIQUITTY_WERROR}>>:-warnings-as-errors>")
-
-# Xcode enables -Wshorten-64-to-32 by default and Ninja builds do not, so an
-# implicit 64-to-32-bit narrowing used to surface only in an Xcode build. Every
-# clang compile of first-party C and C++ code asks for it. GCC has
-# no such flag, so the expression is empty there. Vendored sources carry -w.
-set(UBIQUITTY_NARROWING_WARNING
-    "$<$<COMPILE_LANG_AND_ID:C,Clang,AppleClang>:-Wshorten-64-to-32>"
-    "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-Wshorten-64-to-32>")
-
-# ----------------------------------------------------------------------
-# QUIC transport (ngtcp2 + AWS-LC) — the resilient always-on datagram transport
-# (roaming / NAT / loss survival). ON for every shipping frontend (the macOS app,
-# the native host, and the static-musl Linux cross-build); the pinned stack is
-# auto-fetched below if missing. OFF applies only to libUbiquittyCore, the
-# dependency-free standalone Core. The link step finds the static libs + headers
-# under UBIQUITTY_QUIC_PREFIX.
-# ----------------------------------------------------------------------
-option(UBIQUITTY_QUIC "Build the QUIC transport (ngtcp2 + AWS-LC)" ON)
-# The host tests link against the portable Core layer chain, which only the
-# Core frontend defines; Tests/CMakeLists.txt finds and registers them.
-option(UBIQUITTY_BUILD_TESTS "Configure the host tests and register each one with CTest" OFF)
-option(UBIQUITTY_BUILD_SYNC_TRANSPORT_ACCEPTANCE
-    "Build the isolated real SSH/QUIC acceptance executable (Host, QUIC, Debug only)" OFF)
-if(UBIQUITTY_BUILD_SYNC_TRANSPORT_ACCEPTANCE AND
-        (NOT UBIQUITTY_FRONTEND STREQUAL "Host" OR NOT UBIQUITTY_QUIC))
-    message(FATAL_ERROR
-        "Sync transport acceptance requires UBIQUITTY_FRONTEND=Host and UBIQUITTY_QUIC=ON")
-endif()
-
-# NDEBUG does not merely delete assert() here. CellGrid declares
-# `m_paintInvariantBroken` inside #ifndef NDEBUG, and `assertInvariants` the same
-# way, so sizeof(CellGrid) differs between a TU that defines it and one that does
-# not. A tree where some
-# translation units have it is not a weaker test run — it is an ODR violation that
-# links, runs, and prints its pass line.
-#
-# Fatal rather than a warning for that reason: there is no runtime signal to notice
-# later. The FLAGS are read rather than the build type, so NDEBUG arriving through
-# CXXFLAGS or a toolchain file is caught too, and the config is uppercased because
-# that is how CMake looks the per-config flags up — `-DCMAKE_BUILD_TYPE=debug` is
-# legal and must not trip this.
-string(TOUPPER "${CMAKE_BUILD_TYPE}" _ubq_config_upper)
-if((UBIQUITTY_BUILD_TESTS OR UBIQUITTY_BUILD_SYNC_TRANSPORT_ACCEPTANCE) AND
-        "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_ubq_config_upper}}"
-        MATCHES "NDEBUG")
-    message(FATAL_ERROR
-        "UBIQUITTY_BUILD_TESTS=ON with NDEBUG in the compile flags "
-        "(CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}).\n"
-        "  NDEBUG changes sizeof(CellGrid), so the tests and the code under them "
-        "would disagree about the layout of the type they share.\n"
-        "  Configure the test tree with -DCMAKE_BUILD_TYPE=Debug.")
-endif()
-
-# A standard library that checks its subscripts, for the test tree only.
-#
-# Both spellings, because the two libraries this tree is compiled against
-# disagree about the name and each ignores the other's: libc++ reads the
-# hardening mode, libstdc++ reads the assertions switch. Fast mode is the tier
-# that checks element access and iterator validity without the allocator and
-# complexity checks the debug tier adds, so the cost is a compare and a branch
-# at each subscript rather than a different data structure.
-#
-# The reason it is set here rather than left to whoever configures a build: an
-# unchecked `operator[]` past the end of a container cannot report a defect, so
-# an arm compiled without this is not weak evidence about out-of-bounds reads —
-# it is no evidence. Agreement is evidence only among arms that could have
-# disagreed.
-#
-# The whole tree compiles clean under it, and its cost is small beside what a
-# sweep of cases spends.
-#
-# Scoped to the test configuration, so the shipping frontends keep the unchecked
-# subscript: this is an instrument for the tier that runs cases rather than a
-# guard for the tier that draws frames, and a bounds check in buildCellInstances
-# would sit in the hottest loop in the renderer.
-#
-# The switch exists so the question "was this case failing before the checks, or
-# because of them" can be answered by building both ways. Answering it any other
-# way means reasoning about a trap from its absence, which is the reasoning this
-# whole block exists to remove.
-option(UBIQUITTY_TEST_BOUNDS_CHECKS "Compile the test tree against a checking standard library" ON)
-if(UBIQUITTY_BUILD_TESTS AND UBIQUITTY_TEST_BOUNDS_CHECKS)
-    # C and C++ only: a Swift compile takes -D as a bare condition and warns
-    # on the value, and the test tree's Swift targets are warning-clean.
-    add_compile_definitions(
-        "$<$<COMPILE_LANGUAGE:C,CXX>:_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST>"
-        "$<$<COMPILE_LANGUAGE:C,CXX>:_GLIBCXX_ASSERTIONS=1>")
-endif()
-
-# Compressed debug information in the Linux test tree's Debug builds. ELF
-# carries DWARF in the binary itself, about four fifths of a test binary's 100
-# MB, and a daemon a test drives reads its whole executable when it pins the
-# files a local adopt may come from: on a loaded build machine the hashing
-# alone took a handoff case past ctest's limit. Compressed, the binaries and
-# the build trees are about half the size. zlib rather than zstd: Fedora's gdb
-# reads zlib-compressed sections and refuses zstd ones ("BFD is not built with
-# zstd support"), while the sanitizers' symbolizer reads both. None where the
-# compiler, assembler and linker do not take it. Mach-O keeps its DWARF beside
-# the objects, so macOS has nothing here to compress.
-if(UBIQUITTY_BUILD_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    include(CheckCXXSourceCompiles)
-    set(_ubq_saved_required_flags "${CMAKE_REQUIRED_FLAGS}")
-    set(CMAKE_REQUIRED_FLAGS "-g -gz=zlib")
-    check_cxx_source_compiles("int main() { return 0; }" UBIQUITTY_LINKS_ZLIB_DEBUG_SECTIONS)
-    set(CMAKE_REQUIRED_FLAGS "${_ubq_saved_required_flags}")
-    if(UBIQUITTY_LINKS_ZLIB_DEBUG_SECTIONS)
-        add_compile_options("$<$<AND:$<CONFIG:Debug>,$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>>:-gz=zlib>")
-        add_link_options("$<$<CONFIG:Debug>:-gz=zlib>")
-    endif()
-endif()
-
-# Source-based coverage. Set at the top level rather than per target so the Core
-# libraries and the tests that exercise them are instrumented by one switch —
-# llvm-cov attributes a Core line to the test binary that ran it, and a
-# half-instrumented tree reports that line as unexecuted.
-option(UBIQUITTY_COVERAGE "Instrument for llvm-cov source-based coverage" OFF)
-if(UBIQUITTY_COVERAGE)
-    # -runtime-counter-relocation is what makes CONTINUOUS mode work, and the
-    # shell tier asks for continuous mode by putting %c in LLVM_PROFILE_FILE
-    # (Tests/CMakeLists.txt) so a daemon killed by a signal still leaves a
-    # complete profile. On ELF the counters are not writable in place, so the
-    # runtime needs the bias symbol this flag emits; without it every
-    # instrumented process prints
-    #
-    #     LLVM Profile Error: __llvm_profile_counter_bias is undefined
-    #
-    # on stderr, continuous mode does not happen, and the profile is whatever
-    # the exit hook managed to write — which for a signalled daemon is nothing.
-    # The message is not fatal, which is why this survived: the process exits 0
-    # and the run looks well. It is the message itself that fails a test, by
-    # landing in a stream the test reads. Mach-O relocates counters without the
-    # flag and accepts it as a no-op, so it is unconditional rather than
-    # per-platform — one spelling cannot drift from the other.
-    #
-    # Clang's languages only. These are clang's spellings, and a Swift target
-    # in the tree (the pasteboard library a test links) hands them to swiftc,
-    # which stops at `unknown argument: '-fprofile-instr-generate'` and takes
-    # the whole instrumented build with it. The index is of C++ sources, so a
-    # Swift target is built plain.
-    foreach(_ubq_coverage_option -fprofile-instr-generate -fcoverage-mapping -fprofile-update=atomic "SHELL:-mllvm -runtime-counter-relocation")
-        add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:${_ubq_coverage_option}>")
-    endforeach()
-    # A test whose link swiftc drives still carries instrumented C++ objects,
-    # which need the profile runtime; `-profile-generate` is swiftc's spelling
-    # of the link half.
-    add_link_options("$<IF:$<LINK_LANGUAGE:Swift>,-profile-generate,-fprofile-instr-generate>")
-    # The profile runtime's writer is linked only here, and a declaration of it
-    # in any other build leaves an undefined symbol. A test that forks and lets
-    # the child die needs it: the child never reaches the exit hook that writes
-    # its counters, so the branch it went there to exercise reports unexecuted.
-    add_compile_definitions("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:UBIQUITTY_COVERAGE_INSTRUMENTED=1>")
-endif()
-
-# Runtime sanitizers. Set at the top level for the same reason coverage is: the
-# Core and the tests that exercise it must carry one instrumentation, since an
-# allocation made by an uninstrumented Core is invisible to the checker in the
-# test that frees it. The value is the -fsanitize= list verbatim
-# ("address", "address,undefined"); empty builds nothing sanitized.
-set(UBIQUITTY_SANITIZERS "" CACHE STRING
-    "Comma-separated -fsanitize= list applied to every target (empty: none)")
-if(UBIQUITTY_SANITIZERS)
-    # The vptr check reads type information, which a tree built without RTTI
-    # has none of: Clang leaves the check out there by itself, and GCC keeps it
-    # and stops at the link for want of every typeinfo. Named off for both.
-    add_compile_options(-fsanitize=${UBIQUITTY_SANITIZERS} -fno-sanitize=vptr -fno-omit-frame-pointer)
-    add_link_options(-fsanitize=${UBIQUITTY_SANITIZERS} -fno-sanitize=vptr)
-    # wuffs marks its generated code no_sanitize("unsigned-integer-overflow"),
-    # a check Clang alone has. GCC answers the feature test the mark sits
-    # behind, ignores the name and warns that it did, which under -Werror ends
-    # a sanitized build at a third-party file. The mark is right where the
-    # check exists, so the warning stays a warning here.
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        add_compile_options(-Wno-error=attributes)
-    endif()
-endif()
-# The QUIC dependencies live in the checkout's build root, beside every other
-# build product (Scripts/build_root.py), so each checkout builds AWS-LC and
-# ngtcp2 once. The default used to sit inside the source tree while
-# build-host.sh, run-tests.sh and run-ui-tests.sh named the build root, so a
-# fresh checkout built the TLS stack twice and wrote half of it into the tree.
-# A cache still holding that in-tree default is moved with it; an explicit
-# -DUBIQUITTY_QUIC_PREFIX or a prefix named anywhere else is left alone.
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-execute_process(
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/Scripts/build_root.py" "${CMAKE_SOURCE_DIR}"
-    OUTPUT_VARIABLE _ubiquitty_build_root
-    RESULT_VARIABLE _ubiquitty_build_root_status
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(NOT _ubiquitty_build_root_status EQUAL 0 OR _ubiquitty_build_root STREQUAL "")
-    message(FATAL_ERROR "Scripts/build_root.py could not name this checkout's build root "
-        "(status ${_ubiquitty_build_root_status}); pass -DUBIQUITTY_QUIC_PREFIX=<prefix> to choose one")
-endif()
-if(UBIQUITTY_QUIC_PREFIX STREQUAL "${CMAKE_SOURCE_DIR}/build/quic-deps")
-    unset(UBIQUITTY_QUIC_PREFIX CACHE)
-endif()
-set(UBIQUITTY_QUIC_PREFIX "${_ubiquitty_build_root}/quic-deps" CACHE PATH
-    "Prefix holding the built ngtcp2 + AWS-LC (from Scripts/fetch-quic-deps.sh)")
-
-# Ensure the pinned QUIC TLS deps (ngtcp2 + its crypto backend) in
-# UBIQUITTY_QUIC_PREFIX are complete and native. Only frontends that actually link the
-# QUIC transport (Host, macOS) call this, so a QUIC-free consumer (Core, Agent,
-# Linux) never triggers a TLS-stack download or a network fetch at configure time.
-# ensure-quic-deps.sh returns immediately for a warm cache; a cold or incompatible
-# prefix delegates once to the pinned builder. The gate covers every static archive
-# the QUIC targets link.
-#
-# - Parameter ARGV0: On iOS, the SDK to ensure (`iphoneos` or `iphonesimulator`).
-#   Omitted, it is read from CMAKE_OSX_SYSROOT. A tree that serves both SDKs —
-#   the Xcode project, where the destination picks one at build time — calls
-#   once per SDK, since the sysroot it was configured with names only one.
-function(ubiquitty_ensure_quic_deps)
-    # Which platform the archives are for, and where they live.
-    #
-    # The host keeps the bare prefix rather than gaining a subdirectory of its own, so
-    # every already-built tree stays built and no existing consumer re-downloads a TLS
-    # stack it has.
-    set(_ubiquitty_quic_sdk "")
-    set(_ubiquitty_quic_deployment_target "")
-    set(_ubiquitty_quic_prefix "${UBIQUITTY_QUIC_PREFIX}")
-    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-        # The simulator and the device are DIFFERENT builds — arm64-apple-ios-simulator
-        # against arm64-apple-ios — so they are different prefixes, and a device slice
-        # is not evidence for a simulator one or the other way round.
-        if(ARGC GREATER 0)
-            set(_ubiquitty_quic_sdk "${ARGV0}")
-        elseif(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
-            set(_ubiquitty_quic_sdk "iphonesimulator")
-        else()
-            set(_ubiquitty_quic_sdk "iphoneos")
-        endif()
-        # Passed rather than read by the script: UBIQUITTY_IOS_MIN lives once, here.
-        set(_ubiquitty_quic_deployment_target "${UBIQUITTY_IOS_MIN}")
-        set(_ubiquitty_quic_prefix "${UBIQUITTY_QUIC_PREFIX}/${_ubiquitty_quic_sdk}")
-    endif()
-    # What the caller links against. Reads the same as UBIQUITTY_QUIC_PREFIX on the host,
-    # so the targets that already name that keep working unchanged.
-    set(UBIQUITTY_QUIC_PLATFORM_PREFIX "${_ubiquitty_quic_prefix}" PARENT_SCOPE)
-
-    set(_ubiquitty_quic_required_libraries
-        "${_ubiquitty_quic_prefix}/lib/libngtcp2_crypto_boringssl.a"
-        "${_ubiquitty_quic_prefix}/lib/libngtcp2.a"
-        "${_ubiquitty_quic_prefix}/lib/libssl.a"
-        "${_ubiquitty_quic_prefix}/lib/libcrypto.a")
-
-    # UBQ_CMAKE rather than letting the script find one: an Xcode run-script phase runs
-    # with a PATH that excludes /opt/homebrew/bin, so a bare `cmake` in the script is not
-    # found even though cmake is what is running this line. Handing over CMAKE_COMMAND also
-    # guarantees the dependencies are built by the same cmake as the rest of the tree.
-    execute_process(
-        COMMAND "${CMAKE_COMMAND}" -E env "UBQ_CMAKE=${CMAKE_COMMAND}"
-                "${CMAKE_SOURCE_DIR}/Scripts/ensure-quic-deps.sh"
-                "${_ubiquitty_quic_prefix}"
-                "${_ubiquitty_quic_sdk}"
-                "${_ubiquitty_quic_deployment_target}"
-        RESULT_VARIABLE _ubiquitty_quic_fetch_rc)
-
-    set(_ubiquitty_quic_missing_libraries)
-    foreach(_ubiquitty_quic_library IN LISTS _ubiquitty_quic_required_libraries)
-        if(NOT EXISTS "${_ubiquitty_quic_library}")
-            list(APPEND _ubiquitty_quic_missing_libraries "${_ubiquitty_quic_library}")
-        endif()
-    endforeach()
-
-    if(_ubiquitty_quic_missing_libraries)
-        string(REPLACE ";" ", " _ubiquitty_quic_missing_libraries_text
-            "${_ubiquitty_quic_missing_libraries}")
-    endif()
-
-    # RESULT_VARIABLE carries an exit status or a string saying why the process
-    # could not be run at all, and the two want different advice. A missing Go or
-    # Perl makes the script exit non-zero after running; a non-numeric result
-    # means it never started, and naming a dependency then sends the reader to
-    # install something they already have.
-    if(NOT _ubiquitty_quic_fetch_rc MATCHES "^[0-9]+$")
-        message(FATAL_ERROR
-            "QUIC deps: could not run Scripts/ensure-quic-deps.sh — ${_ubiquitty_quic_fetch_rc}. "
-            "The script did not start, so nothing about the QUIC stack has been established. "
-            "Check that it is executable and that its shebang is on line 1: a `#!` below the "
-            "first line is a comment, and execve then fails with ENOEXEC where no shell retries it.")
-    endif()
-
-    # 127 is specifically "command not found", and the script has already said which on its
-    # stderr. Advising Go and Perl there sends a reader to install two things they have, and
-    # describes the most likely PAST cause rather than the one that just happened.
-    if(_ubiquitty_quic_fetch_rc EQUAL 127)
-        message(FATAL_ERROR
-            "QUIC deps: Scripts/ensure-quic-deps.sh could not find a tool it needs (exit 127) — "
-            "its output above names which. An Xcode run-script phase has a restricted PATH, "
-            "which is the usual cause. "
-            "Configure with -DUBIQUITTY_QUIC=OFF to build without the QUIC transport.")
-    endif()
-
-    if(NOT _ubiquitty_quic_fetch_rc EQUAL 0)
-        message(FATAL_ERROR
-            "QUIC deps: Scripts/ensure-quic-deps.sh exited ${_ubiquitty_quic_fetch_rc}. "
-            "AWS-LC needs Go and Perl on PATH. "
-            "Configure with -DUBIQUITTY_QUIC=OFF to build without the QUIC transport.")
-    endif()
-
-    if(_ubiquitty_quic_missing_libraries)
-        message(FATAL_ERROR
-            "QUIC deps: Scripts/ensure-quic-deps.sh reported success and these archives are "
-            "still absent: ${_ubiquitty_quic_missing_libraries_text}. "
-            "The prefix (${_ubiquitty_quic_prefix}) and what the script installs disagree.")
-    endif()
-endfunction()
-
-# Which configurations get what an optimized build gets: link-time
-# optimization, the training profile and the release path map below.
-#
-# A single-configuration build is one configuration, named by CMAKE_BUILD_TYPE.
-# A multi-configuration generator writes them all into one project and leaves
-# CMAKE_BUILD_TYPE empty, so there each setting is made for the optimized
-# configurations by name. The Xcode project's Release configuration is what an
-# archive builds, and a TestFlight build is the build that ships, so it gets
-# what the Ninja Release build gets.
-get_property(UBIQUITTY_MULTI_CONFIGURATION GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-if(UBIQUITTY_MULTI_CONFIGURATION OR CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo|MinSizeRel")
-    set(UBIQUITTY_BUILDS_OPTIMIZED ON)
-else()
-    set(UBIQUITTY_BUILDS_OPTIMIZED OFF)
-endif()
-
-# ----------------------------------------------------------------------
-# Link-time optimization for optimized native builds.
-#
-# Cross-TU inlining folds the per-byte ingest helpers (utf8Feed, cellAt,
-# VT100Parser::transition, Unicode::Width::forCodePoint, SGR::apply) into their
-# hot-loop callers — they otherwise stay out-of-line because they live in
-# separate translation units. Gated to optimized configs (Debug stays fast to
-# build).
-# ----------------------------------------------------------------------
-if(UBIQUITTY_BUILDS_OPTIMIZED)
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT _ubiquitty_ipo_ok OUTPUT _ubiquitty_ipo_msg)
-    if(_ubiquitty_ipo_ok AND UBIQUITTY_MULTI_CONFIGURATION)
-        # Per configuration. The Xcode generator writes LLVM_LTO into each
-        # configuration it is on for.
-        foreach(_ubiquitty_ipo_configuration IN ITEMS RELEASE RELWITHDEBINFO MINSIZEREL)
-            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_${_ubiquitty_ipo_configuration} ON)
-        endforeach()
-    elseif(_ubiquitty_ipo_ok)
-        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-    endif()
-    if(_ubiquitty_ipo_ok)
-        # GCC's LTO compares every type by name across translation units and
-        # warns [-Wodr] where the definitions differ. Wuffs makes them differ
-        # on purpose: a decoder struct carries a 123 MB `dead_weight` member in
-        # every TU except the one that defines WUFFS_IMPLEMENTATION, so that no
-        # consumer can stack-allocate at a sizeof upstream does not promise.
-        # The consumers here (Source/Core/Codec/ZlibInflate.cpp, PNGDecoder.cpp)
-        # hold pointers into storage the implementation TU sizes and never the
-        # struct by value, and every -Wodr line in the tree's Linux logs names
-        # a wuffs type. Clang's LTO has no such check. The accidental kind of
-        # collision is caught at the source by Scripts/check-name-collisions.py,
-        # where a fix is possible; here the only choice is whether to be told
-        # about upstream's design on every link.
-        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            add_link_options(-Wno-odr)
-        endif()
-        message(STATUS "LTO/IPO: enabled for the optimized configurations")
-    else()
-        message(STATUS "LTO/IPO: unsupported (${_ubiquitty_ipo_msg})")
-    endif()
-endif()
-
-# ----------------------------------------------------------------------
-# PGO — the training profile reaches every arm whose compiler can read it.
-#
-# Every arm, not only the macOS app: the host daemon and the GTK frontend run
-# the wire/parse workload the profile is trained on. The policy belongs beside
-# the IPO decision above, which is the other thing every Release build gets.
-#
-# Clang only, and this is not a preference. The profile is LLVM's IR
-# instrumentation format; GCC's -fprofile-use takes a DIRECTORY of .gcda files,
-# so handed a .profdata path it looks for `<path>/<object>.gcda`, finds none,
-# warns once, and COMPILES ANYWAY. The result is a plain -O3 binary that the
-# build log calls profile-guided. A build that cannot use the profile reports
-# that it did not, so the log distinguishes the two cases.
-#
-# UBIQUITTY_PGO=OFF is the A/B escape hatch and must keep producing the pre-PGO
-# flag set exactly. UBIQUITTY_PGO=REQUIRE stops a configure that would build
-# without the profile, as Scripts/pgo-flags.sh does for the builds it serves:
-# a release that ships a profiled binary asks for it. A caller that already put
-# -fprofile-use in the C++ flags owns the decision -- Scripts/build-macos.sh
-# does, because it also has an ObjC++ exclusion and a separate Swift profile to
-# place -- and is left alone.
-#
-# Both the plain flags and the per-configuration ones, because a caller placing
-# them is as likely to use either and this has to see them wherever they land.
-# build-macos.sh writes CMAKE_CXX_FLAGS_RELWITHDEBINFO, so a check of
-# CMAKE_CXX_FLAGS alone reads empty, adds a second -fprofile-use and a second
-# UBIQUITTY_PGO_STAMP, and the two stamps disagree the moment the profile is
-# retrained after that cache was written -- which -Werror turns into
-# "'UBIQUITTY_PGO_STAMP' macro redefined" on every C and C++ file. The stamp
-# exists to make a retrain invalidate cached objects, so a duplicate of it that
-# goes stale is the failure it was invented to prevent.
-#
-# Under a multi-configuration generator the flags are conditioned on the
-# optimized configurations, and every one of those configurations' flags is
-# read for a caller's own -fprofile-use.
-if(UBIQUITTY_BUILDS_OPTIMIZED)
-    set(UBIQUITTY_PGO "ON" CACHE STRING "Use the checked-in training profile (ON/OFF/REQUIRE)")
-    if(NOT DEFINED UBIQUITTY_PGO_PROFILE)
-        find_package(Python3 COMPONENTS Interpreter REQUIRED)
-        execute_process(
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Scripts/pgo_localize.py
-                --default-profile "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_SYSTEM_NAME}" "${CMAKE_SYSTEM_PROCESSOR}"
-            OUTPUT_VARIABLE _ubiquitty_pgo_default
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            COMMAND_ERROR_IS_FATAL ANY)
-        set(UBIQUITTY_PGO_PROFILE "${_ubiquitty_pgo_default}"
-            CACHE FILEPATH "The training profile -fprofile-use reads")
-    endif()
-    if(UBIQUITTY_MULTI_CONFIGURATION)
-        string(JOIN " " _ubiquitty_pgo_caller_flags "${CMAKE_CXX_FLAGS}" "${CMAKE_CXX_FLAGS_RELEASE}"
-            "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}" "${CMAKE_CXX_FLAGS_MINSIZEREL}")
-        set(_ubiquitty_pgo_compiles
-            "$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>>")
-    else()
-        string(TOUPPER "${CMAKE_BUILD_TYPE}" _ubiquitty_pgo_config)
-        set(_ubiquitty_pgo_caller_flags "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_ubiquitty_pgo_config}}")
-        set(_ubiquitty_pgo_compiles "$<COMPILE_LANGUAGE:C,CXX>")
-    endif()
-    if(NOT UBIQUITTY_PGO STREQUAL "OFF" AND NOT _ubiquitty_pgo_caller_flags MATCHES "-fprofile-use")
-        unset(_ubiquitty_pgo_unapplied)
-        set(_ubiquitty_pgo_toolchain_status 0)
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-            find_package(Python3 COMPONENTS Interpreter REQUIRED)
-            execute_process(
-                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Scripts/pgo_toolchain.py
-                    verify "${UBIQUITTY_PGO_PROFILE}" "${CMAKE_CXX_COMPILER}"
-                RESULT_VARIABLE _ubiquitty_pgo_toolchain_status
-                ERROR_VARIABLE _ubiquitty_pgo_toolchain_refusal
-                ERROR_STRIP_TRAILING_WHITESPACE)
-        endif()
-        if(NOT EXISTS "${UBIQUITTY_PGO_PROFILE}")
-            message(STATUS "PGO: no profile at ${UBIQUITTY_PGO_PROFILE} — building without one")
-            set(_ubiquitty_pgo_unapplied "there is no profile at ${UBIQUITTY_PGO_PROFILE}")
-        elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-            message(STATUS
-                "PGO: NOT APPLIED — ${CMAKE_CXX_COMPILER_ID} does not read LLVM's profile format. "
-                "Support/pgo carries a .profdata (clang, IR instrumentation); GCC's -fprofile-use "
-                "wants a directory of .gcda and would compile clean without it. This build is "
-                "plain -O3, and says so rather than claiming a profile it did not use.")
-            set(_ubiquitty_pgo_unapplied "${CMAKE_CXX_COMPILER_ID} does not read LLVM's profile format")
-        elseif(NOT _ubiquitty_pgo_toolchain_status EQUAL 0)
-            message(STATUS "PGO: NOT APPLIED — ${_ubiquitty_pgo_toolchain_refusal}; building without PGO")
-            set(_ubiquitty_pgo_unapplied "${_ubiquitty_pgo_toolchain_refusal}")
-        else()
-            # The profile's CONTENT rides along as an inert define. A build
-            # system rebuilds an object when its command line changes, and
-            # -fprofile-use names only the profile's PATH: after a retrain the
-            # cached objects still carry the old counts, and ThinLTO then
-            # refuses to link the mix on conflicting ProfileSummary flags.
-            file(SHA256 "${UBIQUITTY_PGO_PROFILE}" _ubiquitty_pgo_hash)
-            string(SUBSTRING "${_ubiquitty_pgo_hash}" 0 16 _ubiquitty_pgo_stamp)
-            # A clang older than the llvm-profdata that wrote the profile cannot
-            # read it and fails every translation unit on it, so the compiler is
-            # asked before it is handed the file. Scripts/cmake/ToolchainFloor.cmake
-            # says why the question is put to the compiler and not its version.
-            ubiquitty_compiler_reads_profile(_ubiquitty_pgo_readable _ubiquitty_pgo_refusal
-                "${UBIQUITTY_PGO_PROFILE}" "${_ubiquitty_pgo_stamp}")
-            if(NOT _ubiquitty_pgo_readable)
-                message(STATUS
-                    "PGO: NOT APPLIED — ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} cannot read "
-                    "${UBIQUITTY_PGO_PROFILE}: ${_ubiquitty_pgo_refusal}. This build is plain -O3. "
-                    "A clang at least as new as the LLVM that wrote the profile applies it, and "
-                    "-DUBIQUITTY_PGO=OFF leaves it out without asking.")
-                set(_ubiquitty_pgo_unapplied
-                    "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} cannot read the profile")
-            else()
-                # The three -Wno flags are the tolerance contract: TUs the
-                # training battery never executes, functions that drifted since
-                # the retrain, and same-name CFG mismatches compile at plain -O3
-                # placement instead of erroring under this tree's -Werror.
-                # The committed profile keys internal-linkage functions by the
-                # trainer's relative paths, and this build compiles absolute
-                # ones, so it reads a copy rooted at this source tree;
-                # Scripts/pgo_localize.py says why no flag can do it. The copy
-                # is derived per profile and root, so a retrain reconfigures.
-                set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${UBIQUITTY_PGO_PROFILE}")
-                find_package(Python3 COMPONENTS Interpreter REQUIRED)
-                execute_process(
-                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Scripts/pgo_localize.py
-                        "${UBIQUITTY_PGO_PROFILE}" "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/pgo"
-                    OUTPUT_VARIABLE _ubiquitty_pgo_local
-                    OUTPUT_STRIP_TRAILING_WHITESPACE
-                    COMMAND_ERROR_IS_FATAL ANY)
-                add_compile_options(
-                    $<${_ubiquitty_pgo_compiles}:-fprofile-use=${_ubiquitty_pgo_local}>
-                    $<${_ubiquitty_pgo_compiles}:-DUBIQUITTY_PGO_STAMP=${_ubiquitty_pgo_stamp}>
-                    $<${_ubiquitty_pgo_compiles}:-Wno-profile-instr-unprofiled>
-                    $<${_ubiquitty_pgo_compiles}:-Wno-profile-instr-out-of-date>
-                    $<${_ubiquitty_pgo_compiles}:-Wno-backend-plugin>)
-                message(STATUS "PGO: using ${UBIQUITTY_PGO_PROFILE} as ${_ubiquitty_pgo_local}")
-            endif()
-        endif()
-        if(DEFINED _ubiquitty_pgo_unapplied AND UBIQUITTY_PGO STREQUAL "REQUIRE")
-            message(FATAL_ERROR
-                "PGO: UBIQUITTY_PGO=REQUIRE, and this build would have no profile: "
-                "${_ubiquitty_pgo_unapplied}. Configure with a clang that reads it, or with "
-                "UBIQUITTY_PGO=ON to accept a plain -O3 build.")
-        endif()
-    endif()
-endif()
-
-# A release build keeps the builder's paths out of what it writes. re2 under
-# Source/ThirdParty passes __FILE__ to its logging, and an absolute checkout or
-# build root in a shipped binary names the machine it was built on and makes two
-# builds of one commit at different paths differ. Release and MinSizeRel remap
-# every path the compiler records. RelWithDebInfo remaps only __FILE__, because
-# its debug information is how Instruments and lldb find the sources; the
-# vendored QUIC stack is remapped where it is built (Scripts/fetch-quic-deps.sh).
-# A multi-configuration project carries both, each conditioned on its
-# configurations.
-#
-# - Parameters:
-#   - option: The prefix-map option.
-#   - condition: The generator expression the option is added under.
-function(ubiquitty_add_path_map option condition)
-    # An empty prefix would match every path, so each is named only when set.
-    foreach(mappedPath IN ITEMS
-            "${CMAKE_SOURCE_DIR}=." "${CMAKE_BINARY_DIR}=build" "${UBIQUITTY_QUIC_PREFIX}=quic-deps")
-        if(NOT mappedPath MATCHES "^=")
-            add_compile_options("$<${condition}:${option}=${mappedPath}>")
-        endif()
-    endforeach()
-endfunction()
-set(_ubiquitty_path_map_compiles "$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>")
-if(UBIQUITTY_MULTI_CONFIGURATION)
-    ubiquitty_add_path_map("-ffile-prefix-map"
-        "$<AND:${_ubiquitty_path_map_compiles},$<OR:$<CONFIG:Release>,$<CONFIG:MinSizeRel>>>")
-    ubiquitty_add_path_map("-fmacro-prefix-map"
-        "$<AND:${_ubiquitty_path_map_compiles},$<CONFIG:RelWithDebInfo>>")
-elseif(CMAKE_BUILD_TYPE MATCHES "^(Release|MinSizeRel)$")
-    ubiquitty_add_path_map("-ffile-prefix-map" "${_ubiquitty_path_map_compiles}")
-elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    ubiquitty_add_path_map("-fmacro-prefix-map" "${_ubiquitty_path_map_compiles}")
-endif()
-
-# ----------------------------------------------------------------------
-# Canonical portable-Core source set — read once, shared by every frontend.
-#
-# Scripts/portable-core-sources.txt is the single source of truth for the
-# portable Core translation units (mechanically regenerated by
-# Scripts/gen-portable-core-sources.sh, also read by the bash perf drivers).
-# Parsing it here — above the per-frontend if/elseif chain — lets the
-# ubiquitty-core lib and the host/agent/linux executables derive their Core
-# link set from one list instead of each hand-maintaining an overlapping copy
-# (the drift hazard this list prevents). A frontend that links only a subset
-# trims it explicitly via ubiquitty_core_subset(... EXCLUDE ...) below; a new
-# Core .cpp added to the canonical list then flows into every frontend
-# automatically unless that frontend names it in its trim list.
-# ----------------------------------------------------------------------
-file(STRINGS "${CMAKE_SOURCE_DIR}/Scripts/portable-core-sources.txt"
-    _ubiquitty_core_source_lines)
-set(UBIQUITTY_CORE_SOURCES "")
-foreach(_line IN LISTS _ubiquitty_core_source_lines)
-    string(STRIP "${_line}" _line)
-    # Accept only Source/....cpp paths; comments + blanks are ignored
-    # structurally (no dependence on # being the first byte). Paths stay
-    # repo-relative so a frontend can REMOVE_ITEM by the same spelling.
-    if(_line MATCHES "^Source/.+\\.cpp$")
-        list(APPEND UBIQUITTY_CORE_SOURCES "${_line}")
-    endif()
-endforeach()
-list(LENGTH UBIQUITTY_CORE_SOURCES _ubiquitty_core_source_count)
-if(_ubiquitty_core_source_count LESS 50)
-    message(FATAL_ERROR
-        "portable-Core: only ${_ubiquitty_core_source_count} sources parsed from "
-        "Scripts/portable-core-sources.txt — list missing or malformed?")
-endif()
-
-# wasm32 (emscripten) swaps the bundled POSIX backends for the Wasm ones: wasm
-# has no fork / PTY / persistent filesystem, no local-socket namespace, and no
-# way to block waiting for readiness on the thread that would deliver it. The
-# frontend half of the PAL (clock / clipboard / bell) is supplied by the
-# embedder, unchanged.
-# The bundled backends, named once. Both the core source list and the L3b layer
-# list swap the same set, and a backend added to one and not the other fails the
-# partition assertion below rather than at the link — but only after someone
-# builds for wasm, which is not most days.
-set(UBIQUITTY_BUNDLED_BACKENDS SystemPAL Preferences Poll Socket SocketPath Spawn)
-if(EMSCRIPTEN)
-    foreach(_backend IN LISTS UBIQUITTY_BUNDLED_BACKENDS)
-        list(REMOVE_ITEM UBIQUITTY_CORE_SOURCES Source/Platform/POSIX/${_backend}.cpp)
-        list(APPEND UBIQUITTY_CORE_SOURCES Source/Platform/Wasm/${_backend}.cpp)
-    endforeach()
-endif()
-
-# iOS swaps the one bundled backend whose facility the platform does not have.
-#
-# A swap rather than a trim, and the difference is what the subset gate reads: a
-# trimmed Spawn.cpp leaves every caller of spawnPipedCommand referencing a symbol
-# no kept translation unit defines, which is precisely the cut the gate exists to
-# refuse. Swapping keeps the symbol and changes its answer — the backend reports
-# the capability absent, so the binary carries no fork and no execve while the
-# code that merely names one still links.
-#
-# The rest of the POSIX set stays: sockets, polling, preferences and the system
-# PAL all work here. Only starting a child does not.
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    list(REMOVE_ITEM UBIQUITTY_CORE_SOURCES Source/Platform/POSIX/Spawn.cpp)
-    list(APPEND UBIQUITTY_CORE_SOURCES Source/Platform/iOS/Spawn.cpp)
-    list(REMOVE_ITEM UBIQUITTY_CORE_SOURCES Source/Platform/POSIX/ProcessSpawnAndWait.cpp)
-    list(APPEND UBIQUITTY_CORE_SOURCES Source/Platform/iOS/ProcessSpawnAndWait.cpp)
-endif()
-
-# A compiler that misfolds memcmp at a runtime offset says so here rather than
-# through one silently failing test. See the module for why the cure is not a
-# global flag.
-include(${CMAKE_SOURCE_DIR}/Scripts/cmake/CheckMemcmpFold.cmake)
-ubiquitty_check_memcmp_fold()
-
-# ubiquitty_core_subset(<out-var> KEEP_ONLY... | EXCLUDE...) — resolve a
-# frontend's Core link set from the canonical list, as repo-relative paths.
-#   EXCLUDE <files...>   start from the full canonical list, drop these.
-#   KEEP_ONLY <files...> start empty, keep only these (order = canonical).
-# Asserts every named file is actually in the canonical list, so a typo or a
-# Core file that left the SSOT fails configure instead of silently dropping a
-# TU from the build.
-function(ubiquitty_core_subset out_var)
-    set(_mode "")
-    set(_named "")
-    foreach(_arg IN LISTS ARGN)
-        if(_arg STREQUAL "EXCLUDE" OR _arg STREQUAL "KEEP_ONLY")
-            set(_mode "${_arg}")
-        else()
-            list(APPEND _named "${_arg}")
-        endif()
-    endforeach()
-    foreach(_f IN LISTS _named)
-        if(NOT _f IN_LIST UBIQUITTY_CORE_SOURCES)
-            message(FATAL_ERROR
-                "ubiquitty_core_subset: '${_f}' is not in the canonical "
-                "Scripts/portable-core-sources.txt — stale name?")
-        endif()
-    endforeach()
-    if(_mode STREQUAL "EXCLUDE")
-        set(_result ${UBIQUITTY_CORE_SOURCES})
-        if(_named)
-            list(REMOVE_ITEM _result ${_named})
-        endif()
-    elseif(_mode STREQUAL "KEEP_ONLY")
-        set(_result "")
-        foreach(_c IN LISTS UBIQUITTY_CORE_SOURCES)
-            if(_c IN_LIST _named)
-                list(APPEND _result "${_c}")
-            endif()
-        endforeach()
-    else()
-        message(FATAL_ERROR "ubiquitty_core_subset: need EXCLUDE or KEEP_ONLY")
-    endif()
-    set(${out_var} "${_result}" PARENT_SCOPE)
-endfunction()
-
-# RE2 — the linear-time regex engine behind Core/ScrollSearch. Vendored
-# pre-Abseil release (Source/ThirdParty/re2, 2023-03-01). Any target whose
-# Core subset keeps Source/Core/Screen/ScrollSearch.cpp links these TUs and adds
-# UBIQUITTY_RE2_DIR to its include path; a target that trims ScrollSearch
-# (Agent) takes neither. The vendored TUs carry the ThirdParty policy:
-# exceptions/RTTI restored, -Werror defeated, warnings suppressed (-w: the TUs
-# are vendored, not ours to fix, so their diagnostics are noise in our build).
-set(UBIQUITTY_RE2_DIR "${CMAKE_SOURCE_DIR}/Source/ThirdParty/re2")
-file(GLOB UBIQUITTY_RE2_SOURCES "${UBIQUITTY_RE2_DIR}/re2/*.cc")
-list(APPEND UBIQUITTY_RE2_SOURCES
-    "${UBIQUITTY_RE2_DIR}/util/rune.cc"
-    "${UBIQUITTY_RE2_DIR}/util/strutil.cc")
-set_source_files_properties(${UBIQUITTY_RE2_SOURCES} PROPERTIES
-    COMPILE_OPTIONS "-fexceptions;-frtti;-Wno-error;-w")
-
-# simdutf — the SIMD UTF-8 and base64 kernels (Source/ThirdParty/simdutf,
-# v9.0.0, one amalgamated TU). Every target that compiles portable Core takes
-# it, because Core/Codec/Base64.cpp calls it unconditionally: a codec that
-# decodes one way on one platform and another way elsewhere is the shape a
-# frontend divergence hides in, and this is an attacker-reachable decoder.
-#
-# There is no build-time gate on it. A macro answering "is simdutf here" made
-# every include of it conditional and the scalar side of that fork unreachable
-# from the lane anyone ran, which is a second implementation of an
-# attacker-reachable decoder that nothing exercises.
-#
-# It compiles on every arm this tree builds on, the alpine g++ floor and
-# emscripten included. The amalgamation dispatches on the arch at runtime, so
-# it carries the ThirdParty policy the way re2 does:
-# exceptions/RTTI restored, -Werror defeated, warnings suppressed.
-set(UBIQUITTY_SIMDUTF_DIR "${CMAKE_SOURCE_DIR}/Source/ThirdParty/simdutf")
-set(UBIQUITTY_SIMDUTF_SOURCES "${UBIQUITTY_SIMDUTF_DIR}/simdutf.cpp")
-set_source_files_properties(${UBIQUITTY_SIMDUTF_SOURCES} PROPERTIES
-    COMPILE_OPTIONS "-fexceptions;-frtti;-Wno-error;-w")
+# Core's toolchain, optimisation, sources and libraries, which every arm below
+# builds on.
+include("${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyToolchain.cmake")
+include("${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyOptimize.cmake")
+include("${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyCoreSources.cmake")
+include("${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyCoreLibrary.cmake")
 
 # ----------------------------------------------------------------------
 # UbiquittySSH — the SwiftPM package wrapping swift-nio-ssh into the carrier a
@@ -1142,7 +188,14 @@ endif()
 # Swift chrome, a Metal renderer, CoreText shaping, and the PAL/Runtime bridge
 # into the shared portable Core.
 # ----------------------------------------------------------------------
-include(cmake/LicenseNotices.cmake)
+# The two Apple arms build application bundles, which carry their resources
+# and licence notices inside, around the Kit's Swift modules and shaders, which
+# each arm creates where it compiles them.
+if(UBIQUITTY_FRONTEND STREQUAL "macOS" OR UBIQUITTY_FRONTEND STREQUAL "iOS")
+    include("${UBIQUITTY_KIT_SOURCE_DIR}/cmake/BundleResources.cmake")
+    include("${UBIQUITTY_KIT_SOURCE_DIR}/cmake/BundleLicenseNotices.cmake")
+    include("${UBIQUITTY_KIT_SOURCE_DIR}/Scripts/cmake/UbiquittyKit.cmake")
+endif()
 
 if(UBIQUITTY_FRONTEND STREQUAL "macOS")
 
@@ -1267,6 +320,8 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     set(UBIQUITTY_IOS_STEP
         ${CMAKE_COMMAND}
         "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DCORE_SOURCE_DIR=${UBIQUITTY_CORE_SOURCE_DIR}"
+        "-DKIT_SOURCE_DIR=${UBIQUITTY_KIT_SOURCE_DIR}"
         "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
         "-DIOS_MIN=${UBIQUITTY_IOS_MIN}"
         ${UBIQUITTY_IOS_STEP_PLATFORM})
@@ -1311,10 +366,11 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     # DelegatedChannel.cpp stays in the set. It is the carrier seam for exactly
     # this frontend — its own header says so — and it is what a session attaches
     # over in place of the subprocess this list removes.
-    ubiquitty_core_subset(UBIQUITTY_IOS_CORE EXCLUDE
-        # Nothing is trimmed for naming a spawn any more — the backends above
-        # answer, so the policy is enforced by what the binary contains rather
-        # than by hoping no caller survives the cut.
+    ubiquitty_add_core_ios_library(ubiquitty-core-ios EXCLUDE
+        # Nothing is trimmed for naming a spawn any more — the iOS backends
+        # UbiquittyCoreSources.cmake swaps in answer, so the policy is enforced
+        # by what the binary contains rather than by hoping no caller survives
+        # the cut.
         #
         # LocalPTYChannel.cpp is not trimmed with it, and the difference is the
         # point of this list. It spawns nothing — 56 lines that wrap a
@@ -1339,53 +395,9 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         # POSIX PTYFacts backend, which lives outside the canonical list and
         # which an arm with no PTY never adds.
         Source/Core/Session/ProcessSubtree.cpp
-    )
-
-    # Built-in themes: Themes.cpp is in the canonical set and parses
-    # builtinThemesTOML at startup, so the generated definition has to be in the
-    # library or every consumer of Themes.o links short.
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    set(_ubq_ios_themes_gen ${CMAKE_CURRENT_BINARY_DIR}/BuiltinThemesData.gen.cpp)
-    add_custom_command(
-        OUTPUT ${_ubq_ios_themes_gen}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-                ${CMAKE_SOURCE_DIR}/Source/Core/Themes/builtin-themes.toml
-                ${_ubq_ios_themes_gen}
-        DEPENDS ${CMAKE_SOURCE_DIR}/Source/Core/Themes/builtin-themes.toml
-                ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-        COMMENT "Embedding built-in themes TOML (ubiquitty-core-ios)"
-        VERBATIM)
-
-    add_library(ubiquitty-core-ios STATIC
-        ${UBIQUITTY_IOS_CORE}
-        # This platform's answer to the PTY factory: there is no local shell, so
-        # it refuses. See the file for why refusing beats trimming the caller.
-        Source/Platform/iOS/PTYStream.cpp
-        # The pasteboard is Objective-C and this shell is Swift, so the entry
-        # point is here and the shell installs the sink.
-        Source/Platform/iOS/Clipboard.cpp
-        # The Darwin clock, shared with the AppKit shell — mach_absolute_time is
-        # not macOS's, and this arm needs the same two entry points.
-        Source/Platform/Apple/Clock.cpp
-        ${_ubq_ios_themes_gen}
-        # ScrollSearch.cpp stays in this subset, so the RE2 units ride along;
-        # Codec/JSON.cpp wraps yyjson for the same reason.
-        ${UBIQUITTY_RE2_SOURCES}
-        ${UBIQUITTY_SIMDUTF_SOURCES}
-        Source/ThirdParty/yyjson/yyjson.c)
-    set_source_files_properties(Source/ThirdParty/yyjson/yyjson.c PROPERTIES
-        COMPILE_FLAGS "-std=c99 -Wno-error -w")
-    target_include_directories(ubiquitty-core-ios PUBLIC Source)
-    target_include_directories(ubiquitty-core-ios SYSTEM PRIVATE
-        "${UBIQUITTY_RE2_DIR}" "${UBIQUITTY_SIMDUTF_DIR}")
-    target_compile_features(ubiquitty-core-ios PRIVATE cxx_std_23)
-    target_link_libraries(ubiquitty-core-ios PUBLIC "-framework Foundation")
-    set_target_properties(ubiquitty-core-ios PROPERTIES
-        CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-    target_compile_options(ubiquitty-core-ios PRIVATE
-        -fno-exceptions -fno-rtti -Wall -Wextra
-        ${UBIQUITTY_NARROWING_WARNING}
-        "$<$<BOOL:${UBIQUITTY_WERROR}>:-Werror>")
+        # Its consumers in this arm include the app's bridge and the Swift
+        # modules, so the header root it publishes is every checkout's.
+        INCLUDE_DIRECTORIES ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES})
 
     # QUIC (ngtcp2 + AWS-LC), the same client half the macOS app links.
     #
@@ -1415,20 +427,11 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         # prefix resolved at configure would link the device's archives into a
         # simulator build of the same project.
         set(UBIQUITTY_QUIC_PLATFORM_PREFIX "${UBIQUITTY_QUIC_PREFIX}/${UBIQUITTY_IOS_PLATFORM}")
-        target_sources(ubiquitty-core-ios PRIVATE
-            Source/Platform/POSIX/QUICClient.cpp
-            Source/Platform/POSIX/DatagramBatch.cpp
-            Source/Core/Transport/QUICChannel.cpp)
+        target_sources(ubiquitty-core-ios PRIVATE ${UBIQUITTY_QUIC_CLIENT_SOURCES})
         target_include_directories(ubiquitty-core-ios PRIVATE
             "${UBIQUITTY_QUIC_PLATFORM_PREFIX}/include")
         target_compile_definitions(ubiquitty-core-ios PRIVATE UBIQUITTY_QUIC=1)
-        # crypto backend -> ngtcp2 -> AWS-LC ssl -> crypto (most-dependent first
-        # for static archives). AWS-LC is self-contained — no framework needed.
-        target_link_libraries(ubiquitty-core-ios PUBLIC
-            "${UBIQUITTY_QUIC_PLATFORM_PREFIX}/lib/libngtcp2_crypto_boringssl.a"
-            "${UBIQUITTY_QUIC_PLATFORM_PREFIX}/lib/libngtcp2.a"
-            "${UBIQUITTY_QUIC_PLATFORM_PREFIX}/lib/libssl.a"
-            "${UBIQUITTY_QUIC_PLATFORM_PREFIX}/lib/libcrypto.a")
+        ubiquitty_link_quic_archives(ubiquitty-core-ios PUBLIC "${UBIQUITTY_QUIC_PLATFORM_PREFIX}")
         message(STATUS "ubiquitty-core-ios: QUIC transport enabled (ngtcp2 + AWS-LC)")
     endif()
 
@@ -1436,8 +439,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     # iOS shell's whole view of a session. It sits outside the portable-core SSOT
     # because it is a layer above it, so an arm that wants it names it — as the
     # Core frontend does.
-    add_library(ubiquitty-kit STATIC Source/UbiquittyKit/Session.cpp)
-    target_link_libraries(ubiquitty-kit PUBLIC ubiquitty-core-ios)
+    ubiquitty_add_session_facade(ubiquitty-kit CORE_TARGET ubiquitty-core-ios)
     target_compile_features(ubiquitty-kit PRIVATE cxx_std_23)
     set_target_properties(ubiquitty-kit PROPERTIES
         CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -1455,7 +457,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         Source/Platform/iOS/SessionClients.cpp)
     # The showcase host a smoke seeds is the test fixture every frontend's
     # outline is checked against.
-    set_source_files_properties(Source/Platform/iOS/ShowcaseHost.cpp PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/Tests")
+    set_source_files_properties(Source/Platform/iOS/ShowcaseHost.cpp PROPERTIES INCLUDE_DIRECTORIES "${UBIQUITTY_CORE_SOURCE_DIR}/Tests")
     target_link_libraries(ubiquitty-ios-bridge PUBLIC ubiquitty-kit)
     if(CMAKE_GENERATOR MATCHES "Xcode")
         set_target_properties(ubiquitty-core-ios ubiquitty-kit ubiquitty-ios-bridge PROPERTIES
@@ -1485,10 +487,8 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     # archive that builds is not a library that links. Force-load each C++
     # archive so the check covers the whole cut, not only reachable objects.
     add_library(ubiquitty-core-ios-link SHARED Source/Platform/iOS/LinkProbe.cpp)
-    target_include_directories(ubiquitty-core-ios-link PRIVATE "${CMAKE_SOURCE_DIR}/Source")
-    # The shared Swift Kit below brings the bridge and Core transitively.
-    # Listing the bridge here too puts it before and after its Swift owner
-    # on the link line, producing a duplicate-library warning.
+    target_include_directories(ubiquitty-core-ios-link PRIVATE ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES})
+    # The archives are linked as libraries below, with the shared Swift Kit.
     foreach(_archive ubiquitty-core-ios ubiquitty-kit ubiquitty-ios-bridge)
         target_link_options(ubiquitty-core-ios-link PRIVATE
             "LINKER:-force_load,$<TARGET_FILE:${_archive}>")
@@ -1562,110 +562,47 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         endforeach()
     endif()
 
-    # ------------------------------------------------------------------
-    # UbiquittyRenderKit — the Apple-shared Swift layer, compiled here from the
-    # same list the macOS arm compiles. Metal and CoreText over the portable
-    # Core: this is the renderer, not a second one written for this platform.
-    # ------------------------------------------------------------------
-    include(${CMAKE_SOURCE_DIR}/Scripts/cmake/AppleSharedSwift.cmake)
-    set(UBIQUITTY_IOS_RENDERKIT_ABS "")
-    foreach(_src IN LISTS UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES)
-        list(APPEND UBIQUITTY_IOS_RENDERKIT_ABS "${CMAKE_SOURCE_DIR}/${_src}")
-    endforeach()
+    # The shell's own module map, rendered from a template so that each header
+    # it names is spelled from its owner's checkout. Only the app's module
+    # imports it, so only the app's search path names its directory.
+    set(UBIQUITTY_IOS_MODULE_MAP_DIR "${CMAKE_BINARY_DIR}/modulemaps/ios")
+    configure_file("${CMAKE_SOURCE_DIR}/Source/Platform/iOS/module.modulemap.in"
+        "${UBIQUITTY_IOS_MODULE_MAP_DIR}/module.modulemap" @ONLY)
 
-    # The interop flags the layer needs to see Core through its module maps.
-    # Whole-module for the reason the macOS arm states: an incrementally merged
-    # module drops a member whose signature names an imported C++ type from its
-    # serialized interface, and the consumer then fails at the call with "has no
-    # member" while the member is public on the same tree.
-    set(UBIQUITTY_IOS_SWIFT_FLAGS
-        -package-name ubiquitty
-        -cxx-interoperability-mode=default
-        -Xcc -std=c++23
-        "-I${CMAKE_SOURCE_DIR}/Source"
-        # The interop map shared by both Apple shells, and the one directory it
-        # still reaches into: the virtual-key table. The app-level bridges that
-        # made the phone compile against Source/Platform/macOS/App are in that
-        # shell's own map now.
-        "-I${CMAKE_SOURCE_DIR}/Source/Platform/Apple"
-        "-I${CMAKE_SOURCE_DIR}/Source/Platform/macOS")
-    if(UBIQUITTY_QUIC)
-        list(APPEND UBIQUITTY_IOS_SWIFT_FLAGS "SHELL:-Xcc -DUBIQUITTY_QUIC=1"
-            "-I${UBIQUITTY_QUIC_PLATFORM_PREFIX}/include")
+    # The XCUITest bundle (UbiquittyUITests below) drives the app, and the
+    # consent check it makes feeds Core's real queue, through a door normal
+    # applications cannot see.
+    option(UBIQUITTY_IOS_UI_TESTS "Build the iOS XCUITest bundle" OFF)
+    # Whether the bundle is built: for the simulator alone, for the reason
+    # UbiquittyUITests below gives. The door it reaches is compiled into the
+    # arm's Swift modules and C++ under the same answer.
+    set(UBIQUITTY_IOS_UI_TEST_BUNDLE OFF)
+    set(UBIQUITTY_IOS_SWIFT_CONDITIONS "")
+    if(UBIQUITTY_IOS_UI_TESTS AND CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+        set(UBIQUITTY_IOS_UI_TEST_BUNDLE ON)
+        list(APPEND UBIQUITTY_IOS_SWIFT_CONDITIONS UBIQUITTY_IOS_UI_TESTS)
     endif()
 
-    # What the Swift modules INLINE. Same mechanism as the macOS arm, from the
-    # same file — see cmake/SwiftInteropStamp.cmake for why a Swift target
-    # cannot see through an interop include on its own, and what a build that
-    # does not know it looks like.
-    include("${CMAKE_SOURCE_DIR}/cmake/SwiftInteropStamp.cmake")
-    ubiquitty_swift_interop_stamp(UBIQUITTY_SWIFT_INTEROP_STAMP)
+    # ------------------------------------------------------------------
+    # The Apple-shared Swift layer, compiled here from the same lists the macOS
+    # arm compiles: UbiquittyRenderKit, Metal and CoreText over the portable
+    # Core — the renderer, not a second one written for this platform — and
+    # the UbiquittyKit module the shell hosts, which imports the render kit
+    # internally and so keeps C++ out of the interface this shell holds. Core
+    # is all the renderer calls; the session facade and the shell's bridge sit
+    # above it and are the app's to link.
+    # ------------------------------------------------------------------
+    ubiquitty_kit_swift_flags(PLATFORM iOS SOURCE_ROOTS "${CMAKE_SOURCE_DIR}")
+    ubiquitty_kit_add_swift_modules(PLATFORM iOS
+        MODULE_MAPS "${UBIQUITTY_IOS_MODULE_MAP_DIR}/module.modulemap"
+        LINK_LIBRARIES ubiquitty-core-ios
+        CONDITIONS ${UBIQUITTY_IOS_SWIFT_CONDITIONS})
 
-    add_library(UbiquittyRenderKit STATIC ${UBIQUITTY_IOS_RENDERKIT_ABS})
-    target_sources(UbiquittyRenderKit PRIVATE "${UBIQUITTY_SWIFT_INTEROP_STAMP}")
-    set_target_properties(UbiquittyRenderKit PROPERTIES
-        Swift_MODULE_NAME "UbiquittyRenderKit"
-        Swift_COMPILATION_MODE "wholemodule")
-    # Whole-module in every configuration, spelled the way each generator
-    # honours.
-    #
-    # `Swift_COMPILATION_MODE` above is inert under this tree's policy level:
-    # CMake compiles the optimised configurations whole-module and Debug
-    # incrementally whatever the property says. Ninja takes the mode as a flag.
-    # Xcode does not — `-wmo` among the other flags contradicts the mode Xcode
-    # itself planned the target's outputs for — so there it is the build
-    # setting, on the target, which holds in all four configurations.
-    #
-    # Debug is the configuration a person presses Run on, and incremental
-    # there is not merely slower to link. A member whose signature names an
-    # imported C++ type does not survive an incremental compile on either side
-    # of an import: the importer fails with "value of type 'RuntimeDrive' has
-    # no member 'readSnapshot'" on a member that is public in the source, and
-    # nothing is diagnosed where it was lost. Making the two kits whole-module
-    # moves the failure from the Kit to the app, which imports them the same
-    # way — so the mode belongs to every Swift target here, the app included.
-    # Scripts/check-xcode-workspace.py holds each one to it in each
-    # configuration.
-    #
-    # - Parameter target: A Swift target of this arm.
-    function(ubiquitty_ios_swift_whole_module target)
-        if(CMAKE_GENERATOR MATCHES "Xcode")
-            set_target_properties(${target} PROPERTIES
-                XCODE_ATTRIBUTE_SWIFT_COMPILATION_MODE "wholemodule")
-        else()
-            target_compile_options(${target} PRIVATE
-                "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-wmo>")
-        endif()
-    endfunction()
-    ubiquitty_ios_swift_whole_module(UbiquittyRenderKit)
-    target_compile_options(UbiquittyRenderKit PRIVATE
-        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_IOS_SWIFT_FLAGS}>")
-    target_link_libraries(UbiquittyRenderKit PRIVATE ubiquitty-ios-bridge)
-
-    # UbiquittyKit — the surface a shell hosts, from the same shared list the
-    # macOS arm compiles. The Kit imports the render kit internally, which is
-    # what keeps C++ out of the interface this shell holds.
-    set(UBIQUITTY_IOS_KIT_ABS "")
-    foreach(_src IN LISTS UBIQUITTY_APPLE_SHARED_KIT_SOURCES)
-        list(APPEND UBIQUITTY_IOS_KIT_ABS "${CMAKE_SOURCE_DIR}/${_src}")
-    endforeach()
-    add_library(UbiquittyKitModule STATIC ${UBIQUITTY_IOS_KIT_ABS})
-    target_sources(UbiquittyKitModule PRIVATE "${UBIQUITTY_SWIFT_INTEROP_STAMP}")
-    set_target_properties(UbiquittyKitModule PROPERTIES
-        Swift_MODULE_NAME "UbiquittyKit"
-        Swift_COMPILATION_MODE "wholemodule"
-        XCODE_ATTRIBUTE_PRODUCT_MODULE_NAME "UbiquittyKit")
-    ubiquitty_ios_swift_whole_module(UbiquittyKitModule)
-    target_compile_options(UbiquittyKitModule PRIVATE
-        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_IOS_SWIFT_FLAGS}>"
-        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-I ${CMAKE_CURRENT_BINARY_DIR}>")
-    add_dependencies(UbiquittyKitModule UbiquittyRenderKit)
-    target_link_libraries(UbiquittyKitModule PRIVATE UbiquittyRenderKit)
-
-    # ColdResumeBridge calls the protected sealer owned by the shared Swift
-    # Kit. Link that real owner normally: global -all_load would load Swift
-    # archives twice when their module dependencies also autolink them.
-    target_link_libraries(ubiquitty-core-ios-link PRIVATE UbiquittyKitModule)
+    # The bridge, and the shared Swift Kit owning the protected sealer the
+    # bridge's ColdResumeBridge calls. Both are linked normally: global
+    # -all_load would load Swift archives twice when their module dependencies
+    # also autolink them.
+    target_link_libraries(ubiquitty-core-ios-link PRIVATE UbiquittyKitModule ubiquitty-ios-bridge)
     set_property(TARGET ubiquitty-core-ios-link PROPERTY LINKER_LANGUAGE Swift)
     # The C++-only probe uses Swift's driver, which supplies libc++ when
     # interoperability is explicit, as it is for the app and framework.
@@ -1763,21 +700,18 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     # The shaders the renderer loads, compiled for the SDK being built. Same
     # source as the macOS arm: a shader is not platform code, and a second copy
     # would be a second renderer by another route.
-    set(_ubq_ios_metal_lib "${UBIQUITTY_IOS_PLATFORM_DIR}/default.metallib")
-    add_custom_command(
-        OUTPUT "${_ubq_ios_metal_lib}"
-        COMMAND ${UBIQUITTY_IOS_STEP} -DSTEP=shaders -P "${UBIQUITTY_IOS_STEP_SCRIPT}"
-        DEPENDS "${CMAKE_SOURCE_DIR}/Source/UbiquittyRenderKit/UBShaders.metal"
-                "${CMAKE_SOURCE_DIR}/Source/Core/Tek/BeamRaster.h"
-                "${UBIQUITTY_IOS_STEP_SCRIPT}"
-        COMMENT "Compiling UBShaders.metal for ${UBIQUITTY_IOS_PLATFORM_LABEL}"
-        VERBATIM)
-    add_custom_target(ubiquitty-ios-shaders DEPENDS "${_ubq_ios_metal_lib}")
+    ubiquitty_kit_add_metal_library(ubiquitty-ios-shaders PLATFORM iOS
+        OUTPUT_DIRECTORY "${UBIQUITTY_IOS_PLATFORM_DIR}"
+        PLATFORM_LABEL "${UBIQUITTY_IOS_PLATFORM_LABEL}"
+        STEP ${UBIQUITTY_IOS_STEP} -DSTEP=shaders
+        STEP_SCRIPT "${UBIQUITTY_IOS_STEP_SCRIPT}")
 
-    # The shell's own module carries it too. It reaches Core's frame capture
-    # directly, so it inlines the same headers the kits do.
+    # The shell's own module is whole-module too, as every Swift target of the
+    # arm is: it reaches Core's frame capture directly, so it inlines the same
+    # headers the kits do. Scripts/check-xcode-workspace.py holds each one to
+    # the mode in each configuration.
     add_executable(UbiquittyIOSApp MACOSX_BUNDLE ${UBIQUITTY_IOS_APP_SOURCES})
-    ubiquitty_ios_swift_whole_module(UbiquittyIOSApp)
+    ubiquitty_kit_swift_whole_module(UbiquittyIOSApp)
     ubiquitty_bundle_license_notices(UbiquittyIOSApp)
     # Every file BundledFonts.h names. A family in that table whose file is not
     # here resolves to a path that does not exist, and the frontend does not
@@ -1805,7 +739,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     # eight.
     set(UBIQUITTY_IOS_APP_FONTS_ENTRIES "")
     foreach(font IN LISTS UBIQUITTY_IOS_BUNDLED_FONT_FILES)
-        list(APPEND UBIQUITTY_IOS_BUNDLED_FONTS "${CMAKE_SOURCE_DIR}/Resources/fonts/${font}")
+        list(APPEND UBIQUITTY_IOS_BUNDLED_FONTS "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts/${font}")
         string(APPEND UBIQUITTY_IOS_APP_FONTS_ENTRIES
             "        <string>fonts/${font}</string>\n")
     endforeach()
@@ -1972,7 +906,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         # shell's Swift does — no value-object facade between the surface and
         # the model it draws.
         "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_IOS_SWIFT_FLAGS}>"
-        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-I ${CMAKE_SOURCE_DIR}/Source/Platform/iOS>"
+        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-I ${UBIQUITTY_IOS_MODULE_MAP_DIR}>"
         "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-I ${CMAKE_CURRENT_BINARY_DIR}>"
         # The module search path and every generated C module map, read from a
         # response file because the set is the dependency graph's rather than
@@ -2016,16 +950,11 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     # real signing identity, which a development machine may not have (see the macOS
     # codesign note), so a device configuration would produce a bundle nothing
     # here can run.
-    option(UBIQUITTY_IOS_UI_TESTS "Build the iOS XCUITest bundle" OFF)
-    if(UBIQUITTY_IOS_UI_TESTS AND CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
-        # The consent check feeds Core's real queue, through a door normal
-        # applications cannot see. Keep the importer and C++ definitions in
-        # agreement without enabling the desktop-only UI harness.
-        foreach(_swift_target UbiquittyIOSApp UbiquittyRenderKit UbiquittyKitModule)
-            target_compile_options(${_swift_target} PRIVATE
-                "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-DUBIQUITTY_IOS_UI_TESTS>"
-                "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xcc -DUBIQUITTY_IOS_UI_TESTS=1>")
-        endforeach()
+    if(UBIQUITTY_IOS_UI_TEST_BUNDLE)
+        # Keep the importer and C++ definitions in agreement without enabling
+        # the desktop-only UI harness: the Kit's modules carry the condition
+        # given them above, and the app's module and C++ carry it here.
+        ubiquitty_kit_add_swift_conditions(UbiquittyIOSApp ${UBIQUITTY_IOS_SWIFT_CONDITIONS})
         foreach(_core_target ubiquitty-core-ios ubiquitty-ios-bridge ubiquitty-core-ios-link)
             target_compile_definitions(${_core_target} PRIVATE
                 "$<$<COMPILE_LANGUAGE:CXX>:UBIQUITTY_IOS_UI_TESTS=1>")
@@ -2149,7 +1078,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
 # POSIX PTY (Source/Platform/Host/PTY) + the host PAL down-functions
 # (HostPAL) + the host main. Builds with clang on macOS (local testing)
 # and gcc on Linux. The Core source list mirrors the test_sync
-# link set in Scripts/run-tests.sh — a live Terminal pulls in the full OSC /
+# link set in Libraries/ubiquitty-core/Scripts/run-tests.sh — a live Terminal pulls in the full OSC /
 # SGR / Tek / Kitty / Unicode dispatch surface.
 # ----------------------------------------------------------------------
 elseif(UBIQUITTY_FRONTEND STREQUAL "Host")
@@ -2163,7 +1092,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Host")
     # flows in here automatically unless it joins this trim list.
     # Theme resolution, palette adaptation, and trigger configuration stay:
     # the host seeds terminals with the same launch policy as graphical clients.
-    ubiquitty_core_subset(UBIQUITTY_HOST_CORE EXCLUDE
+    ubiquitty_core_subset(UBIQUITTY_HOST_CORE ABSOLUTE EXCLUDE
         # App-level theme/appearance/config-reload policy, which drives a host
         # seam a GUI frontend implements. A headless arm follows no system
         # appearance and watches no config file, and keeping it drags the whole
@@ -2293,64 +1222,53 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Host")
         # Host frontend: the daemon main, the forkpty transport + platform seam,
         # and the host PAL down-functions (none of these live in the portable
         # SSOT — they are the server's own glue).
-        Source/Platform/Host/main.cpp
-        Source/Platform/POSIX/LocalHostInstall.cpp
-        Source/Platform/Host/AttachRelay.cpp
-        Source/Platform/Host/Daemon.cpp
-        Source/Platform/Host/HandoverAdmission.cpp
-        Source/Platform/Host/HandoverRequest.cpp
-        Source/Platform/Host/HandoverAuthorityTables.cpp
-        Source/Platform/Host/HandoverGlobalTables.cpp
-        Source/Platform/Host/HandoverEffects.cpp
-        Source/Platform/Host/HandoverRuntime.cpp
-        Source/Platform/Host/HandoverTables.cpp
-        Source/Platform/Host/HandoverWorkspaceTables.cpp
-        Source/Platform/Host/HostTableHandover.cpp
-        Source/Platform/Host/HostHandover.cpp
-        Source/Platform/Host/HandoverStartup.cpp
-        Source/Platform/Host/SessionHandoverFacts.cpp
-        Source/Platform/Host/SessionHandover.cpp
-        Source/Platform/POSIX/PTYStream.cpp
-        Source/Platform/POSIX/PTYFacts.cpp
-        Source/PAL/OutputQueue.cpp
-        Source/Platform/Host/HostPaths.cpp
-        Source/Platform/Host/ClipboardTool.cpp
-        Source/Platform/Host/ResumeRecordTool.cpp
-        Source/Platform/Host/ShellIntegrationFiles.cpp
-        Source/Platform/Host/HostPAL.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/main.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/LocalHostInstall.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/AttachRelay.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/Daemon.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverAdmission.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverRequest.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverAuthorityTables.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverGlobalTables.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverEffects.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverRuntime.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverTables.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverWorkspaceTables.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostTableHandover.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostHandover.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HandoverStartup.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/SessionHandoverFacts.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/SessionHandover.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/PTYStream.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/PTYFacts.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/PAL/OutputQueue.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostPaths.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/ClipboardTool.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/ResumeRecordTool.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/ShellIntegrationFiles.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostPAL.cpp
         # In-process adoption fixtures link this same POSIX ownership sender
         # as the native app, without an exiting descriptor-adoption CLI helper.
-        Source/Platform/POSIX/SessionHandoff.cpp
-        Source/Platform/POSIX/HandoverLease.cpp
-        Source/Platform/POSIX/HandoverTransport.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/SessionHandoff.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/HandoverLease.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/HandoverTransport.cpp
         # Portable Core (single-sourced from Scripts/portable-core-sources.txt;
         # ControlPaths + Tmux.cpp + NativeAttachment + QUICBootstrap come in via the
         # SSOT — Core's Terminal embeds the tmux -CC client, so Tmux.cpp stays).
         ${UBIQUITTY_HOST_CORE}
         ${UBIQUITTY_SIMDUTF_SOURCES}
         # Codec/JSON.cpp wraps it, for the calls Sync/Control.cpp reads.
-        Source/ThirdParty/yyjson/yyjson.c
+        ${UBIQUITTY_YYJSON_SOURCE}
         # ScrollSearch.cpp stays in this subset for `pane.search`, so the RE2
         # units ride along.
         ${UBIQUITTY_RE2_SOURCES}
     )
-    set_source_files_properties(Source/ThirdParty/yyjson/yyjson.c PROPERTIES
-        COMPILE_FLAGS "-std=c99 -Wno-error -w")
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    set(_ubq_host_themes_gen ${CMAKE_CURRENT_BINARY_DIR}/BuiltinThemesData.gen.cpp)
-    add_custom_command(
-        OUTPUT ${_ubq_host_themes_gen}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-                ${CMAKE_SOURCE_DIR}/Source/Core/Themes/builtin-themes.toml
-                ${_ubq_host_themes_gen}
-        DEPENDS ${CMAKE_SOURCE_DIR}/Source/Core/Themes/builtin-themes.toml
-                ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-        VERBATIM)
+    ubiquitty_embed_builtin_themes(_ubq_host_themes_gen)
     target_sources(ubiquitty-host PRIVATE ${_ubq_host_themes_gen})
     set(_ubq_host_shell_integration_gen ${CMAKE_CURRENT_BINARY_DIR}/ShellIntegrationScripts.gen.cpp)
     ubiquitty_generate_shell_integration_source(${_ubq_host_shell_integration_gen})
     target_sources(ubiquitty-host PRIVATE ${_ubq_host_shell_integration_gen})
-    target_include_directories(ubiquitty-host PRIVATE Source)
+    target_include_directories(ubiquitty-host PRIVATE "${UBIQUITTY_CORE_SOURCE_DIR}/Source")
     target_include_directories(ubiquitty-host SYSTEM PRIVATE "${UBIQUITTY_SIMDUTF_DIR}" "${UBIQUITTY_RE2_DIR}")
     target_compile_features(ubiquitty-host PRIVATE cxx_std_23)
     set_target_properties(ubiquitty-host PROPERTIES
@@ -2386,17 +1304,11 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Host")
         # the client reads through, so the platform difference lives in one file
         # rather than once per direction.
         target_sources(ubiquitty-host PRIVATE
-            Source/Platform/Host/HostQUIC.cpp
-            Source/Platform/POSIX/DatagramBatch.cpp)
+            ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostQUIC.cpp
+            ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/DatagramBatch.cpp)
         target_include_directories(ubiquitty-host PRIVATE "${UBIQUITTY_QUIC_PREFIX}/include")
         target_compile_definitions(ubiquitty-host PRIVATE UBIQUITTY_QUIC=1)
-        # crypto backend -> ngtcp2 -> AWS-LC ssl -> crypto (most-dependent first).
-        # AWS-LC is self-contained crypto — no macOS framework dependency.
-        target_link_libraries(ubiquitty-host PRIVATE
-            "${UBIQUITTY_QUIC_PREFIX}/lib/libngtcp2_crypto_boringssl.a"
-            "${UBIQUITTY_QUIC_PREFIX}/lib/libngtcp2.a"
-            "${UBIQUITTY_QUIC_PREFIX}/lib/libssl.a"
-            "${UBIQUITTY_QUIC_PREFIX}/lib/libcrypto.a")
+        ubiquitty_link_quic_archives(ubiquitty-host PRIVATE "${UBIQUITTY_QUIC_PREFIX}")
     endif()
 
     if(UBIQUITTY_BUILD_SYNC_TRANSPORT_ACCEPTANCE)
@@ -2404,22 +1316,23 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Host")
         # Its attach/bootstrap modes call the same production entry point;
         # renaming only this separate object leaves ubiquitty-host unchanged.
         get_target_property(_ubq_transport_host_sources ubiquitty-host SOURCES)
-        list(REMOVE_ITEM _ubq_transport_host_sources Source/Platform/Host/main.cpp)
+        list(REMOVE_ITEM _ubq_transport_host_sources
+            ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/main.cpp)
         add_library(ubq-sync-transport-host-objects OBJECT EXCLUDE_FROM_ALL
             ${_ubq_transport_host_sources}
-            Source/Platform/POSIX/QUICClient.cpp
-            Source/Core/Transport/QUICChannel.cpp)
+            ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/QUICClient.cpp
+            ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Transport/QUICChannel.cpp)
         add_library(ubq-sync-transport-main-object OBJECT EXCLUDE_FROM_ALL
-            Source/Platform/Host/main.cpp)
+            ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/main.cpp)
         target_compile_definitions(ubq-sync-transport-main-object PRIVATE main=ubiquittyHostMain)
         add_executable(sync_transport_acceptance EXCLUDE_FROM_ALL
-            Tests/Host/sync_transport_acceptance.cpp
+            ${UBIQUITTY_CORE_SOURCE_DIR}/Tests/Host/sync_transport_acceptance.cpp
             $<TARGET_OBJECTS:ubq-sync-transport-host-objects>
             $<TARGET_OBJECTS:ubq-sync-transport-main-object>)
         foreach(_ubq_transport_target IN ITEMS
                 ubq-sync-transport-host-objects ubq-sync-transport-main-object sync_transport_acceptance)
             target_include_directories(${_ubq_transport_target} PRIVATE
-                "$<TARGET_PROPERTY:ubiquitty-host,INCLUDE_DIRECTORIES>" Tests)
+                "$<TARGET_PROPERTY:ubiquitty-host,INCLUDE_DIRECTORIES>" "${UBIQUITTY_CORE_SOURCE_DIR}/Tests")
             target_include_directories(${_ubq_transport_target} SYSTEM PRIVATE
                 "${UBIQUITTY_SIMDUTF_DIR}" "${UBIQUITTY_RE2_DIR}")
             target_compile_definitions(${_ubq_transport_target} PRIVATE
@@ -2457,7 +1370,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Agent")
     # model, because the Sync client it is mirrors the workspace it attaches to. It KEEPS the software renderer
     # (Unifont/SoftwareRenderer/CellInstanceBuilder) for the screenshot raster.
     # A Core .cpp added to the SSOT flows in here unless it joins this trim list.
-    ubiquitty_core_subset(UBIQUITTY_AGENT_CORE EXCLUDE
+    ubiquitty_core_subset(UBIQUITTY_AGENT_CORE ABSOLUTE EXCLUDE
         # App-level theme/appearance/config-reload policy, which drives a host
         # seam a GUI frontend implements. A headless arm follows no system
         # appearance and watches no config file, and keeping it drags the whole
@@ -2607,14 +1520,14 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Agent")
     add_executable(ubq
         # Agent frontend: the headless main + the MCP/policy/session glue + JSON,
         # and the host PAL/paths it shares with the daemon (none in the SSOT).
-        Source/Agent/main.cpp
-        Source/Agent/AgentSession.cpp
-        Source/Agent/AgentMCP.cpp
-        Source/Agent/RemoteCarrier.cpp
-        Source/Core/Codec/JSON.cpp
-        Source/ThirdParty/yyjson/yyjson.c
-        Source/Platform/Host/HostPaths.cpp
-        Source/Platform/Host/HostPAL.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Agent/main.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Agent/AgentSession.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Agent/AgentMCP.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Agent/RemoteCarrier.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Codec/JSON.cpp
+        ${UBIQUITTY_YYJSON_SOURCE}
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostPaths.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostPAL.cpp
         # Portable Core (single-sourced from Scripts/portable-core-sources.txt;
         # ControlPaths + NativeAttachment/SyncClientCore + Tmux.cpp arrive via SSOT).
         ${UBIQUITTY_AGENT_CORE}
@@ -2622,7 +1535,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Agent")
     )
     ubiquitty_generate_completions_header(
         "${CMAKE_CURRENT_BINARY_DIR}/generated/Agent/CompletionScripts.h")
-    target_include_directories(ubq PRIVATE Source
+    target_include_directories(ubq PRIVATE "${UBIQUITTY_CORE_SOURCE_DIR}/Source"
         "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_include_directories(ubq SYSTEM PRIVATE "${UBIQUITTY_SIMDUTF_DIR}")
     target_compile_features(ubq PRIVATE cxx_std_23)
@@ -2632,12 +1545,6 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Agent")
         -fno-exceptions -fno-rtti -Wall -Wextra
         ${UBIQUITTY_NARROWING_WARNING}
         "$<$<BOOL:${UBIQUITTY_WERROR}>:-Werror>")
-    # yyjson is a vendored ThirdParty C TU in this target's source list; give it
-    # the same suppression re2/simdutf get — its diagnostics are noise, and a
-    # vendored TU must not fail the build on a compiler bump under
-    # UBIQUITTY_WERROR. -std=c99 keeps the target's C++ options off a C source.
-    set_source_files_properties(Source/ThirdParty/yyjson/yyjson.c PROPERTIES
-        COMPILE_FLAGS "-std=c99 -Wno-error -w")
 
 # ----------------------------------------------------------------------
 # Linux — GTK4 shell + Vulkan renderer over the portable Core. Local Core +
@@ -2713,7 +1620,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     # always-linked `Tek4014.cpp` references it and the projection is Core's
     # rather than optional. Pure integer and float math with no dependency but
     # `<cmath>`, so what the four subsets gain for it is a small object file.
-    ubiquitty_core_subset(UBIQUITTY_LINUX_CORE EXCLUDE
+    ubiquitty_core_subset(UBIQUITTY_LINUX_CORE ABSOLUTE EXCLUDE
         Source/Core/Protocol/Sync/QUICBootstrap.cpp
         Source/Core/Protocol/Sync/QUICBootstrapReader.cpp
         Source/Core/Protocol/Tmux/Session.cpp
@@ -2741,68 +1648,63 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     add_executable(ubiquitty-linux
         # Linux frontend (GTK4 shell + Vulkan renderer + the local PAL)
         Source/Platform/Linux/main.cpp
-        Source/Platform/Linux/Accessibility.cpp
-        Source/Platform/Linux/AccessibleTerminal.cpp
-        Source/Platform/Linux/VulkanRenderer.cpp
-        Source/Platform/Linux/VulkanColorGlyphAtlas.cpp
-        Source/Platform/Linux/VulkanGlyphAtlas.cpp
-        Source/Platform/Linux/VulkanImageTextures.cpp
-        Source/Platform/Linux/BundledFontDirectory.cpp
-        Source/Platform/Linux/FontInventory.cpp
-        Source/Platform/Linux/FontRouting.cpp
-        Source/Platform/Linux/PangoRichText.cpp
-        Source/Platform/Linux/ColorGlyphPainter.cpp
-        Source/Platform/Linux/FreeTypeRasterizer.cpp
-        Source/Platform/Linux/Raster.cpp
-        Source/Platform/Linux/PAL.cpp
-        Source/Platform/Linux/Clipboard.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Accessibility.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/AccessibleTerminal.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanRenderer.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanColorGlyphAtlas.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanGlyphAtlas.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanImageTextures.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/BundledFontDirectory.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/FontInventory.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/FontRouting.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/PangoRichText.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/ColorGlyphPainter.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/FreeTypeRasterizer.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Raster.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/PAL.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Clipboard.cpp
         Source/Platform/Linux/ConfigurationWatcher.cpp
         Source/Platform/Linux/Updater.cpp
-        Source/Platform/Linux/PointerLock.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/PointerLock.cpp
         # PTY transport + platform seam (this frontend runs Core locally with its
         # own PTY; PTYStream/PTYFacts/OutputQueue/PasteNormalize are not in the SSOT).
-        Source/Platform/POSIX/PTYStream.cpp
-        Source/Platform/POSIX/PTYFacts.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/PTYStream.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/PTYFacts.cpp
         # The gated kitty file read (t=f / t=t), shared with the macOS arm so the
         # hardening rules have one home rather than one per frontend.
-        Source/Platform/POSIX/GatedFileRead.cpp
-        Source/Platform/Linux/VulkanCoverageSheet.cpp
-        Source/PAL/OutputQueue.cpp
-        Source/Core/Input/PasteNormalize.cpp
-        Source/Core/Preferences/FontRoutePreferences.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/GatedFileRead.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanCoverageSheet.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/PAL/OutputQueue.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Input/PasteNormalize.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Preferences/FontRoutePreferences.cpp
         # Portable Core (single-sourced from Scripts/portable-core-sources.txt;
         # the local session driver, input encoders, themes, layout model, and the
         # software renderer all arrive via the SSOT below — HostPaths/ControlPaths
         # come in via the SSOT (ControlPaths) + inline (HostPaths, not in SSOT)).
-        Source/Platform/Host/HostPaths.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostPaths.cpp
         # Codec/JSON.cpp arrives via the SSOT and ControlRPC calls it for the
         # control socket, so the parser it wraps has to be in the link set.
-        Source/ThirdParty/yyjson/yyjson.c
+        ${UBIQUITTY_YYJSON_SOURCE}
         ${UBIQUITTY_LINUX_CORE}
         # ScrollSearch.cpp stays in this subset, so the RE2 TUs ride along.
         ${UBIQUITTY_RE2_SOURCES}
         ${UBIQUITTY_SIMDUTF_SOURCES}
     )
-    # A vendored ThirdParty C TU gets the suppression re2 and simdutf get: its
-    # diagnostics are noise, and it must not fail the build on a compiler bump
-    # under UBIQUITTY_WERROR. -std=c99 keeps the target's C++ options off it.
-    set_source_files_properties(Source/ThirdParty/yyjson/yyjson.c PROPERTIES
-        COMPILE_FLAGS "-std=c99 -Wno-error -w")
     # gdk_x11_display_get_xdisplay / gdk_x11_surface_get_xid are GDK4's only
     # route to the raw Xlib handles XWarpPointer/XFixesHideCursor need, and
     # this GTK build marks them deprecated (GTK5's backend getters move
     # elsewhere) with no in-GTK4 replacement — so only this warning, and only
     # in the one file that calls them, is downgraded from -Werror.
     if(UBIQUITTY_X11_FOUND)
-        set_source_files_properties(Source/Platform/Linux/PointerLock.cpp PROPERTIES
+        set_source_files_properties(${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/PointerLock.cpp PROPERTIES
             COMPILE_FLAGS "-Wno-error=deprecated-declarations")
     endif()
-    target_include_directories(ubiquitty-linux PRIVATE Source)
+    target_include_directories(ubiquitty-linux PRIVATE ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES})
     target_include_directories(ubiquitty-linux SYSTEM PRIVATE "${UBIQUITTY_RE2_DIR}" "${UBIQUITTY_SIMDUTF_DIR}")
     if(NOT APPLE)
         # Portable <MacTypes.h> stand-in for this non-Apple build (Selection.h and
         # the other shared headers that include <MacTypes.h> directly), mirroring
-        # Scripts/run-tests.sh's HOST_COMPAT include. Base/Types.h self-provides the
+        # Libraries/ubiquitty-core/Scripts/run-tests.sh's HOST_COMPAT include. Base/Types.h self-provides the
         # same typedefs off-Apple; the shim's identical typedefs coexist with it.
     endif()
     target_compile_definitions(ubiquitty-linux PRIVATE ${UBIQUITTY_LINUX_POINTER_LOCK_DEFS})
@@ -2826,20 +1728,10 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         target_link_libraries(ubiquitty-linux PRIVATE PkgConfig::UBIQUITTY_WAYLAND_CLIENT)
     endif()
 
-    # Built-in themes: embed Source/Core/Themes/builtin-themes.toml as a generated TU
-    # (the definition of builtinThemesTOML that Themes.cpp parses at startup).
-    # Mirrors the macOS target's generation so theme apply works on Linux too.
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    set(BUILTIN_THEMES_TOML ${CMAKE_SOURCE_DIR}/Source/Core/Themes/builtin-themes.toml)
-    set(BUILTIN_THEMES_GEN ${CMAKE_CURRENT_BINARY_DIR}/BuiltinThemesData.gen.cpp)
-    add_custom_command(
-        OUTPUT ${BUILTIN_THEMES_GEN}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-                ${BUILTIN_THEMES_TOML} ${BUILTIN_THEMES_GEN}
-        DEPENDS ${BUILTIN_THEMES_TOML} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-        COMMENT "Embedding built-in themes TOML"
-        VERBATIM)
-    target_sources(ubiquitty-linux PRIVATE ${BUILTIN_THEMES_GEN})
+    # Built-in themes, the generated definition of builtinThemesTOML that
+    # Themes.cpp parses at startup.
+    ubiquitty_embed_builtin_themes(_ubq_linux_themes_gen COMMENT "Embedding built-in themes TOML")
+    target_sources(ubiquitty-linux PRIVATE ${_ubq_linux_themes_gen})
 
     # Wayland pointer-lock protocols: wayland-scanner generates the client-side
     # marshaling code for zwp_pointer_constraints_v1 and zwp_relative_pointer_v1
@@ -2881,7 +1773,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         set(UBIQUITTY_WAYLAND_PROTOCOL_SOURCES
             ${UBIQUITTY_POINTER_CONSTRAINTS_HEADER} ${UBIQUITTY_POINTER_CONSTRAINTS_SOURCE}
             ${UBIQUITTY_RELATIVE_POINTER_HEADER} ${UBIQUITTY_RELATIVE_POINTER_SOURCE})
-        # Generated C, not this target's own: silenced the way yyjson.c is above,
+        # Generated C, not this target's own: silenced the way yyjson.c is,
         # so a compiler bump's new warning in wayland-scanner's OWN output does
         # not fail a build this tree does not control the source of.
         set_source_files_properties(${UBIQUITTY_POINTER_CONSTRAINTS_SOURCE} ${UBIQUITTY_RELATIVE_POINTER_SOURCE} PROPERTIES
@@ -2912,9 +1804,9 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
             add_custom_command(
                 OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${shader}.spv
                 COMMAND ${UBIQUITTY_GLSLC}
-                        ${CMAKE_CURRENT_SOURCE_DIR}/Source/Platform/Linux/shaders/${shader}
+                        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/shaders/${shader}
                         -o ${CMAKE_CURRENT_BINARY_DIR}/${shader}.spv
-                DEPENDS Source/Platform/Linux/shaders/${shader}
+                DEPENDS ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/shaders/${shader}
                 COMMENT "glslc ${shader} -> SPIR-V" VERBATIM)
             list(APPEND _ubiquitty_spv ${CMAKE_CURRENT_BINARY_DIR}/${shader}.spv)
         endforeach()
@@ -2951,9 +1843,9 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         add_custom_command(
             OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${font}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${CMAKE_CURRENT_SOURCE_DIR}/Resources/fonts/${font}"
+                    "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts/${font}"
                     "${CMAKE_CURRENT_BINARY_DIR}/${font}"
-            DEPENDS "Resources/fonts/${font}"
+            DEPENDS "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts/${font}"
             COMMENT "Bundle ${font} next to ubiquitty-linux" VERBATIM)
         list(APPEND UBIQUITTY_LINUX_BUNDLED_FONT_OUTPUTS "${CMAKE_CURRENT_BINARY_DIR}/${font}")
     endforeach()
@@ -2997,7 +1889,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Wscons")
     # this frontend calls no shaper — a parser of standard-library string
     # handling costs a few kilobytes, and diverging the lists would cost the
     # only check this subset has.
-    ubiquitty_core_subset(UBIQUITTY_WSCONS_CORE EXCLUDE
+    ubiquitty_core_subset(UBIQUITTY_WSCONS_CORE ABSOLUTE EXCLUDE
         Source/Core/Protocol/Sync/QUICBootstrap.cpp
         Source/Core/Protocol/Sync/QUICBootstrapReader.cpp
         Source/Core/Protocol/Tmux/Session.cpp
@@ -3025,23 +1917,23 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Wscons")
 
     add_executable(ubiquitty-wscons
         Source/Platform/Wscons/main.cpp
-        Source/Platform/Wscons/WsconsDisplay.cpp
-        Source/Platform/Wscons/WsconsKeyboard.cpp
-        Source/Platform/Wscons/WsconsPAL.cpp
-        Source/Platform/POSIX/SystemPAL.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Wscons/WsconsDisplay.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Wscons/WsconsKeyboard.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Wscons/WsconsPAL.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/SystemPAL.cpp
         # PTY transport + platform seam (forkpty's Darwin/OpenBSD/NetBSD path
         # in PTYStream.cpp already covers this OS — see its <util.h> branch).
-        Source/Platform/POSIX/PTYStream.cpp
-        Source/Platform/POSIX/PTYFacts.cpp
-        Source/PAL/OutputQueue.cpp
-        Source/Core/Input/PasteNormalize.cpp
-        Source/Core/Preferences/FontRoutePreferences.cpp
-        Source/Platform/Host/HostPaths.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/PTYStream.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/PTYFacts.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/PAL/OutputQueue.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Input/PasteNormalize.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Preferences/FontRoutePreferences.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Host/HostPaths.cpp
         ${UBIQUITTY_WSCONS_CORE}
         ${UBIQUITTY_RE2_SOURCES}
         ${UBIQUITTY_SIMDUTF_SOURCES}
     )
-    target_include_directories(ubiquitty-wscons PRIVATE Source "${UBIQUITTY_RE2_DIR}")
+    target_include_directories(ubiquitty-wscons PRIVATE ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES} "${UBIQUITTY_RE2_DIR}")
     target_include_directories(ubiquitty-wscons SYSTEM PRIVATE "${UBIQUITTY_SIMDUTF_DIR}")
     target_compile_features(ubiquitty-wscons PRIVATE cxx_std_23)
     set_target_properties(ubiquitty-wscons PROPERTIES
@@ -3053,18 +1945,9 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Wscons")
     # forkpty lives in libutil on the BSDs (PTYStream.cpp's <util.h> branch).
     target_link_libraries(ubiquitty-wscons PRIVATE util)
 
-    # Built-in themes, same generation step as Linux/macOS.
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    set(BUILTIN_THEMES_TOML ${CMAKE_SOURCE_DIR}/Source/Core/Themes/builtin-themes.toml)
-    set(BUILTIN_THEMES_GEN ${CMAKE_CURRENT_BINARY_DIR}/BuiltinThemesData.gen.cpp)
-    add_custom_command(
-        OUTPUT ${BUILTIN_THEMES_GEN}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-                ${BUILTIN_THEMES_TOML} ${BUILTIN_THEMES_GEN}
-        DEPENDS ${BUILTIN_THEMES_TOML} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-        COMMENT "Embedding built-in themes TOML"
-        VERBATIM)
-    target_sources(ubiquitty-wscons PRIVATE ${BUILTIN_THEMES_GEN})
+    # Built-in themes, the same generation step as Linux.
+    ubiquitty_embed_builtin_themes(_ubq_wscons_themes_gen COMMENT "Embedding built-in themes TOML")
+    target_sources(ubiquitty-wscons PRIVATE ${_ubq_wscons_themes_gen})
 
 # ----------------------------------------------------------------------
 # Core — the standalone libUbiquittyCore static library + its consumer
@@ -3072,8 +1955,8 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Wscons")
 # reusable build artifact: no frontend, no Apple/GTK/Vulkan, no external
 # transport stack. The library links against nothing but Source/ + a
 # caller-supplied PAL. The source set is the SINGLE canonical list in
-# Scripts/portable-core-sources.txt, read here and by the bash perf
-# drivers so the list can never drift.
+# Scripts/portable-core-sources.txt, read by UbiquittyCoreSources.cmake and by
+# the bash perf drivers so the list can never drift.
 #
 #   cmake -S . -B build/core -DUBIQUITTY_FRONTEND=Core -DUBIQUITTY_QUIC=OFF
 #   cmake --build build/core
@@ -3084,289 +1967,10 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Wscons")
 # ----------------------------------------------------------------------
 elseif(UBIQUITTY_FRONTEND STREQUAL "Core")
 
-    # The standalone lib links the FULL canonical portable-Core set — the shared
-    # UBIQUITTY_CORE_SOURCES parsed once above from Scripts/portable-core-sources.txt
-    # (the same list the host/agent/linux frontends trim from). Repo-relative
-    # paths resolve against the top-level CMAKE_CURRENT_SOURCE_DIR.
-
-    # Themes.cpp parses the built-in [[themes]] from an embedded TOML symbol
-    # (builtinThemesTOML), generated from Source/Core/Themes/builtin-themes.toml.
-    # The lib compiles Themes.cpp, so it must also carry the generated TU or any
-    # consumer pulling Themes.o gets an unresolved symbol.
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    set(_core_themes_toml ${CMAKE_SOURCE_DIR}/Source/Core/Themes/builtin-themes.toml)
-    set(_core_themes_gen ${CMAKE_CURRENT_BINARY_DIR}/BuiltinThemesData.gen.cpp)
-    add_custom_command(
-        OUTPUT ${_core_themes_gen}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-                ${_core_themes_toml} ${_core_themes_gen}
-        DEPENDS ${_core_themes_toml} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-        COMMENT "Embedding built-in themes TOML (ubiquitty-core)"
-        VERBATIM)
-
-    # ---- Per-layer library targets (Docs/package-layers.md phase 5) --------
-    # Layer membership has ONE authority: Scripts/check-core-layer-partition.sh.
-    # The TU list of each layer is emitted from it at configure time, and the
-    # union is asserted equal to the canonical SSOT — a TU in no layer (or a
-    # drifted checker) fails configure, never silently mis-packages.
-    foreach(_layer L0 L1 L2 L3b)
-        execute_process(
-            COMMAND bash ${CMAKE_SOURCE_DIR}/Scripts/check-core-layer-partition.sh --emit ${_layer}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            OUTPUT_VARIABLE _layer_out
-            RESULT_VARIABLE _layer_rc)
-        if(NOT _layer_rc EQUAL 0)
-            message(FATAL_ERROR "check-core-layer-partition.sh --emit ${_layer} failed — the SSOT has an unclassified TU")
-        endif()
-        string(STRIP "${_layer_out}" _layer_out)
-        string(REPLACE "\n" ";" UBIQUITTY_${_layer}_SOURCES "${_layer_out}")
-    endforeach()
-    # The checker classifies the SSOT, which names the POSIX backends. wasm swaps
-    # them above, so the layer owning them follows: L3b holds whichever backends
-    # this target actually builds, or the layer library compiles a TU the target
-    # excluded and the union stops matching the canonical list.
-    if(EMSCRIPTEN)
-        foreach(_backend IN LISTS UBIQUITTY_BUNDLED_BACKENDS)
-            list(REMOVE_ITEM UBIQUITTY_L3b_SOURCES Source/Platform/POSIX/${_backend}.cpp)
-            list(APPEND UBIQUITTY_L3b_SOURCES Source/Platform/Wasm/${_backend}.cpp)
-        endforeach()
-    endif()
-    set(_ubq_layer_union ${UBIQUITTY_L0_SOURCES} ${UBIQUITTY_L1_SOURCES}
-        ${UBIQUITTY_L2_SOURCES} ${UBIQUITTY_L3b_SOURCES})
-    list(SORT _ubq_layer_union)
-    set(_ubq_canonical ${UBIQUITTY_CORE_SOURCES})
-    list(SORT _ubq_canonical)
-    if(NOT _ubq_layer_union STREQUAL _ubq_canonical)
-        message(FATAL_ERROR
-            "layer partition != the portable-core SSOT — run "
-            "Scripts/check-core-layer-partition.sh for the unassigned TU")
-    endif()
-
-    # ubiquitty-core-model: the L0 foundation/PAL-contract implementation + the
-    # L1 terminal model. ScrollSearch.cpp (L1) pulls the RE2 TUs along.
-    # Codec/JSON.cpp (in the model) calls the vendored yyjson, so the parser
-    # rides the same archive: a consumer that reaches no JSON pulls neither
-    # member, and one that does needs no source list of its own to say so.
-    add_library(ubiquitty-core-model STATIC
-        ${UBIQUITTY_L0_SOURCES}
-        ${UBIQUITTY_L1_SOURCES}
-        ${UBIQUITTY_RE2_SOURCES}
-        ${UBIQUITTY_SIMDUTF_SOURCES}
-        Source/ThirdParty/yyjson/yyjson.c)
-    set_source_files_properties(Source/ThirdParty/yyjson/yyjson.c PROPERTIES
-        COMPILE_FLAGS "-std=c99 -Wno-error -w")
-
-    # ubiquitty-behaviour: the L2 behaviour + Transport-SDK layer, over the
-    # model. Themes.cpp (L2) needs the generated builtinThemesTOML TU.
-    add_library(ubiquitty-behaviour STATIC
-        ${UBIQUITTY_L2_SOURCES}
-        ${_core_themes_gen})
-    target_link_libraries(ubiquitty-behaviour PUBLIC ubiquitty-core-model)
-
-    # ubiquitty-core: the aggregate every consumer links — surface unchanged by
-    # the split (identical symbols + headers). Carries the bundled POSIX PAL
-    # backend (L3b), which belongs to neither package.
-    add_library(ubiquitty-core STATIC
-        ${UBIQUITTY_L3b_SOURCES})
-    # The three archives reference each other in both directions by design: L2
-    # calls the PAL contract and L3b implements it, so behaviour's undefined
-    # symbols resolve in an archive that precedes it on the link line. Apple's
-    # linker rescans and does not care; GNU ld makes one pass per archive and
-    # leaves them undefined, so every consumer needs the group rather than each
-    # consumer discovering this.
-    target_link_libraries(ubiquitty-core PUBLIC ubiquitty-behaviour)
-    # …and back: L2 calls the PAL contract that this L3b backend defines, so the
-    # reference genuinely runs both ways. Declaring the cycle is what makes
-    # CMake repeat the archives, which is what a linker that resolves in one
-    # pass needs. Apple's linker rescans every archive and never needed the
-    # repetition; what it does with it is print `ld: warning: ignoring
-    # duplicate libraries` on every link in the tree, tests included — the same
-    # words as a link line naming a library twice by accident, which is the
-    # only kind worth being told about. So the back-edge is declared only for
-    # the linker that needs it. Nothing links behaviour on its own — core is
-    # its one consumer — so on Apple the one direction above is the whole
-    # graph.
-    if(NOT APPLE)
-        target_link_libraries(ubiquitty-behaviour PUBLIC ubiquitty-core)
-        # The model calls the PAL contract too: OSC 7 asks the platform its
-        # host name (PAL::systemHostName, which this backend defines), and the
-        # model's archive is the last on a consumer's link line, where one
-        # pass leaves that reference undefined.
-        target_link_libraries(ubiquitty-core-model PUBLIC ubiquitty-core)
-    endif()
-    # This target compiles the L3b backend and nothing else, and that backend
-    # includes its own Platform/POSIX/*.h. Those headers are in no layer stage,
-    # since staging them would put a platform backend inside the model and
-    # behaviour include boundary, so the target reads the real source root. The
-    # path is PRIVATE so that no consumer of the library inherits it.
-    target_include_directories(ubiquitty-core PRIVATE ${CMAKE_SOURCE_DIR}/Source)
-
-    # ubiquitty-kit: the Tier-3 embedder facade (UbiquittyKit::Session — one
-    # object, local or remote origin) over the layer chain. Additive: no
-    # in-tree frontend links it; its surface is versioned by kitVersion
-    # (Source/UbiquittyKit/Version.h), independent of coreVersion.
-    add_library(ubiquitty-kit STATIC
-        Source/UbiquittyKit/Session.cpp)
-    target_link_libraries(ubiquitty-kit PUBLIC ubiquitty-core)
-
-    # Installable-package wiring (find_package(UbiquittyCore)). The package
-    # version is the SUPPORTED-SURFACE semver from Source/UbiquittyCore/Version.h
-    # (single source), independent of the app VERSION.
-    include(GNUInstallDirs)
-    file(READ ${CMAKE_SOURCE_DIR}/Source/UbiquittyCore/Version.h _ubq_ver_h)
-    string(REGEX MATCH "coreVersionMajor = ([0-9]+)" _ "${_ubq_ver_h}")
-    set(_ubq_major ${CMAKE_MATCH_1})
-    string(REGEX MATCH "coreVersionMinor = ([0-9]+)" _ "${_ubq_ver_h}")
-    set(_ubq_minor ${CMAKE_MATCH_1})
-    string(REGEX MATCH "coreVersionPatch = ([0-9]+)" _ "${_ubq_ver_h}")
-    set(_ubq_patch ${CMAKE_MATCH_1})
-    set(UBIQUITTY_CORE_API_VERSION "${_ubq_major}.${_ubq_minor}.${_ubq_patch}")
-    set(_ubq_incdir ${CMAKE_INSTALL_INCLUDEDIR}/UbiquittyCore-${_ubq_major}.${_ubq_minor})
-
-    # Durable published-header topology: each layer's BUILD-interface include
-    # dir is a STAGED tree holding only its own modules' headers, so an upward
-    # include fails at compile time (no Preferences/ header exists in the model
-    # stage) — the compile-time half of the Rule-10 boundary. Lower stages
-    # propagate to higher targets through the PUBLIC links; the INSTALL
-    # interface stays the versioned install include dir.
-    set(_ubq_stage ${CMAKE_CURRENT_BINARY_DIR}/layer-include)
-    # The module lists come from check-core-layer-partition.sh, which is also what
-    # assigns each TU its layer. They were written here as well until the two
-    # copies drifted into opposite match orders: the headers staged correctly
-    # while the TUs did not, so ubiquitty-core-model shipped the behaviour layer
-    # and nothing reported it. One spelling, read by both.
-    #
-    # Matched against paths relative to Source/, behaviour before model — a bare
-    # "Core" is a model prefix and every behaviour subtree lives under it, so the
-    # other order stages behaviour into model and disables the Rule-10
-    # compile-time boundary instead of enforcing it.
-    foreach(_layer_modules L1 L2)
-        execute_process(
-            COMMAND ${CMAKE_SOURCE_DIR}/Scripts/check-core-layer-partition.sh --emit-modules ${_layer_modules}
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            OUTPUT_VARIABLE _modules_out RESULT_VARIABLE _modules_rc)
-        if(NOT _modules_rc EQUAL 0)
-            message(FATAL_ERROR "check-core-layer-partition.sh --emit-modules ${_layer_modules} failed")
-        endif()
-        string(STRIP "${_modules_out}" _modules_out)
-        string(REPLACE "\n" ";" _modules_out "${_modules_out}")
-        set(_ubq_${_layer_modules}_modules "${_modules_out}")
-    endforeach()
-    set(_ubq_behaviour_modules ${_ubq_L2_modules})
-    set(_ubq_model_modules ${_ubq_L1_modules})
-    # The stage has to be a function of the CURRENT classification, not of every
-    # classification this build directory has ever seen: reclassify a module and
-    # its old staged copy stays where it was, so the Rule-10 boundary keeps
-    # admitting an include it should now reject — silently, because the compile
-    # still succeeds.
-    #
-    # Emptying the stages first achieves that and costs the whole team. Every
-    # staged header is then NEW on every configure — fresh mtime, identical
-    # contents — so every translation unit including one rebuilds: 159 of them
-    # per configure, on every push, for every checkout. `configure_file(COPYONLY)`
-    # below is already write-if-different and would have left those mtimes
-    # alone; it never got the chance, because the file it would have compared
-    # against had just been deleted.
-    #
-    # So the wanted set is collected as the stage is filled, and the sweep after
-    # the loop removes only what is absent from it. Both properties hold: a header
-    # that changed layer loses its old copy, and a header that changed nothing
-    # keeps its mtime.
-    set(_ubq_staged_wanted "")
-    file(GLOB_RECURSE _ubq_all_headers RELATIVE ${CMAKE_SOURCE_DIR}/Source
-        CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/Source/*.h)
-    # Top-level directories whose headers go into no stage at all.
-    set(_ubq_unstaged_roots ThirdParty/ Platform/ PAL/)
-    foreach(_header ${_ubq_all_headers})
-        set(_stage_dir "")
-        string(REGEX MATCH "^[^/]+/" _header_root "${_header}")
-        get_filename_component(_header_dir "${_header}" DIRECTORY)
-        if(_header STREQUAL "Forward.h")
-            set(_stage_dir model)
-        elseif(_header_dir STREQUAL "PAL")
-            set(_stage_dir model) # the L0 PAL contract; per-OS backend subdirs stage nowhere
-        elseif(_header MATCHES "^UbiquittyKit/")
-            set(_stage_dir kit)
-        elseif(_header_root IN_LIST _ubq_unstaged_roots)
-            set(_stage_dir "") # vendored + concrete backends: no layer stage
-        else()
-            # A behaviour module's path is longer than the Core/ prefix the model
-            # list claims, so the behaviour list gets the first look and the
-            # model list only sees what it left unclaimed.
-            foreach(_stage_layer behaviour model)
-                if(NOT _stage_dir)
-                    foreach(_module ${_ubq_${_stage_layer}_modules})
-                        if(_header MATCHES "^${_module}/")
-                            set(_stage_dir ${_stage_layer})
-                        endif()
-                    endforeach()
-                endif()
-            endforeach()
-        endif()
-        if(_stage_dir)
-            # configure_file rather than file(COPY): configure_file registers the input as a
-            # configure dependency, so editing a header's CONTENTS re-runs CMake and
-            # refreshes the staged copy. file(COPY) runs once and leaves the stage
-            # stale until something else forces a reconfigure — and because every
-            # target includes the stage ahead of Source/, the build then compiles
-            # against the OLD header while reporting success.
-            configure_file(${CMAKE_SOURCE_DIR}/Source/${_header}
-                ${_ubq_stage}/${_stage_dir}/${_header} COPYONLY)
-            list(APPEND _ubq_staged_wanted ${_ubq_stage}/${_stage_dir}/${_header})
-        endif()
-    endforeach()
-    # Protocol/Tmux stages under model ahead of the generic behaviour match sees
-    # Protocol/Sync — the two subtrees land in different stages by the explicit
-    # per-subtree patterns above. The generated Terminfo blob header is
-    # root-relative in its includer, so it stages at the behaviour root.
-    if(EXISTS ${CMAKE_SOURCE_DIR}/Source/UbiquittyTerminfo.h)
-        configure_file(${CMAKE_SOURCE_DIR}/Source/UbiquittyTerminfo.h
-            ${_ubq_stage}/behaviour/UbiquittyTerminfo.h COPYONLY)
-        list(APPEND _ubq_staged_wanted ${_ubq_stage}/behaviour/UbiquittyTerminfo.h)
-    endif()
-
-    # Remove staged headers the current classification does not want: one whose
-    # module moved between layers, and one whose source header was deleted or
-    # renamed. Everything else keeps the mtime `configure_file` decided not to
-    # touch, which is what keeps the dependent rebuilds off.
-    file(GLOB_RECURSE _ubq_staged_present ${_ubq_stage}/model/*.h
-        ${_ubq_stage}/behaviour/*.h ${_ubq_stage}/kit/*.h)
-    foreach(_staged ${_ubq_staged_present})
-        if(NOT _staged IN_LIST _ubq_staged_wanted)
-            file(REMOVE ${_staged})
-        endif()
-    endforeach()
-
-    target_include_directories(ubiquitty-core-model PUBLIC
-        $<BUILD_INTERFACE:${_ubq_stage}/model>
-        $<INSTALL_INTERFACE:${_ubq_incdir}>)
-    target_include_directories(ubiquitty-behaviour PUBLIC
-        $<BUILD_INTERFACE:${_ubq_stage}/behaviour>)
-    target_include_directories(ubiquitty-kit PUBLIC
-        $<BUILD_INTERFACE:${_ubq_stage}/kit>)
-    # Each layer's OWN TUs compile against the full tree (vendored ThirdParty
-    # reaches through published headers; Rule 10 guards their source-level
-    # discipline) — PRIVATE, so CONSUMERS resolve only through the stages.
-    foreach(_ubq_layer_target ubiquitty-core-model ubiquitty-behaviour ubiquitty-kit)
-        target_include_directories(${_ubq_layer_target} PRIVATE ${CMAKE_SOURCE_DIR}/Source)
-    endforeach()
-    # RE2 headers are an implementation detail of ScrollSearch.cpp — PRIVATE,
-    # never part of the installed package surface; SYSTEM so re2's own header
-    # diagnostics don't surface through ScrollSearch.cpp's TU.
-    target_include_directories(ubiquitty-core-model SYSTEM PRIVATE "${UBIQUITTY_RE2_DIR}" "${UBIQUITTY_SIMDUTF_DIR}")
-    # WebKit style: no exceptions, no RTTI. The library is OS-clean — every TU
-    # is framework- and (above the PAL/Transport seam) POSIX-free, enforced by
-    # Scripts/check-boundaries.py.
-    foreach(_ubq_layer_target ubiquitty-core-model ubiquitty-behaviour ubiquitty-core ubiquitty-kit)
-        target_compile_features(${_ubq_layer_target} PUBLIC cxx_std_23)
-        set_target_properties(${_ubq_layer_target} PROPERTIES
-            CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-        target_compile_options(${_ubq_layer_target} PRIVATE
-            -fno-exceptions -fno-rtti -Wall -Wextra
-        ${UBIQUITTY_NARROWING_WARNING}
-            "$<$<BOOL:${UBIQUITTY_WERROR}>:-Werror>"
-            -Wno-deprecated-declarations -Wno-multichar -Wno-comment)
-    endforeach()
+    # The standalone lib links the FULL canonical portable-Core set (the same
+    # list the host/agent/linux frontends trim from), as the layer libraries
+    # every consumer of Core links.
+    ubiquitty_add_core_layer_libraries()
 
     # Standalone consumer sample: links ubiquitty-core against an in-file STUB
     # PAL (the system-services half the bundled POSIX backend does not supply),
@@ -3385,7 +1989,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Core")
             Source/Platform/Web/WebPAL.cpp
             Source/Platform/Web/WebExports.cpp)
         target_link_libraries(ubiquitty-web PRIVATE ubiquitty-core)
-        target_include_directories(ubiquitty-web PRIVATE ${CMAKE_SOURCE_DIR}/Source)
+        target_include_directories(ubiquitty-web PRIVATE ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES})
         target_compile_features(ubiquitty-web PRIVATE cxx_std_23)
         set_target_properties(ubiquitty-web PROPERTIES
             CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
@@ -3417,7 +2021,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Core")
             -Wl,--stack-first)
     endif()
 
-    add_executable(core-consumer Samples/core-consumer/main.cpp)
+    add_executable(core-consumer ${UBIQUITTY_CORE_SOURCE_DIR}/Samples/core-consumer/main.cpp)
     target_link_libraries(core-consumer PRIVATE ubiquitty-core)
     target_compile_features(core-consumer PRIVATE cxx_std_23)
     set_target_properties(core-consumer PROPERTIES
@@ -3429,7 +2033,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Core")
 
     # Cross-platform golden-image producer. It links the same installable Core
     # and always renders through the embedded GNU Unifont software backend.
-    add_executable(ubiquitty-snapshot Tools/snapshot/main.cpp)
+    add_executable(ubiquitty-snapshot ${UBIQUITTY_CORE_SOURCE_DIR}/Tools/snapshot/main.cpp)
     target_link_libraries(ubiquitty-snapshot PRIVATE ubiquitty-core)
     target_compile_features(ubiquitty-snapshot PRIVATE cxx_std_23)
     set_target_properties(ubiquitty-snapshot PROPERTIES
@@ -3454,46 +2058,8 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Core")
             -Wl,--stack-first)
     endif()
 
-    # ---- Install + export the package (find_package(UbiquittyCore)) ---------
-    include(CMakePackageConfigHelpers)
-
-    # All four archives ship: the aggregate's PUBLIC links make model +
-    # behaviour part of its exported link interface, and Kit links that chain.
-    # Every target must therefore be present in the export set.
-    install(TARGETS ubiquitty-kit ubiquitty-core ubiquitty-behaviour ubiquitty-core-model
-        EXPORT UbiquittyCoreTargets
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-
-    # Install the same classified header trees that build-interface consumers
-    # compile against. This includes the Core/Kit umbrellas, Base, PAL and
-    # Forward.h, without maintaining a second module list or publishing the
-    # concrete platform backends and vendored implementation headers.
-    install(DIRECTORY
-        "${_ubq_stage}/model/"
-        "${_ubq_stage}/behaviour/"
-        "${_ubq_stage}/kit/"
-        DESTINATION ${_ubq_incdir}
-        FILES_MATCHING PATTERN "*.h")
-
-    install(EXPORT UbiquittyCoreTargets
-        FILE UbiquittyCoreTargets.cmake
-        NAMESPACE Ubiquitty::
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/UbiquittyCore)
-
-    configure_package_config_file(
-        ${CMAKE_SOURCE_DIR}/cmake/UbiquittyCoreConfig.cmake.in
-        ${CMAKE_CURRENT_BINARY_DIR}/UbiquittyCoreConfig.cmake
-        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/UbiquittyCore)
-    write_basic_package_version_file(
-        ${CMAKE_CURRENT_BINARY_DIR}/UbiquittyCoreConfigVersion.cmake
-        VERSION ${UBIQUITTY_CORE_API_VERSION}
-        COMPATIBILITY SameMajorVersion)
-    install(FILES
-        ${CMAKE_CURRENT_BINARY_DIR}/UbiquittyCoreConfig.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/UbiquittyCoreConfigVersion.cmake
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/UbiquittyCore)
-
-    ubiquitty_install_license_notices("${CMAKE_INSTALL_DOCDIR}")
+    # The package find_package(UbiquittyCore) reads, with its licence notices.
+    ubiquitty_install_core_package()
 
 else()
 
@@ -3513,23 +2079,8 @@ if(UBIQUITTY_BUILD_TESTS AND NOT TARGET ubiquitty-core)
         "the Core frontend defines; configure with -DUBIQUITTY_FRONTEND=Core.")
 elseif(UBIQUITTY_BUILD_TESTS)
     enable_testing()
-    add_subdirectory(Tests)
+    add_subdirectory("${UBIQUITTY_CORE_SOURCE_DIR}/Tests" "${CMAKE_CURRENT_BINARY_DIR}/Tests")
 endif()
 
-# Every compiled target is built after the step that refreshes the generated
-# version header, so the one translation unit that includes it never compiles
-# against the previous commit's text and then again against this one's.
-function(_ubq_order_after_build_version directory)
-    get_property(_targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
-    foreach(_target IN LISTS _targets)
-        get_target_property(_type ${_target} TYPE)
-        if(_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$")
-            add_dependencies(${_target} ubiquitty-build-version)
-        endif()
-    endforeach()
-    get_property(_subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
-    foreach(_subdirectory IN LISTS _subdirectories)
-        _ubq_order_after_build_version("${_subdirectory}")
-    endforeach()
-endfunction()
-_ubq_order_after_build_version("${CMAKE_CURRENT_SOURCE_DIR}")
+# Last, once every target of every arm exists.
+ubiquitty_order_after_build_version("${CMAKE_CURRENT_SOURCE_DIR}")

@@ -1,0 +1,29 @@
+# Scripts/swift-unsafe-baseline.app.txt — the `Unsafe*` sites the app's Swift still has.
+#
+# One line per file: the count, then the path. Scripts/check-swift-unsafe.py
+# refuses any file that exceeds its count, and any file not listed here at
+# all. Every line is a Core declaration missing its interop annotation, or an
+# Apple API that hands out a raw pointer; the list is meant to shrink.
+#
+# Each repository records its own files. A checkout holding several reads
+# every Scripts/swift-unsafe-baseline.<repository>.txt it has.
+#
+# Re-record with: python3 Scripts/check-swift-unsafe.py --write
+3 Source/Platform/Apple/SSH/Sources/UbiquittySSH/SSHCarrier.swift
+4 Source/Platform/Apple/SSH/Sources/UbiquittySSH/SSHPipelineProbe.swift
+2 Source/Platform/Apple/SSH/Tests/UbiquittySSHTests/SSHAuthenticationWireTests.swift
+5 Source/Platform/iOS/App/BackgroundRefreshConnection.swift
+5 Source/Platform/iOS/App/QUICBootstrapProbe.swift
+5 Source/Platform/iOS/App/SSHCarrierClient.swift
+4 Source/Platform/iOS/App/SyncSSHCarrier.swift
+1 Source/Platform/iOS/App/TerminalKeyTranslation.swift
+1 Source/Platform/iOS/App/UbiquittyApp.swift
+1 Source/Platform/iOS/UITest/TerminalGestureUITests.swift
+1 Source/Platform/macOS/App/ClipboardReadPrompt.swift
+1 Source/Platform/macOS/App/SessionClipboard.swift
+1 Source/Platform/macOS/App/SyncTraceSource.swift
+2 Source/Platform/macOS/App/Windowing/TerminalWindowController+TmuxHosting.swift
+1 Source/Platform/macOS/App/Windowing/TerminalWindowController.swift
+1 Source/Platform/macOS/UITest/Swift/FileDropTestSupport.swift
+2 Source/Platform/macOS/UITest/Swift/SessionPlumbingScenarios.swift
+3 Source/Platform/macOS/UITest/Swift/SymbolFallbackScenarios.swift

@@ -18,3 +18,27 @@ This product bundles or, for optional build surfaces, fetches third-party
 components that retain their own licenses. Their notices and license texts are
 catalogued in third-party-notices.md, with the machine-readable inventory in
 Docs/third-party-inventory.json.
+
+This product incorporates ubiquitty-core (Libraries/ubiquitty-core), libubiquitty
+and the multiplexer, which is licensed under the Apache License, Version 2.0 and
+carries the following attribution notice, reproduced here under section 4(d) of
+that license:
+
+    Ubiquitty
+    Copyright 2026 Stanislav Yaglo
+
+    This product includes software developed by Stanislav Yaglo as part of
+    Ubiquitty.
+
+    This product bundles or, for optional build surfaces, fetches third-party
+    components that retain their own licenses. Their notices and license texts
+    are catalogued in third-party-notices.md, with the machine-readable
+    inventory in Docs/third-party-inventory.json.
+
+It also incorporates ubiquitty-kit (Libraries/ubiquitty-kit), the renderers and
+the drop-in terminal views, under the same license and the same notice. A build of
+this repository compiles both libraries' sources into its products, so a
+redistributed binary carries their third-party notices
+(Libraries/ubiquitty-core/third-party-notices.md and
+Libraries/ubiquitty-kit/third-party-notices.md) beside the ones in this
+repository's third-party-notices.md.

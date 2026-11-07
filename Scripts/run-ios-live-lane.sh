@@ -31,8 +31,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 
 RUNS="${UBQ_LIVE_LANE_RUNS:-1}"
 case "$RUNS" in
@@ -41,7 +43,7 @@ esac
 SSHD=/usr/sbin/sshd
 [ -x "$SSHD" ] || { echo "run-ios-live-lane: no OpenSSH server at $SSHD" >&2; exit 2; }
 
-nice -n 5 "$ROOT/Scripts/build-host.sh" >/dev/null || { echo "run-ios-live-lane: build-host.sh failed" >&2; exit 2; }
+nice -n 5 "$CORE_ROOT/Scripts/build-host.sh" >/dev/null || { echo "run-ios-live-lane: build-host.sh failed" >&2; exit 2; }
 HOST_BINARY="$UBQ_BUILD_ROOT/host/ubiquitty-host"
 [ -x "$HOST_BINARY" ] || { echo "run-ios-live-lane: build-host.sh produced no $HOST_BINARY" >&2; exit 2; }
 

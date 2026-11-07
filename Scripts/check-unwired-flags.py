@@ -30,12 +30,14 @@ failure.
 """
 
 import argparse
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import library_scripts  # noqa: E402 — the entry points and their callers span the repositories
 
 # Entry points whose command-line audience is scripts and cases: every flag they
 # parse is meant to be driven from the tree, so one spelled nowhere else has no
@@ -81,7 +83,7 @@ def flagsRead(path):
       - path: repository-relative path to the entry point.
     - Returns: a sorted list of flag strings, each including its leading dashes.
     """
-    text = (ROOT / path).read_text(encoding="utf-8", errors="replace")
+    text = Path(library_scripts.locate(path)).read_text(encoding="utf-8", errors="replace")
     return sorted(set(FLAG.findall(text)))
 
 
@@ -101,14 +103,10 @@ def spellingIndex():
     - Returns: a dict from flag string to a set of repository-relative paths.
     """
     excludes = [":!" + directory for directory in EXCLUDED]
-    result = subprocess.run(
-        ["git", "grep", "-oIE", "--", r"--[a-z0-9][a-z0-9-]*", "--", "."] + excludes,
-        cwd=ROOT, capture_output=True, text=True)
-    # git grep exits 1 for no match, which is an answer rather than an error.
-    if result.returncode not in (0, 1):
-        raise RuntimeError("git grep failed: " + result.stderr.strip())
+    # A flag is driven by a script of any repository the app builds on.
+    output = library_scripts.gitGrep("-oIE", "--", r"--[a-z0-9][a-z0-9-]*", "--", ".", *excludes)
     index = {}
-    for line in result.stdout.splitlines():
+    for line in output.splitlines():
         path, separator, token = line.rpartition(":")
         if not separator:
             continue
@@ -141,14 +139,11 @@ def uncensusedReaders():
     - Returns: a sorted list of (path, parse-site count) outside ENTRY_POINTS.
     """
     pattern = r'(hasFlag|std::strcmp\(arg[A-Za-z]*|argument ==|arg ==)[^;]*"--'
-    result = subprocess.run(["git", "grep", "-cE", "--", pattern, "--",
-                             "Source/*.cpp", "Source/*.mm", "Source/*.h",
-                             "Source/**/*.cpp", "Source/**/*.mm", "Source/**/*.h"],
-                            cwd=ROOT, capture_output=True, text=True)
-    if result.returncode not in (0, 1):
-        raise RuntimeError("git grep failed: " + result.stderr.strip())
+    output = library_scripts.gitGrep("-cE", "--", pattern, "--",
+                                     "Source/*.cpp", "Source/*.mm", "Source/*.h",
+                                     "Source/**/*.cpp", "Source/**/*.mm", "Source/**/*.h")
     found = []
-    for line in result.stdout.splitlines():
+    for line in output.splitlines():
         path, _, count = line.rpartition(":")
         if not path or path in ENTRY_POINTS:
             continue
@@ -191,7 +186,7 @@ def main():
     index = spellingIndex()
     unwired, readCount = {}, 0
     for entry in ENTRY_POINTS:
-        if not (ROOT / entry).exists():
+        if not os.path.exists(library_scripts.locate(entry)):
             print("check-unwired-flags: entry point missing: " + entry, file=sys.stderr)
             print("  The list of entry points is a claim about which binaries scripts drive.",
                   file=sys.stderr)

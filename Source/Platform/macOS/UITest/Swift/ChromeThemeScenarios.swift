@@ -140,10 +140,10 @@ enum ChromeThemeScenarios {
                     "[appearance]\nbackground_opacity = \(opacity)\nblur_radius = 20.0\ntitlebar_style = \"themed\"\n"
                 }
                 let saved = t.configureAppending(glassChrome(opacity: 0.0))
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 defer {
                     t.restoreConfiguration(saved)
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                 }
                 guard
                     let shell = TerminalWindowController.spawn(
@@ -242,10 +242,10 @@ enum ChromeThemeScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated {
                 let saved = t.configureAppending("[appearance]\nbackground_opacity = 0.0\nblur_radius = 20.0\n")
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 defer {
                     t.restoreConfiguration(saved)
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                 }
                 guard
                     let shell = TerminalWindowController.spawn(

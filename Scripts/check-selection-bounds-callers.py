@@ -36,7 +36,6 @@ the unsnapped path.
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -48,6 +47,9 @@ from pathlib import Path
 # reads the same way. Both are absolute, and measure() runs the grep with cwd at
 # REPO.
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import library_scripts  # noqa: E402 — a frontend's calls may live in a library's checkout
+
 RECORD = str(REPO / "Tests/selection-bounds-callers.txt")
 SEARCH_ROOT = "Source/Platform"
 
@@ -63,11 +65,11 @@ def measure(root):
     - Parameter root: the directory to search under.
     - Returns: {path: {entryPoint: count}}.
     """
-    result = subprocess.run(
-        ["git", "grep", "-n", "-E", r"getBounds(WideWith|Wide)?\s*\(", "--", root],
-        capture_output=True, text=True, cwd=str(REPO))
+    # The frontends are spread over the repositories: the Kit's accessibility
+    # layer calls it from its own checkout.
+    output = library_scripts.gitGrep("-n", "-E", r"getBounds(WideWith|Wide)?\s*\(", "--", root)
     measured = {}
-    for line in result.stdout.splitlines():
+    for line in output.splitlines():
         parts = line.split(":", 2)
         if len(parts) < 3:
             continue

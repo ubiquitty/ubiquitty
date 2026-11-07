@@ -37,9 +37,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 esctestPath="${UBIQUITTY_ESCTEST:-$HOME/Projects/esctest2}"
 
 if [ ! -f "$esctestPath/esctest/esctest.py" ]; then
@@ -155,7 +157,7 @@ if [[ "$isNative" = 1 ]]; then
     env "ESC_EXTRA=${extraArgs[*]:-}" "ESC_TEST_CONFIG=$testConfiguration" \
         "ESC_BINARY=$binary" "ESC_SUITE=$esctestPath" "ESC_RESULT=$log" sh "$runner"
 else
-    ESC_EXTRA="${extraArgs[*]:-}" "$ROOT/Scripts/run-linux.sh" \
+    ESC_EXTRA="${extraArgs[*]:-}" UBIQUITTY_LINUX_ROOT="$ROOT" "$CORE_ROOT/Scripts/run-linux.sh" \
         env "ESC_EXTRA=${extraArgs[*]:-}" "ESC_TEST_CONFIG=$testConfiguration" sh /src/build/run-esctest-inner.sh
 fi
 

@@ -1,0 +1,20 @@
+// Copyright (C) 2026 Stanislav Yaglo
+// SPDX-License-Identifier: Apache-2.0
+
+// The shell imports the session seam as a module rather than through a bridging
+// header: there is no Objective-C in this frontend to hang one off, and a
+// module is what a plain C header wants anyway.
+//
+// Rendered into the build tree at configure time, with every header spelled
+// from the checkout of the repository that owns it: Core's under
+// UBIQUITTY_CORE_SOURCE_DIR, the shell's own under this tree.
+module UbiquittyIOSBridge {
+    header "@CMAKE_SOURCE_DIR@/Source/Platform/iOS/SessionBridge.h"
+    header "@UBIQUITTY_CORE_SOURCE_DIR@/Source/Platform/iOS/Clipboard.h"
+    // The pane clients the shell registers at launch.
+    header "@CMAKE_SOURCE_DIR@/Source/Platform/iOS/SessionClients.h"
+    // PAL, so a smoke can drive the clipboard the way the terminal does rather
+    // than calling the shell's own writer and proving nothing.
+    header "@UBIQUITTY_CORE_SOURCE_DIR@/Source/PAL/PAL.h"
+    export *
+}

@@ -18,8 +18,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 
 fail() { echo "control-gate-lane: FAIL: $*" >&2; exit 1; }
 skip() { echo "control-gate-lane: SKIP: $*" >&2; [ "${CONTROL_REQUIRE:-0}" = "1" ] && exit 1; exit 0; }

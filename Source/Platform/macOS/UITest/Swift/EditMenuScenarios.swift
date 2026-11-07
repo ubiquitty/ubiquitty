@@ -105,6 +105,29 @@ func rightClick(on surface: TerminalSurface, row: Int, column: Int) -> NSEvent? 
     )
 }
 
+/// The first object along a responder chain that answers a selector, as
+/// `NSApp.sendAction(_:to:from:)` finds it from the key window's first
+/// responder; walked here because a contained harness window is never key.
+///
+/// - Parameters:
+///   - action: The selector.
+///   - responder: Where the walk starts.
+/// - Returns: The answering object, or nil when nothing along the chain does.
+@MainActor
+private func firstAnswer(to action: Selector, from responder: NSResponder) -> AnyObject? {
+    var current: NSResponder? = responder
+    while let candidate = current {
+        if candidate.responds(to: action) {
+            return candidate
+        }
+        if let target = candidate.supplementalTarget(forAction: action, sender: nil) as? NSObject, target.responds(to: action) {
+            return target
+        }
+        current = candidate.nextResponder
+    }
+    return nil
+}
+
 /// Feeds two OSC 133-marked commands, the way a shell integration marks them.
 ///
 /// Row 0 is the first command's prompt, row 1 its output, row 3 the second
@@ -802,6 +825,96 @@ enum EditMenuScenarios {
                         && clicked.gridTextForTesting().hasPrefix("YZbc\n"),
                     desc: "Reset Terminal resets the clicked pane (row 0 reads \(clicked.gridTextForTesting().prefix(8).debugDescription))"
                 )
+            }
+        }
+
+        // A surface sends its window commands by selector down the responder
+        // chain, from its Paste menu item and from its [keys] bindings, as the
+        // menu bar's items do, and calls the palette toggle on its window's
+        // controller directly. The selector names are the contract with
+        // whatever controls the window, so they are pinned as strings, and
+        // each is followed from the surface to the controller that answers it.
+        UBUITestRegister("swift_shell_surface_commands_reach_the_window_controller") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                guard
+                    let shell = TerminalWindowController.spawn(
+                        arguments: ["/bin/sh", "-c", "exec sleep 1000"],
+                        localePolicy: .auto,
+                        sessionLifetime: .endsWithChild
+                    ),
+                    let window = shell.window,
+                    let content = window.contentView,
+                    let surface = terminalSurface(under: content)
+                else {
+                    t.expect(false, desc: "a Swift-shell window opens with a surface")
+                    return
+                }
+                defer { window.close() }
+                t.pump(0.3)
+                window.makeFirstResponder(surface)
+                t.pump(0.2)
+
+                guard let event = rightClick(on: surface, row: 0, column: 0), let menu = surface.menu(for: event) else {
+                    t.expect(false, desc: "a right-click over the grid opens a menu")
+                    return
+                }
+                let paste = menu.items.first { $0.title == "Paste" }
+                t.expect(
+                    paste?.action == NSSelectorFromString("paste:") && paste?.target == nil,
+                    desc: "the context menu's Paste sends paste: down the chain"
+                )
+                for (title, name) in [("Clear Scrollback", "clearScrollbackUnderMouse:"), ("Reset Terminal", "resetTerminalUnderMouse:")] {
+                    let item = menu.items.first { $0.title == title }
+                    let sent = item?.action.map(NSStringFromSelector) ?? "nothing"
+                    t.expect(
+                        item?.action == NSSelectorFromString(name) && item?.target === surface,
+                        desc: "the context menu's \(title) sends \(name) to its surface (sends \(sent))"
+                    )
+                }
+                let commands = [
+                    "paste:", "growFontSize:", "shrinkFontSize:", "resetFontSize:", "clearScrollback:", "resetTerminal:", "toggleBeam:",
+                ]
+                for name in commands {
+                    t.expect(
+                        firstAnswer(to: NSSelectorFromString(name), from: surface) === shell,
+                        desc: "\(name) sent from the surface reaches its window's controller"
+                    )
+                }
+                t.expect(
+                    (window.windowController as? TerminalWindowCommands) === shell,
+                    desc: "the controller is the one the palette toggle is called on"
+                )
+
+                // What the selectors do on arrival, sent along the same chain.
+                t.expect(surface.tryToPerform(NSSelectorFromString("growFontSize:"), with: nil), desc: "growFontSize: is answered")
+                t.expect(shell.fontZoomOffset > 0, desc: "and zooms this window in (offset \(shell.fontZoomOffset))")
+                t.expect(surface.tryToPerform(NSSelectorFromString("resetFontSize:"), with: nil), desc: "resetFontSize: is answered")
+                t.expect(shell.fontZoomOffset == 0, desc: "and clears the zoom (offset \(shell.fontZoomOffset))")
+                t.expect(surface.tryToPerform(NSSelectorFromString("shrinkFontSize:"), with: nil), desc: "shrinkFontSize: is answered")
+                t.expect(shell.fontZoomOffset < 0, desc: "and zooms this window out (offset \(shell.fontZoomOffset))")
+                _ = surface.tryToPerform(NSSelectorFromString("resetFontSize:"), with: nil)
+                preservingGeneralPasteboard {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString("surface-command-paste", forType: .string)
+                    let recorder = PasteTransmitRecorder()
+                    surface.observer = recorder
+                    defer { surface.observer = nil }
+                    t.expect(surface.tryToPerform(NSSelectorFromString("paste:"), with: nil), desc: "paste: is answered")
+                    t.pump(0.2)
+                    let pasted = String(decoding: recorder.bytes, as: UTF8.self)
+                    t.expect(pasted == "surface-command-paste", desc: "and transmits the pasteboard (\(pasted.debugDescription))")
+                }
+
+                // The body drag reads the title-bar state off the window, which
+                // records what its controller applies.
+                let record = window as? TerminalWindow
+                t.expect(record?.isTitleBarHidden == false, desc: "a titled window records its title bar shown")
+                shell.toggleHideTitleBar(nil)
+                t.expect(record?.isTitleBarHidden == true, desc: "and hidden once the reader hides it")
+                t.expect(shell.isTitleBarHiddenForIdentity, desc: "which is the answer its controller reads")
+                shell.toggleHideTitleBar(nil)
+                t.expect(record?.isTitleBarHidden == false, desc: "and shown again once the reader restores it")
             }
         }
 

@@ -41,10 +41,10 @@ enum TranslucencyScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated {
                 let saved = String(Ubiquitty.Preferences.liveDocument().pointee)
-                let savedTransparency = TerminalWindowController.systemTransparencyOverrideForTesting
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                let savedTransparency = TerminalSurface.systemTransparencyOverrideForTesting
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 defer {
-                    TerminalWindowController.systemTransparencyOverrideForTesting = savedTransparency
+                    TerminalSurface.systemTransparencyOverrideForTesting = savedTransparency
                     t.restoreConfiguration(saved)
                 }
                 guard let shell = TerminalWindowController.spawn(), let window = shell.window,
@@ -87,11 +87,11 @@ enum TranslucencyScenarios {
             MainActor.assumeIsolated {
                 let saved = String(Ubiquitty.Preferences.liveDocument().pointee)
                 let savedAppearance = NSApp.appearance
-                let savedTransparency = TerminalWindowController.systemTransparencyOverrideForTesting
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                let savedTransparency = TerminalSurface.systemTransparencyOverrideForTesting
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 defer {
                     NSApp.appearance = savedAppearance
-                    TerminalWindowController.systemTransparencyOverrideForTesting = savedTransparency
+                    TerminalSurface.systemTransparencyOverrideForTesting = savedTransparency
                     t.restoreConfiguration(saved)
                 }
                 @MainActor
@@ -220,10 +220,10 @@ enum TranslucencyScenarios {
             MainActor.assumeIsolated {
                 let vibrantBlur = "[appearance]\nblur_radius = 20.0\ntext_contrast_on_blur = true\nbackground_vibrancy = true\n"
                 let saved = t.configureAppending(vibrantBlur)
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 defer {
                     t.restoreConfiguration(saved)
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                 }
                 guard
                     let shell = TerminalWindowController.spawn(
@@ -285,10 +285,10 @@ enum TranslucencyScenarios {
                 // fills behind glyphs and keeps their own colour.
                 let tintStyle = "[selection]\nstyle = \"tint\"\n"
                 let saved = t.configureAppending("[appearance]\ntext_contrast_on_blur = false\n" + tintStyle)
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 defer {
                     t.restoreConfiguration(saved)
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                 }
                 guard
                     let shell = TerminalWindowController.spawn(
@@ -368,10 +368,10 @@ enum TranslucencyScenarios {
                     t.restoreConfiguration(unblurred + "\n[appearance]\ntitlebar_style = \"themed\"\n" + lines)
                 }
                 configureGlass("")
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 defer {
                     t.restoreConfiguration(saved)
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                 }
                 SystemTheme.refresh()
                 guard
@@ -508,10 +508,10 @@ enum TranslucencyScenarios {
                     return
                 }
                 defer {
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                     window.close()
                 }
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 let glass = "Glass Dark".withCString { Ubiquitty.Themes.indexForName($0) }
                 t.expect(glass >= 0, desc: "Glass Dark is offered without user configuration")
                 t.expect(shell.applyInspectedTheme(Int(glass), to: surface), desc: "Glass Dark applies to the session")
@@ -667,7 +667,7 @@ enum TranslucencyScenarios {
                 if let root = window.contentView {
                     t.expect(planes(in: root).count == 1, desc: "background vibrancy turns off independently of text")
                 }
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Reduced
+                TerminalSurface.systemTransparencyOverrideForTesting = .Reduced
                 shell.refreshSessionAppearance()
                 drawFrame(t, of: surface)
                 t.expect(window.isOpaque && !shell.isBlurBackdropShownForTesting, desc: "Reduce Transparency overrides theme glass")
@@ -685,12 +685,12 @@ enum TranslucencyScenarios {
                 let savedRadius = settingDouble(.AppearanceBlurRadius)
                 let savedContrast = settingBool(.AppearanceTextContrastOnBlur)
                 defer {
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                     app.settingsSetTextContrastOnBlur(savedContrast)
                     app.settingsSetBlurRadius(savedRadius)
                     app.settingsSetBackgroundOpacity(savedOpacity)
                 }
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 app.settingsSetBackgroundOpacity(0.5)
                 app.settingsSetBlurRadius(20)
                 app.settingsSetTextContrastOnBlur(false)
@@ -746,14 +746,14 @@ enum TranslucencyScenarios {
                 let savedOpacity = settingDouble(.AppearanceBackgroundOpacity)
                 let savedRadius = settingDouble(.AppearanceBlurRadius)
                 defer {
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                     app.settingsSetBlurRadius(savedRadius)
                     app.settingsSetBackgroundOpacity(savedOpacity)
                 }
 
                 // Reduce Transparency on, and a half-opaque ground asked for:
                 // the window is opaque, so the frame must be drawn opaque too.
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Reduced
+                TerminalSurface.systemTransparencyOverrideForTesting = .Reduced
                 app.settingsSetBlurRadius(0)
                 app.settingsSetBackgroundOpacity(0.5)
                 guard
@@ -784,7 +784,7 @@ enum TranslucencyScenarios {
                 // translucent and the frame carries the asked alpha, with the
                 // colour unchanged — the darkening the opaque case avoids is a
                 // colour change, not an alpha change.
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 app.settingsSetBackgroundOpacity(0.5)
                 t.pump(0.2)
                 drawFrame(t, of: surface)
@@ -802,7 +802,7 @@ enum TranslucencyScenarios {
 
                 // Back to Reduce Transparency on the live window: the frame goes
                 // opaque again without a reopen.
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Reduced
+                TerminalSurface.systemTransparencyOverrideForTesting = .Reduced
                 app.settingsSetBackgroundOpacity(0.5)
                 t.pump(0.2)
                 drawFrame(t, of: surface)
@@ -825,11 +825,11 @@ enum TranslucencyScenarios {
                 let savedOpacity = settingDouble(.AppearanceBackgroundOpacity)
                 let savedRadius = settingDouble(.AppearanceBlurRadius)
                 defer {
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                     app.settingsSetBlurRadius(savedRadius)
                     app.settingsSetBackgroundOpacity(savedOpacity)
                 }
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 app.settingsSetBackgroundOpacity(0.8)
                 app.settingsSetBlurRadius(20)
                 guard
@@ -865,7 +865,7 @@ enum TranslucencyScenarios {
                 )
 
                 // Reduce Transparency flattens it: no backdrop, radius zero.
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Reduced
+                TerminalSurface.systemTransparencyOverrideForTesting = .Reduced
                 app.settingsSetBlurRadius(35)
                 t.pump(0.2)
                 t.expect(!shell.isBlurBackdropShownForTesting, desc: "under Reduce Transparency the backdrop is hidden")
@@ -875,7 +875,7 @@ enum TranslucencyScenarios {
                 )
 
                 // And the radius off: the same, with transparency allowed.
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 app.settingsSetBlurRadius(0)
                 t.pump(0.2)
                 t.expect(!shell.isBlurBackdropShownForTesting, desc: "a zero radius hides the backdrop")
@@ -893,11 +893,11 @@ enum TranslucencyScenarios {
                 let savedOpacity = settingDouble(.AppearanceBackgroundOpacity)
                 let savedRadius = settingDouble(.AppearanceBlurRadius)
                 defer {
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                     app.settingsSetBlurRadius(savedRadius)
                     app.settingsSetBackgroundOpacity(savedOpacity)
                 }
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Allowed
+                TerminalSurface.systemTransparencyOverrideForTesting = .Allowed
                 app.settingsSetBackgroundOpacity(0.8)
                 app.settingsSetBlurRadius(20)
                 guard

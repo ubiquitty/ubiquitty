@@ -7,19 +7,20 @@ For prerequisites and commands for every frontend and library, start with the
 [platform build guide](platform-builds.md). This reference covers build metadata,
 Apple projects, the iOS archive, packaging, and macOS/Linux releases. Update-mechanism specifics (Sparkle, AppImage
 self-update, signing keys) live in [`auto-update.md`](auto-update.md); this is
-the build/distribute overview. The [script index](../Scripts/README.md) lists
-every script under `Scripts/` by purpose.
+the build/distribute overview. Core's
+[shared script index](https://github.com/ubiquitty/ubiquitty-core/blob/main/Scripts/README.md)
+lists shared tools; the App build entry points are listed below.
 
 ## Components
 
 Resolve the external build directory with
-`export UBQ_BUILD_ROOT="$(python3 Scripts/build_root.py .)"` from the checkout.
+`export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)"` from the checkout.
 The default parent is Xcode DerivedData on macOS and
 `$XDG_CACHE_HOME/ubiquitty/build` on Linux (`~/.cache/ubiquitty/build` when unset).
 Each checkout has a distinct hashed directory; `UBQ_BUILD_ROOT` overrides it.
 
 Nothing removes a checkout's root when the checkout goes, so the roots of
-removed worktrees accumulate until the disk fills. `Scripts/clean-build-roots.py`
+removed worktrees accumulate until the disk fills. `Libraries/ubiquitty-core/Scripts/clean-build-roots.py`
 maps each root back to its worktree, through the same hash and the source
 directory the root's CMake caches record, and prints a table of root, worktree,
 class and size, with the space it would reclaim:
@@ -38,27 +39,31 @@ parent, never a symbolic link and never a root that holds a worktree, and it
 reads the running processes again just before removing.
 
 ```sh
-python3 Scripts/clean-build-roots.py                   # the table
-python3 Scripts/clean-build-roots.py --delete          # ORPHAN and MERGED
-python3 Scripts/clean-build-roots.py --delete --stale  # and STALE
+python3 Libraries/ubiquitty-core/Scripts/clean-build-roots.py                   # the table
+python3 Libraries/ubiquitty-core/Scripts/clean-build-roots.py --delete          # ORPHAN and MERGED
+python3 Libraries/ubiquitty-core/Scripts/clean-build-roots.py --delete --stale  # and STALE
 ```
 
 ### Build lanes
 
 A new worktree has an empty build root, so its first build compiles the app
 from nothing: the Swift, the PGO-instrumented C++, ThinLTO and the link. ccache
-covers only the C++ compiles. `Scripts/build-lane.py` keeps a few long-lived
+covers only the C++ compiles. `Libraries/ubiquitty-core/Scripts/build-lane.py` keeps a few long-lived
 worktrees, the lanes, whose roots stay warm, and runs a command in one of them:
 
 ```sh
-python3 Scripts/build-lane.py run --wait 3600 --from "$PWD" -- Scripts/run-ui-tests.sh <scenario>
-python3 Scripts/build-lane.py run --from origin/main -- Scripts/build-tests.sh
-python3 Scripts/build-lane.py status          # each lane's holder, commit, root size and last write
-python3 Scripts/build-lane.py root --lane 2   # a lane's build root
+export UBQ_LANES_DIR="$(dirname "$PWD")/ubq-app-lanes"
+python3 Libraries/ubiquitty-core/Scripts/build-lane.py run --wait 3600 --from "$PWD" -- \
+  sh -c 'git submodule update --init --recursive && Scripts/run-ui-tests.sh "$@"' sh <scenario>
+python3 Libraries/ubiquitty-core/Scripts/build-lane.py run --from "$PWD" -- \
+  sh -c 'git submodule update --init --recursive && Libraries/ubiquitty-core/Scripts/build-tests.sh'
+python3 Libraries/ubiquitty-core/Scripts/build-lane.py status          # each lane's holder, commit, root size and last write
+python3 Libraries/ubiquitty-core/Scripts/build-lane.py root --lane 2   # a lane's build root
 ```
 
-- **Lanes** are `lane-1` to `lane-N` in `ubq-lanes` beside the repository's
-  main checkout; `--lanes-dir` or `UBQ_LANES_DIR` names another directory. N is
+- **Lanes** are `lane-1` to `lane-N`. The commands above select App lanes;
+  without `--lanes-dir` or `UBQ_LANES_DIR`, the Core helper uses `ubq-lanes`
+  beside Core's main checkout. N is
   two on macOS and three elsewhere, or `--lanes N`. Each lane is a detached
   worktree, created on first use.
 - **Taking one.** A run locks a free lane with `flock`, trying first the lane
@@ -73,6 +78,10 @@ python3 Scripts/build-lane.py root --lane 2   # a lane's build root
   and ignored files stay. Only files whose content differs are written, so
   ninja rebuilds what changed. HEAD is detached at the commit, with the changes
   staged.
+  The App commands initialize the pinned library submodules before building;
+  uncommitted changes inside those libraries are not copied into an App lane.
+  A bare commit name such as `origin/main` resolves in the lane repository,
+  which initially belongs to Core; `--from "$PWD"` selects this App checkout.
 - **The command** runs in the lane with `UBQ_BUILD_ROOT` set to the lane's
   root. To use that value in the command line, quote it for the lane's shell:
   `-- sh -c 'ninja -C "$UBQ_BUILD_ROOT/macos-uitest" Ubiquitty'`. SIGINT,
@@ -86,8 +95,8 @@ python3 Scripts/build-lane.py root --lane 2   # a lane's build root
 |---|---|---|---|
 | macOS app | `Ubiquitty` (`.app`) | `Scripts/build-macos.sh` | `$UBQ_BUILD_ROOT/macos/Source/Platform/macOS/Ubiquitty.app` |
 | Linux frontend | `ubiquitty-linux` | `Scripts/build-linux-gtk.sh` | `$UBQ_BUILD_ROOT/linux/ubiquitty-linux` |
-| Host daemon | `ubiquitty-host` | `Scripts/build-host.sh` | `$UBQ_BUILD_ROOT/host/ubiquitty-host` |
-| Agent (MCP) | `ubq` | `Scripts/build-agent.sh` | `$UBQ_BUILD_ROOT/agent/ubq` |
+| Host daemon | `ubiquitty-host` | `Libraries/ubiquitty-core/Scripts/build-host.sh` | `$UBQ_BUILD_ROOT/host/ubiquitty-host` |
+| Agent (MCP) | `ubq` | `Libraries/ubiquitty-core/Scripts/build-agent.sh` | `$UBQ_BUILD_ROOT/agent/ubq` |
 | iOS app | `UbiquittyIOSApp` (`.app`) | `Scripts/build-ios.sh` | `$UBQ_BUILD_ROOT/ios-{iphonesimulator,iphoneos}/Ubiquitty.app` (plus Core archives) |
 | Web / Wasm | `ubiquitty-web` | `Scripts/build-web.sh` | `$UBQ_BUILD_ROOT/web-dist/` |
 | BSD console | `ubiquitty-wscons` | [Wscons CMake recipe](platform-builds.md#openbsd-and-netbsd-wscons) | `$UBQ_BUILD_ROOT/wscons/ubiquitty-wscons` |
@@ -128,9 +137,10 @@ and never reads a clock.
 | No tag reachable (a shallow clone cut below it) | `0.2.0` | `0.2.0` | `20000000` | `9c0d1e2f, no version tag` |
 | No repository (a source archive), or no `git` | `0.2.0` | `0.2.0` | `20000000` | `no git` |
 
-- **The rule** is `Scripts/cmake/BuildVersion.cmake`. The build runs it, and
-  `Scripts/build-version.sh [version|named|commits|bundle|identity]` prints its
-  answers for a script. `./Scripts/run-tests.sh build_version` runs its tests
+- **The rule** is `Libraries/ubiquitty-core/Scripts/cmake/BuildVersion.cmake`. The build runs it, and
+  `UBQ_VERSION_TREE="$PWD" Libraries/ubiquitty-core/Scripts/build-version.sh [version|named|commits|bundle|identity]` prints its
+  answers for a script. The shared tests run with
+  `UBQ_TESTS_ROOT="$PWD/Libraries/ubiquitty-core" ./Libraries/ubiquitty-core/Scripts/run-tests.sh build_version`
   against throwaway repositories.
 - **The nearest tag** is the one `git describe --tags --match 'v[0-9]*' --long`
   picks, without `--first-parent`: a branch that merged `main` reaches `main`'s
@@ -161,7 +171,7 @@ and never reads a clock.
   carries the upload's build number in that key instead
   ([Build numbers](#build-numbers)).
 - **One generated file.** The version reaches a binary through one generated
-  header in the build directory, which one translation unit (`Source/Core/BuildVersion.cpp`) includes. A
+  header in the build directory, which one translation unit (`Libraries/ubiquitty-core/Source/Core/BuildVersion.cpp`) includes. A
   build step rewrites it only when its text changes, so pulling one commit
   recompiles that file and relinks. Nothing passes the version on a compiler
   command line. Core's `buildVersion()` and `buildIdentity()` read it, for the
@@ -455,7 +465,8 @@ iOS details:
   `UbiquittyKitModule` + `UbiquittyIOSApp` targets that `Scripts/build-ios.sh`
   proves via Ninja, plus a `libUbiquittySSH.a` built from
   `Source/Platform/Apple/SSH` via SwiftPM (first build fetches `swift-nio-ssh`).
-* Minimum deployment target is 26.0 (`UBIQUITTY_IOS_MIN` in `CMakeLists.txt`),
+* Minimum deployment target is 26.0 (`UBIQUITTY_IOS_MIN` in
+  `Libraries/ubiquitty-core/Scripts/cmake/UbiquittyPreProject.cmake`),
   built against the 27.1 SDK or newer (`UBIQUITTY_IOS_SDK_MIN`), which declares
   the bar priorities and the Duo arrangement the app reaches through availability;
   the app's `UISupportedInterfaceOrientations` covers iPhone + iPad.
@@ -475,8 +486,8 @@ naming a project that was not generated is one `xcodebuild` cannot list.
 ### iOS (app)
 
 The iOS frontend is SwiftUI over the same portable Core and Apple-shared Swift
-layer that the macOS app uses (`Source/Platform/iOS/App/`, `Source/UbiquittyKit`,
-`Source/UbiquittyRenderKit`). There is no local PTY — the platform runs no
+layer that the macOS app uses (`Source/Platform/iOS/App/`, `Libraries/ubiquitty-kit/Source/UbiquittyKit`,
+`Libraries/ubiquitty-kit/Source/UbiquittyRenderKit`). There is no local PTY — the platform runs no
 child process — so a session arrives over the delegated carrier (an SSH channel
 to an ordinary `sshd`). See `Source/Platform/iOS/SessionBridge.h` for the C
 seam Swift cannot derive from.
@@ -545,7 +556,7 @@ built elsewhere.
   `UBIQUITTY_RELEASE_SIGNING=ON` makes the host accept as its successor, its app and its relay only code the
   release team signed, as `ubiquitty-host` or the released app, and refuses an unsigned or ad hoc binary
   wherever it lies. Every other build's host also trusts the files it was installed as
-  ([`sync.md` §6.13](sync.md#613-host-handover-live-sessions-survive-a-host-upgrade)).
+  ([`sync.md` §6.13](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/sync.md#613-host-handover-live-sessions-survive-a-host-upgrade)).
 - Notarized archive of this commit: `./Scripts/archive-macos.sh` fetches Sparkle, builds with Developer ID signing,
   notarizes, staples and checks the app, then keeps the zip, its dSYM, the build log and an `archive.json`
   record under `~/Library/Developer/Ubiquitty/Archives/` (`UBQ_ARCHIVE_ROOT` names another).
@@ -579,7 +590,7 @@ build type:
   the link probe included, which the generator would otherwise leave out
   because it links as Swift;
 - the training profile, `-fprofile-use` with the copy of
-  `Support/pgo/portable-core.profdata` rooted for the checkout;
+  `Libraries/ubiquitty-core/Support/pgo/portable-core.profdata` rooted for the checkout;
 - the release path map, which keeps the builder's paths out of the binary.
 
 Release also keeps its debug information, which the Ninja Release build does
@@ -698,15 +709,16 @@ them. It imports no disk-space and no active-keyboard API.
     first configured with, so switch compilers in a fresh directory.
   - Fedora: `dnf install cmake ninja-build gcc-c++ gtk4-devel vulkan-loader-devel glslc`
   - Arch: `pacman -S cmake ninja gcc pkgconf gtk4 vulkan-headers vulkan-icd-loader shaderc`
-- Release builds with Clang apply the training profile in `Support/pgo` when the
+- Release builds with Clang apply the training profile in `Libraries/ubiquitty-core/Support/pgo` when the
   compiler can read it, and otherwise build without it and print
   `PGO: NOT APPLIED` with the compiler's reason. GCC never reads it.
   `UBIQUITTY_PGO=OFF` in the environment of a build script, or
   `-DUBIQUITTY_PGO=OFF` on a hand-run configure, leaves it out. The profile's
   drift from the tree is bounded twice in the pre-push gates, per push and in
   total against a budget recorded beside the profile, and the profile is
-  renewed by `Scripts/pgo-retrain-check.sh --retrain` weekly or when the gate
-  warns; `Support/pgo/README.md` has the rules.
+  renewed by `Libraries/ubiquitty-core/Scripts/pgo-retrain-check.sh --retrain` weekly or when the gate
+  warns; `Libraries/ubiquitty-core/Support/pgo/README.md` has the rules. The
+  helper trains Core's profile and operates on Core's repository.
 
 ### Linux arms of the pre-push hook from a Mac
 
@@ -753,17 +765,17 @@ GTK 4.16, or newer, and the Vulkan loader); first run needs no install. The
 script reads the newest glibc and libstdc++ symbol versions the binary asks for
 (`GLIBC_2.38` and `GLIBCXX_3.4.31` at most) and refuses one that asks for more.
 
-Build in the CI image (`Scripts/ci-linux-image.sh`) with the clang that
+Build in the CI image (`Libraries/ubiquitty-core/Scripts/ci-linux-image.sh`) with the clang that
 applies the training profile, under `UBIQUITTY_PGO=REQUIRE`. Details + the in-app
 "Check for Updates…" flow: [`auto-update.md`](auto-update.md#linux-appimage).
 
 ### Standalone command-line client
 
-`Scripts/build-agent-linux.sh` builds static-musl `ubq` binaries for x86_64 and
+`Libraries/ubiquitty-core/Scripts/build-agent-linux.sh` builds static-musl `ubq` binaries for x86_64 and
 ARM64 using Docker. Pass one architecture to build only that binary:
 
 ```sh
-UBQ_BUILD_JOBS=4 ./Scripts/build-agent-linux.sh arm64
+UBQ_BUILD_JOBS=4 ./Libraries/ubiquitty-core/Scripts/build-agent-linux.sh arm64
 ```
 
 Output is under `$UBQ_BUILD_ROOT/agent-linux`. `UBQ_AGENT_LINUX_SOURCE` selects
@@ -772,7 +784,7 @@ The build uses GCC 15 and does not apply the Clang PGO profile.
 
 ## Benchmark lanes (optional)
 
-The parse-scenario lane (`Scripts/run-parse-scenarios.sh`) and the throughput
+The parse-scenario lane (`Libraries/ubiquitty-core/Scripts/run-parse-scenarios.sh`) and the throughput
 bench harness read their workloads from a checkout of
 [ubench](https://github.com/ubiquitty/ubench) (`UBENCH_DIR`). They
 are optional: no build, test suite, CI job, or contribution check requires
@@ -792,15 +804,16 @@ The iOS app goes to TestFlight as the archive Xcode Cloud makes after
 
 ### Source export
 
-`Scripts/snapshot-clean.sh` validates the committed `HEAD` and can copy it into
-a new directory. Install CMake, the selected frontend's build dependencies, and
+`Libraries/ubiquitty-core/Scripts/snapshot-clean.sh` validates Core's committed
+`HEAD` and can copy Core into a new directory. It does not export the App or
+Kit. Install CMake, the selected frontend's build dependencies, and
 Gitleaks first. The checks run against the exported files, including license
 inventory, Markdown links, Core/host build smoke, frontend configuration, and
 secret/personal-path scans.
 
 ```sh
-nice -n 19 env UBQ_BUILD_JOBS=1 Scripts/snapshot-clean.sh
-nice -n 19 env UBQ_BUILD_JOBS=1 Scripts/snapshot-clean.sh --output /tmp/ubiquitty-source
+nice -n 19 env UBQ_BUILD_JOBS=1 Libraries/ubiquitty-core/Scripts/snapshot-clean.sh
+nice -n 19 env UBQ_BUILD_JOBS=1 Libraries/ubiquitty-core/Scripts/snapshot-clean.sh --output /tmp/ubiquitty-core-source
 ```
 
 The destination's parent must exist and the destination must not exist. A dry
@@ -809,8 +822,10 @@ change visibility. It exports committed files only; uncommitted changes are not
 included. `UBIQUITTY_SNAPSHOT_SKIP_BUILD=1` is available for a documentation check
 and is reported as a skipped build, not release validation.
 
-Use this for a source distribution. Export validation checks the source tree;
-it does not establish runtime safety or feature completeness.
+Use this for a Core source distribution. An App source distribution also needs
+the exact pinned Core and Kit sources; this helper does not validate that
+combined export. Export validation does not establish runtime safety or feature
+completeness.
 
 ### Workflows
 
@@ -818,7 +833,10 @@ it does not establish runtime safety or feature completeness.
   every push and pull request. Its Linux and Apple batteries, which hold the
   tests, coverage, fuzz and snapshots, are off on hosted runners: their timing
   bounds are not loosened to fit slower machines, and the maintainers run them
-  before every landing (`python3 Scripts/ci_batteries.py run linux|apple`).
+  before every landing through the App's pre-push checks. The shared battery
+  definitions are in `Libraries/ubiquitty-core/Scripts/ci_batteries.py`. From
+  the App checkout, pass `--source-root "$PWD"` to run the selected battery
+  against the App and its pinned libraries.
 
 
 ### Runners and fork pull requests

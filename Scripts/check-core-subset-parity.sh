@@ -62,7 +62,7 @@ def subsetBodies(source):
     - Returns: a dict of list name to body text, comments removed.
     """
     found = {}
-    for opening in re.finditer(r"ubiquitty_core_subset\((UBIQUITTY_\w+_CORE)\s+EXCLUDE", source):
+    for opening in re.finditer(r"ubiquitty_core_subset\((UBIQUITTY_\w+_CORE)\s+(?:ABSOLUTE\s+)?EXCLUDE", source):
         depth, index, collected = 1, opening.end(), []
         while index < len(source) and depth:
             lineEnd = source.find("\n", index)

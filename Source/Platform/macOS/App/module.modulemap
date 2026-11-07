@@ -1,0 +1,21 @@
+// Copyright (C) 2026 Stanislav Yaglo
+// SPDX-License-Identifier: Apache-2.0
+
+// What this shell's Swift needs from C++ that Core's own module does not
+// carry: the application delegate's platform context, the ssh and mosh
+// wrappers and the settings edits that walk C++ structures; the Settings
+// window's theme and blur facts; and the OSC 52 read confirmation's resolver.
+// A preference itself is read and written through Core's by-key surface, not
+// through anything here.
+//
+// Names no Core header, directly or through an include. Core's headers belong
+// to Source/Platform/Apple/module.modulemap, and a header reached through two
+// maps is parsed into both and defined twice; a Core type crosses these
+// headers only by reference, forward-declared, or as a primitive.
+module UbiquittyAppBridge {
+    header "ApplicationBridge.h"
+    header "UBClipboardReadInterop.h"
+    header "UBSettingsInterop.h"
+    requires cplusplus
+    export *
+}

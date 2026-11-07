@@ -48,6 +48,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+CORE_ROOT = Path(os.environ.get("UBIQUITTY_CORE_SOURCE_DIR") or ROOT / "Libraries" / "ubiquitty-core")
 RUNNER = ROOT / "Scripts" / "run-ui-tests.sh"
 
 # The scenario runner prints one of these three verdicts per scenario, then
@@ -61,7 +62,7 @@ def buildRoot() -> str:
     - Returns: the root's path.
     """
     resolve = subprocess.run(
-        [sys.executable, str(ROOT / "Scripts" / "build_root.py"), str(ROOT)],
+        [sys.executable, str(CORE_ROOT / "Scripts" / "build_root.py"), str(ROOT)],
         cwd=ROOT, capture_output=True, text=True)
     if resolve.returncode != 0 or not resolve.stdout.strip():
         raise SystemExit("ui-scenarios: the build root did not resolve")
@@ -79,7 +80,7 @@ def bundleBinary() -> Path:
     - Returns: the executable's path, built or not.
     """
     resolve = subprocess.run(
-        [sys.executable, str(ROOT / "Scripts" / "build_root.py"), str(ROOT)],
+        [sys.executable, str(CORE_ROOT / "Scripts" / "build_root.py"), str(ROOT)],
         cwd=ROOT, capture_output=True, text=True)
     if resolve.returncode != 0 or not resolve.stdout.strip():
         raise SystemExit("ui-scenarios: the build root did not resolve")

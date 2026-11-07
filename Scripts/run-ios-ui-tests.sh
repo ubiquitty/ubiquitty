@@ -48,9 +48,12 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 
 BUILD="$UBQ_BUILD_ROOT/ios-iphonesimulator"
 APP="${1:-$BUILD/Ubiquitty.app}"
@@ -64,7 +67,7 @@ TIMEOUT="${UI_TEST_TIMEOUT:-$(( 300 + 90 * ${declaredCases:-0} ))}"
 # The device this checkout owns, booted for this run and shut down when it
 # ends; see Scripts/ios-simulator.sh.
 # shellcheck source=Scripts/ios-simulator.sh
-. "$ROOT/Scripts/ios-simulator.sh"
+. "$KIT_ROOT/Scripts/ios-simulator.sh"
 DEVICE_NAME="$(ubq_ios_device_name)"
 BUNDLE_NAME="UbiquittyUITests"
 STAGE="$BUILD/uitest"
@@ -99,8 +102,8 @@ fi
 # sources, so ninja never relinks it for a test-only edit, and including them
 # here reddens this check for every test change until an unrelated app rebuild.
 # The bundle-staleness check below is the one that watches the test sources.
-APP_STALE="$(find "$ROOT/Source/Platform/iOS" "$ROOT/Source/UbiquittyKit" "$ROOT/Source/UbiquittyRenderKit" \
-    "$ROOT/Source/Core" "$ROOT/Source/PAL" "$ROOT/Source/Base" \
+APP_STALE="$(find "$ROOT/Source/Platform/iOS" "$KIT_ROOT/Source/UbiquittyKit" "$KIT_ROOT/Source/UbiquittyRenderKit" \
+    "$CORE_ROOT/Source/Core" "$CORE_ROOT/Source/PAL" "$CORE_ROOT/Source/Base" \
     -type f \( -name '*.swift' -o -name '*.cpp' -o -name '*.h' -o -name '*.mm' \) \
     ! -path "$ROOT/Source/Platform/iOS/UITest/*" \
     -newer "$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist" 2>/dev/null)" \

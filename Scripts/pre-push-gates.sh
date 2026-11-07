@@ -7,346 +7,46 @@
 # passed: nothing goes red, so the tree looks green while nothing has executed.
 # These gates are the ones that decide whether a push is sound.
 #
-#   TIER=lint    every gate that needs no build                       no toolchain
-#   TIER=quick   style + SSOT + PGO drift + host build + the arms the
-#                push's changes reach                                 DEFAULT
-#   TIER=ctest   quick + the ctest suite                              ON REQUEST
-#   TIER=linux   quick + Core and the GTK frontend on real Linux
-#   TIER=full    linux + macOS app + snapshot regressions
-#
-# How long a tier takes depends on what the push changes, because each arm runs
-# only when the push reaches its sources. A push that changes CMakeLists.txt
-# reaches every iOS gate, and the iOS UI tests on a simulator dominate quick
-# from a cold build root. The PGO total-drift gate compiles every portable-core
-# unit on every run.
-#
-# UBIQUITTY_PREPUSH selects the tier for one push; `git config
-# ubiquitty.prepushTier <tier>` sets this clone's standing choice, for a machine
-# whose limits are a property of the machine rather than of the push. There is no
-# tier that runs nothing — see the note on the TIER assignment below.
-#
-# Successful gates are cached in this worktree's Git metadata. The key covers
-# the committed and uncommitted source snapshot, origin/main, command, tier,
-# relevant build environment, and toolchain identity; failures and skips are
-# never cached. Set UBIQUITTY_PREPUSH_CACHE=off to force every selected gate.
-#
-# Every Linux arm runs on a native Linux host when this clone names one that
-# answers ssh (git config ubiquitty.linuxHost; UBIQUITTY_LINUX_HOST overrides it
-# for one push), through Scripts/linux-host.sh, and otherwise in the container.
-# The hook prints which it used. The goldens are minted on a native host.
-#
-# The container arm runs through Scripts/run-linux.sh, so the Linux-only breaks a
-# macOS compiler never sees are caught here: libstdc++ against libc++, GNU ld's
-# left-to-right archive scan against Apple's whole-set search, -Werror arms gcc
-# raises and clang does not, all of which reach main when nothing compiles that
-# path.
-#
-# UNCOVERED, and named rather than dropped: musl static, coverage floors,
-# bounded fuzz, and the bench gate. Bench is excluded for correctness, not cost —
-# a contended machine against a baseline measured on an idle runner is wrong in
-# both directions.
-#
-# wasm32 is not on that list: gate_wasm runs from the quick tier. Its coverage
-# is conditional twice over, so read it as "covered when it can matter" rather
-# than "always" — the gate returns early when the branch touches none of
-# Source/Core, Source/Base or Source/Platform/Web, and reports SKIPPED,
-# counted as having checked nothing, on a machine without emsdk.
-set -uo pipefail
+# This is the list for a checkout that holds every repository: the app, its
+# frontends and the arms that build them, over the families ubiquitty-core's
+# Scripts/pre-push-gates-core.sh defines. The tiers, the runner and the summary
+# are Scripts/pre-push-gates-lib.sh's.
 
-# Preserve the caller's scheduling priority. Coordinate compile jobs through
-# the build-job limits and reserve a quiet machine for timing-sensitive tests.
-source "$(dirname "$0")/gate-report-lib.sh"
-source "$(dirname "$0")/pre-push-cache.sh"
-source "$(dirname "$0")/pre-push-runner.sh"
+# The tiers, the runner and the families are ubiquitty-core's, found in the
+# checkout that holds them.
+# shellcheck source=Scripts/library-scripts.sh
+. "$(cd "$(dirname "$0")" && pwd)/library-scripts.sh"
+# Keep gate lookup and the cache on the same roots the app loader selected,
+# including CMake-form aliases. Preserve any caller's export attributes.
+UBQ_CORE_ROOT="$CORE_ROOT"
+UBQ_KIT_ROOT="$KIT_ROOT"
+# shellcheck source=Scripts/pre-push-gates-lib.sh
+source "$CORE_ROOT/Scripts/pre-push-gates-lib.sh"
+# shellcheck source=Scripts/pre-push-gates-core.sh
+source "$UBQ_CORE_ROOT/Scripts/pre-push-gates-core.sh"
+# shellcheck source=Scripts/pre-push-gates-kit.sh
+source "$UBQ_KIT_ROOT/Scripts/pre-push-gates-kit.sh"
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# Build output lives outside the checkout; see Scripts/build-root.sh.
-# shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
-cd "$ROOT" || exit 1
+gate_commit_rules() { core_gate_commit_rules; gate_commit_rules_app; }
+gate_style() { core_gate_style; gate_style_app; }
+gate_style_without_builds() { core_gate_style_without_builds; gate_style_app_without_builds; }
+gate_host() { core_gate_host; gate_host_apple; }
+gate_ctest() { core_gate_ctest; }
+gate_pgo_drift() { core_gate_pgo_drift; }
+gate_forks() { core_gate_forks; }
+# Linux arms of the application share one native-host checkout for the push.
+# The libraries run their own Linux builds without the application's stage map.
+UBQ_LINUX_HOST_RUN="push-$$-$(date +%s)"
+export UBQ_LINUX_HOST_RUN
 
-# The renderer-arm selection and the backlog-growth gate both diff against
-# origin/main. A missing ref makes that diff fail, and ubq_renderer_arms then
-# reads the failure as an empty change set and skips both renderer gates in
-# silence rather than refusing. Verify the ref up front, so a checkout that has
-# not fetched fails loud instead of running a subset that reads as a clean pass.
-if ! git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-    echo "pre-push gates: origin/main is not resolvable — fetch it first (git fetch origin main)." >&2
-    echo "  The renderer-arm diff and the backlog-growth gate both need it; without it they" >&2
-    echo "  would skip in silence and the run would read as a pass." >&2
-    exit 1
-fi
-
-# The quick tier runs focused checks; ctest requests the complete suite.
-# Choose a tier using the per-invocation environment, then clone-local Git
-# configuration, then the quick default. Unknown tiers fall back to quick;
-# no tier disables every gate.
-#
-#   git config ubiquitty.prepushTier lint    this clone builds nothing on push
-#   UBIQUITTY_PREPUSH=full git push          overrides it for one push
-TIER="${UBIQUITTY_PREPUSH:-}"
-if [ -z "$TIER" ]; then
-    TIER="$(git config --get ubiquitty.prepushTier 2>/dev/null || true)"
-    TIER_SOURCE="git config ubiquitty.prepushTier"
-fi
-TIER="${TIER:-quick}"
-case "$TIER" in
-    lint | quick | default | ctest | linux | full) ;;
-    *)
-        echo "pre-push gates: unknown tier '$TIER'${TIER_SOURCE:+ (from $TIER_SOURCE)} — running quick" >&2
-        TIER=quick
-        ;;
-esac
-
-# Limit CTest fan-out because each test job may itself start a build.
-# UBIQUITTY_PREPUSH_JOBS overrides the default for the available machine budget.
-JOBS="${UBIQUITTY_PREPUSH_JOBS:-$( n=$( (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4) ); echo $(( n > 3 ? n / 2 : 2 )) )}"
-
-ubq_gate_cache_init "$ROOT" "$TIER"
-
-# Every gate pre-commit runs, run again here.
-#
-# A rule enforced at commit alone holds only as long as every commit runs its
-# hook. `git commit --no-verify` is one flag, and pre-commit documents it as
-# turning off all of them: such a rule is one that flag retires, with the tree
-# then carrying the violation under a full row of passing push gates.
-#
-# Push is where work stops being local, so it is the boundary that has to hold
-# independently of what any commit did. check-gate-coverage.py keeps the two
-# lists nested from the other side: a gate added to pre-commit and not to here
-# fails Scripts/check-gate-coverage.py.
-#
-# No argument is passed where pre-commit passes --staged or a root. Those gates
-# read the whole tree when given none, which is what a push wants — the question
-# here is whether the tree is clean, not which lines this branch touched.
-gate_commit_rules() {
-    run "build dirs" python3 ./Scripts/check-build-dirs.py
-    run "web fixture" python3 ./Scripts/check-web-fixture.py
-    run "conformance claims" python3 ./Scripts/check-conformance-claims.py
-    run "core subset paths" bash ./Scripts/check-core-subset-paths.sh
-    run "empty array expansion" python3 ./Scripts/check-empty-array-expansion.py
-    run "enum switches" python3 ./Scripts/check-enum-switches.py
-    run "frontend capability policy" python3 ./Scripts/check-frontend-capability-policy.py
-    run "glyph backend claims" python3 ./Scripts/check-glyph-backend-claims.py
-    run "healing frame pair" python3 ./Scripts/check-healing-frame-pair.py
-    run "literal qualifiers" python3 ./Scripts/check-literal-qualifiers.py
-    run "memcmp fold" python3 ./Scripts/check-memcmp-fold.py
-    run "name collisions" python3 ./Scripts/check-name-collisions.py
-    run "pgo commit shape" python3 ./Scripts/check-pgo-commit-shape.py
-    run "profile orphans" python3 ./Scripts/check-profile-orphans.py
-    run "quic mandatory" python3 ./Scripts/check-quic-mandatory.py
-    run "showcase goldens" python3 ./Scripts/check-showcase-goldens.py
-    run "snapshot harness" python3 ./Scripts/check-snapshot-harness.py
-    run "stale cmake cache" python3 ./Scripts/check-stale-cmake-cache.py
-    run "unwired flags" python3 ./Scripts/check-unwired-flags.py
-    run "web host bytes" python3 ./Scripts/check-web-host-bytes.py
-    run "web parser entries" python3 ./Scripts/check-web-parser-entries.py
+ubq_app_ci_root_finish() {
+    local status=$?
+    "$ROOT/Scripts/linux-host.sh" release >/dev/null 2>&1 || true
+    ubq_ci_root_finish "$status"
 }
+trap ubq_app_ci_root_finish EXIT
 
-# ci.yml: style — check-style.py and check-capability-ssot.py.
-#
-# test-ci-batteries.py is here because ci.yml's preflight runs it, and a verdict
-# only CI produces reaches only whoever opens the run. It parses the workflow
-# and the CMake test registrations, both of which drift under ordinary edits — a
-# set_tests_properties wrapped across lines can read as the property having been
-# deleted, and the preflight then stops there for every push.
-# It reads ci.yml as the preflight does: without --workflow the workflow
-# contract test skips, and an edit to ci.yml reaches the preflight untested.
-gate_style() {
-    # Whole tree, not the branch diff. This tier is the floor because it is the
-    # one an author can rely on: it runs before the push, on the machine making
-    # it, whatever the remote is doing. A rule narrowed here is narrowed for
-    # every push regardless of whether anything downstream is watching.
-    # --since stays available for a fast local pass; it is not what gates a push.
-    run "style (check-style.py)" ./Scripts/check-style.py
-    run "workflow lint (actionlint)" ./Scripts/check-workflows.sh
-    run "capability SSOT" ./Scripts/check-capability-ssot.py
-    run "gate coverage" python3 ./Scripts/check-gate-coverage.py
-    run "CI orchestration tests" python3 ./Scripts/test-ci-batteries.py --workflow .github/workflows/ci.yml
-    run "terminfo infocmp gate" ./Scripts/check-terminfo.sh
-    # CI runs the UI suite; validate its exception tables locally on every push.
-    run "UI scenario entries" python3 ./Scripts/check-ui-scenarios.py --entries
-    # Here rather than in pre-commit: it scans the whole tree twice, once here
-    # and once in a throwaway worktree at origin/main, which is a push's budget
-    # and not a commit's. The reference is computed rather than recorded because
-    # a number several checkouts share goes stale the moment any of them lands
-    # anything, and then blocks all of them.
-    run "backlog growth" python3 ./Scripts/check-backlog-growth.py
-    # Tests/Performance is built by scripts that each name the benchmarks they
-    # want, and several benchmarks are named by none of them. Nothing compiles
-    # those, so a tree-wide edit rots them with every gate green. Parsing the
-    # directory fits a push's budget and not a commit's.
-    run "benchmarks compile" ./Scripts/check-bench-compiles.sh
-    # Prints rather than blocks, and cannot do otherwise: it names a build this
-    # machine may not be able to run. A Core type whose layout is pinned by a
-    # static_assert in a frontend has that assertion compiled by one build only,
-    # so every portable gate passing says nothing about it.
-    python3 ./Scripts/check-build-arm.py --since origin/main || true
-}
-
-# ci.yml: host-linux (glibc). The host's platform branches are invisible to a
-# frontend-only build, and its source subset is trimmed, so a kept translation
-# unit calling into a trimmed one is caught at link or not at all.
-gate_host() {
-    # In the quick tier rather than beside the macOS app, which only `full`
-    # reaches. The app build is incremental and links a .swiftmodule already on
-    # disk, so it never asks whether the module still compiles: a change that
-    # crashes swiftc from clean passes every push. Three seconds, and it stands
-    # down off macOS.
-    run_scoped "Swift renderer from clean" \
-        "Source/Platform/macOS Source/UbiquittyRenderKit Source/UbiquittyKit Source/Platform/Apple CMakeLists.txt Source/Core Source/Base Source/PAL Scripts/cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/check-swift-module-compiles.sh Scripts/build-root.sh Scripts/build_root.py" \
-        ./Scripts/check-swift-module-compiles.sh
-    run_scoped "ubiquitty-host build" \
-        "Source/Platform/Host Source/Platform/POSIX Source/Agent Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/build-host.sh Scripts/build-provenance.sh Scripts/build-root.sh Scripts/build_root.py" \
-        ./Scripts/build-host.sh
-    # ubq trims Core through its own ubiquitty_core_subset(), so a
-    # kept translation unit calling into an excluded one fails here and nowhere
-    # else — the host subset excludes a different set and links fine. A source
-    # entering the SSOT flows into both subsets, and can call into a translation
-    # unit only one of them trims.
-    #
-    # One second warm, which is what makes a second subset worth gating.
-    run_scoped "ubq build" \
-        "Source/Agent Source/Platform/Host Source/Platform/POSIX Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/build-agent.sh Scripts/build-provenance.sh Scripts/build-root.sh Scripts/build_root.py" \
-        ./Scripts/build-agent.sh
-    # Tests/ COMPILES. Not the suite — the suite is retired from this tier for
-    # the load reason below, and it stays retired.
-    #
-    # No frontend build compiles Tests/, so a namespace move can pass host,
-    # agent, Linux and macOS and leave a test file unable to compile: a
-    # using-directive and a namespace alias are the two spellings that carry a
-    # name with no trailing `::`, and every frontend is green because no
-    # frontend includes them.
-    #
-    # Building is the whole of what this adds. Running is what costs, and a file
-    # that does not compile fails here for the same reason it would fail there,
-    # sooner and for a tenth of the machine.
-    run_scoped "Tests/ compiles" \
-        "Source Tests CMakeLists.txt Scripts/cmake Scripts/build-tests.sh Scripts/check-build-reached.py Scripts/portable-core-sources.txt Scripts/build-root.sh Scripts/build_root.py Scripts/build-jobs.sh Scripts/build_jobs.py" \
-        ./Scripts/build-tests.sh
-    # And RUNS the ones this branch can break. Compiling is not running: the
-    # rows `test_preferences_keys` hand-copies from the `Key.h` descriptor table
-    # can go one short, red on every platform, while every build gate here is
-    # green.
-    #
-    # Not the suite, which stays retired for the load reason above — the tests
-    # whose objects actually READ a file the branch changed, which ninja's
-    # dependency database already knows per object. A settings change selects
-    # five; a rendering change selects about twenty and runs them in under
-    # thirty seconds. The directory is warm from the step above, so what this
-    # adds is the run.
-    #
-    # It needs that build: asked against an unbuilt directory it refuses rather
-    # than select nothing, because nothing selected is what a green run looks
-    # like.
-    #
-    # Scoped to the build's paths and to everything a gate script can read. A
-    # stanza that is nothing but gate scripts is selected by the paths those
-    # scripts spell, and the scripts are read to learn them, so all of Scripts
-    # and each directory a script may name is an input: a verdict cached across
-    # a change to a script would be one for a selection that script no longer
-    # makes.
-    run_scoped "tests reaching the diff" \
-        "Source Tests CMakeLists.txt Scripts Tools Docs Support Samples Resources" \
-        ./Scripts/check-tests-reaching-the-diff.py "$(python3 Scripts/build_root.py)/BuildHostTests/ctest" --jobs "$JOBS"
-    # A run of the tests leaves no process running and adds nothing to the
-    # state directory of whoever ran it. Every run-tests.sh invocation judges
-    # itself on the way out, so the tiers that run stanzas are covered by the
-    # stanzas; this proves the judge still fails, against a stanza that leaks
-    # on purpose. Five seconds, and it builds nothing; unscoped, because what
-    # it reads is the driver itself, whose inputs are the whole test tree.
-    run "test runs leave nothing behind" ./Scripts/run-tests.sh run_hygiene
-    # The framework product has no other oracle: the app links the static
-    # module, so a packaging break — the metallib off the bundle, the
-    # swiftmodule missing from Modules/, the factory unreachable, a root entry
-    # codesign refuses to seal — passes every app build. Runs only when the
-    # module's sources or the framework's packaging moved, because it is a
-    # second whole-module Swift compile: the framework target's block, the
-    # source lists it compiles, the scripts that lay out its bundle and copy
-    # its resources, the fonts and icons it carries, the Core tables that say
-    # which of them it registers and reads, which family it prefers and what
-    # the bitmap face is called, and the checks the oracle runs.
-    if ! git diff --quiet origin/main -- Source/Platform/macOS/App Source/UbiquittyKit Source/UbiquittyRenderKit \
-            Source/Platform/macOS/CMakeLists.txt Scripts/cmake/AppleSharedSwift.cmake \
-            cmake/FrameworkBundleLayout.cmake cmake/BundleResources.cmake cmake/StageBundleResources.cmake \
-            cmake/LicenseNotices.cmake Resources/fonts Resources/phosphor Resources/process-icons \
-            Source/Core/Rendering/BundledFonts.h Source/Core/Rendering/FontSelection.h \
-            Source/Core/Rendering/UnifontRasterizer.h \
-            Source/Core/Preferences/PreferencesDefaults.h Source/Core/Title/ProcessIconCatalog.h \
-            Source/Core/Title/ProcessIcons.h \
-            Scripts/check-ubiquittykit.sh Scripts/check-swift-cxx-exports.py 2>/dev/null; then
-        run "UbiquittyKit consumer" ./Scripts/check-ubiquittykit.sh
-    fi
-    # The headless smokes assert into their exit codes; the runner derives the
-    # mode list from the entry point's dispatch, so a smoke added there is gated
-    # by the commit that adds it. Runs only
-    # when the macOS sources moved, against whatever app the arm gates
-    # above already required to be fresh.
-    if ! git diff --quiet origin/main -- Source/Platform/macOS Scripts/check-macos-smokes.py 2>/dev/null; then
-        run "macOS headless smokes" ./Scripts/check-macos-smokes.py
-    fi
-}
-
-# The complete suite is selected by the ctest and full tiers. Quick and default
-# run the focused dependency-based selection in gate_host instead.
-gate_ctest() {
-    local build="BuildHostTests/ctest"
-    run "ctest configure" cmake -S . -B "$build" -G Ninja \
-        -DUBIQUITTY_BUILD_TESTS=ON -DUBIQUITTY_FRONTEND=Core -DCMAKE_BUILD_TYPE=Debug
-    # A failed configure is already reported; ctest against it adds only noise.
-    [ -f "$build/CMakeCache.txt" ] || { SKIPPED+=("ctest (no configure)"); return; }
-    run "ctest suite" env -C "$build" ctest -j"$JOBS" --output-on-failure
-}
-
-# What this branch detaches from the PGO profile, diff-scoped, and what the
-# whole tree has detached since the retrain. Drift found weeks later is hard to
-# place; per branch the number is small and names its function. The absolute
-# budget at retrain lives in pgo-train.sh (--max-discarded 0), which also
-# records the total-drift budget beside the profile; the first bound here is on
-# the new mass only, and the value is the performance owner's knob.
-# The budget is far below buildCellInstances-class detachment — a change to
-# that function's shape discards its whole profile — so an edit there always
-# refuses the push and lands as a pair: the change plus a retrain on the same branch, retrain
-# second, driven by whoever owns the performance work. A branch that changes no portable-core TU
-# prints zero and passes.
-#
-# It is its own gate because the per-branch bound and the test suite answer
-# different questions, and a bound that only runs when someone asks for the
-# suite bounds nothing: a profile bounded only beside the suite can drift far
-# enough to lose whole lanes against a retrained one. It compiles only the
-# portable-core units the branch changed, which is seconds.
-gate_pgo_drift() {
-    # 30000, set from the tree rather than picked: a budget far above anything
-    # this tree produces runs on every push and cannot fail. An ordinary branch
-    # reads zero; the budget sits above the drift a long run of commits
-    # accumulates, so it tolerates a branch that rewrites that much and fails
-    # one that goes further.
-    #
-    # Raise it with the number the failure prints, and say what the branch did
-    # to earn it. A profile retrain is the other answer, and the better one when
-    # the drift is real rather than a one-off.
-    run "pgo diff-applies" python3 Scripts/check-pgo-applies.py \
-        --changed-from origin/main --max-new-discarded 30000
-    # The total, against the budget pgo-train.sh recorded beside the profile.
-    # The bound above reads only the units a push changed: a header edit that
-    # reshapes every function inlining it compiles nothing there and reads
-    # zero, and pushes each under 30000 can leave the profile far off the tree
-    # within days of a retrain. This compiles every portable-core unit across
-    # the cores, and refuses once the total exceeds the
-    # recorded budget; from 60% of it the gate prints a warning line that the
-    # runner repeats beside the pass. A profile with no budget beside it stands
-    # down here, by name, until a retrain records one.
-    run "pgo total drift" python3 Scripts/check-pgo-applies.py --recorded-budget
-}
-
-# Where the Linux arms run, decided once per push: a Linux host that answers ssh
-# (git config ubiquitty.linuxHost, or UBIQUITTY_LINUX_HOST), else the container
-# on this machine. The goldens are minted on a native host, so a native host is
-# the machine whose renders agree with them; the container is the fallback and
-# differs from them by font files. Sets UBQ_LINUX_HOST_ROUTE, which the gates
-# this hook starts (check-style's GTK smokes) read instead of asking again, and
-# UBQ_LINUX_HOST, empty for the container. Called in the main shell: a command
-# substitution would lose the assignments.
+# Decide once, so builds, snapshots and child gates run on the same machine.
 ubq_linux_route() {
     if [ -z "${UBQ_LINUX_HOST_ROUTE:-}" ]; then
         UBQ_LINUX_HOST_ROUTE="$("$ROOT/Scripts/linux-host.sh" route)"
@@ -359,39 +59,68 @@ ubq_linux_route() {
     esac
 }
 
-# ci.yml: host-linux + linux-frontend. Needs Docker (OrbStack or Docker Desktop) or a
-# Linux host (Scripts/linux-host.sh); neither is SKIPPED.
-# The container runtime takes a whole core for the length of both builds, so a
-# loaded machine may switch it off.
-#
-# A switched-off run names it in the skip list rather than passing over it,
-# because what it covers is not covered elsewhere: no other gate compiles
-# Source/Platform/Linux at all, and the container is the only arm that reads
-# the toolchain floor. Without it, a branch that touches the GTK frontend or a
-# Core header it includes reaches main with nobody having compiled it.
-#
-#   UBIQUITTY_LINUX_GATE=off ./Scripts/pre-push-gates.sh   (to skip it)
-#
 gate_linux() {
     if [ "${UBIQUITTY_LINUX_GATE:-on}" = "off" ]; then
-        SKIPPED+=("linux build (paused; UBIQUITTY_LINUX_GATE=off pauses it)")
-        printf '  %-34s %s\n' "linux build" "PAUSED (UBIQUITTY_LINUX_GATE=off)"
+        core_gate_linux
         return
     fi
     ubq_linux_route
     if [ -n "$UBQ_LINUX_HOST" ]; then
-        # CI's own stages, in CI's order: the QUIC dependencies, then the host
-        # suite that links them, then the frontend.
         run "Core + host on Linux ($UBQ_LINUX_HOST)" ./Scripts/linux-host.sh stages quic host-tests
         run "GTK frontend on Linux ($UBQ_LINUX_HOST)" ./Scripts/linux-host.sh stages linux-build
         return
     fi
-    if ! command -v docker >/dev/null 2>&1; then
-        SKIPPED+=("linux build (no docker; install OrbStack or Docker Desktop)")
-        printf '  %-34s %s\n' "linux build" "SKIPPED (no docker)"
-        return
+    core_gate_linux
+    gate_linux_gtk
+}
+
+# The commit rules whose subject is the app: the web page, the frontends' capability
+# policy, the healing frame and the entry points' flags.
+gate_commit_rules_app() {
+    run "web fixture" python3 ./Scripts/check-web-fixture.py
+    run "frontend capability policy" python3 ./Scripts/check-frontend-capability-policy.py
+    run "healing frame pair" python3 ./Scripts/check-healing-frame-pair.py
+    run "unwired flags" python3 ./Scripts/check-unwired-flags.py
+    run "web host bytes" python3 ./Scripts/check-web-host-bytes.py
+    run "web parser entries" python3 ./Scripts/check-web-parser-entries.py
+}
+
+# The pre-push gates of the style tier whose subject is the app.
+gate_style_app() {
+    # CI runs the UI suite; validate its exception tables locally on every push.
+    run "UI scenario entries" python3 ./Scripts/check-ui-scenarios.py --entries
+    # Prints rather than blocks, and cannot do otherwise: it names a build this
+    # machine may not be able to run. A Core type whose layout is pinned by a
+    # static_assert in a frontend has that assertion compiled by one build only,
+    # so every portable gate passing says nothing about it.
+    python3 ./Scripts/check-build-arm.py --since origin/main || true
+}
+
+# gate_style_app minus nothing: neither of its gates compiles.
+gate_style_app_without_builds() {
+    run "UI scenario entries" python3 ./Scripts/check-ui-scenarios.py --entries
+    python3 ./Scripts/check-build-arm.py --since origin/main || true
+}
+
+# The Apple arms of the host tier: the Swift renderer compiled from clean, the
+# framework product, and the macOS headless smokes.
+gate_host_apple() {
+    kit_gate_apple
+    # The headless smokes assert into their exit codes; the runner derives the
+    # mode list from the entry point's dispatch, so a smoke added there is gated
+    # by the commit that adds it. Runs only
+    # when the macOS sources moved, against whatever app the arm gates
+    # above already required to be fresh.
+    if ! git diff --quiet origin/main -- Source/Platform/macOS Scripts/check-macos-smokes.py 2>/dev/null; then
+        run "macOS headless smokes" ./Scripts/check-macos-smokes.py
     fi
-    run "Core + host on Linux" ./Scripts/run-linux.sh test
+}
+
+# The GTK frontend in the Linux container, after core_gate_linux has built Core and the host there.
+gate_linux_gtk() {
+    if [ "${UBIQUITTY_LINUX_GATE:-on}" = "off" ] || ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
     run "GTK frontend on Linux" ./Scripts/run-linux.sh
 }
 
@@ -423,8 +152,12 @@ gate_linux_compile() {
     if [ -n "$UBQ_LINUX_HOST" ]; then
         # The host has no warm tree to be cold: its compiler cache is shared by
         # every run directory, so the build is the stage CI runs.
+        # Paths shared with the libraries use their owner's relative spelling.
+        # LicenseNotices is Core's; BundleLicenseNotices, BundleResources and
+        # SwiftInteropStamp are Kit's. The cache also keys both libraries' full
+        # commits and dirty diffs, including external source-root overrides.
         run_scoped "GTK frontend compiles on Linux ($UBQ_LINUX_HOST)" \
-            "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/linux-host.sh Scripts/ci_batteries.py Scripts/gate_framework.py Scripts/fetch-quic-deps.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/check-linux-build-prerequisites.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
+            "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/library-scripts.sh cmake/LicenseNotices.cmake cmake/BundleLicenseNotices.cmake cmake/BundleResources.cmake cmake/SwiftInteropStamp.cmake Libraries/ubiquitty-core Libraries/ubiquitty-kit Tests/dependent-tests.cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/linux-host.sh Scripts/ci_batteries.py Scripts/gate_framework.py Scripts/fetch-quic-deps.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/check-linux-build-prerequisites.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
             ./Scripts/linux-host.sh stages linux-build
         return
     fi
@@ -442,7 +175,7 @@ gate_linux_compile() {
         return
     fi
     run_scoped "GTK frontend compiles on Linux" \
-        "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/run-linux.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
+        "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/library-scripts.sh cmake Libraries/ubiquitty-core Libraries/ubiquitty-kit Tests/dependent-tests.cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/run-linux.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
         ./Scripts/run-linux.sh bash -c 'cd build/linux && ninja'
 }
 
@@ -465,53 +198,8 @@ ubq_renderer_arms() {
     # Three dots, so the base is the MERGE BASE rather than origin/main's tip:
     # against the tip, every file another branch landed since this branch started
     # reads as changed here, and the arms selected would be theirs.
-    changed="$(git diff --name-only origin/main...HEAD 2>/dev/null)" || return 0
-    # Native snapshots use the same Swift surface and Metal encoder as the app.
-    printf '%s\n' "$changed" | grep -v '^Source/Platform/macOS/UITest/' \
-        | grep -qE '^Source/(Platform/macOS|UbiquittyRenderKit|UbiquittyKit)/' \
-        && arms="$arms swift"
-    # A header the Metal shader includes compiles into the swift arm's pipeline
-    # as well as into Core, so a change to it is a swift-arm change too. The
-    # set is read from the shaders' quoted includes, followed transitively and
-    # folded to repository paths. With no shader to read, every Core header
-    # selects the arm: an include list that could not be read is not an empty one.
-    local shaderInputs="" pending="" source include resolved pattern selectsShader=0
-    pattern='^(.*/)?([^/]+)/\.\./(.*)$'
-    for source in Source/UbiquittyRenderKit/*.metal; do
-        [ -f "$source" ] && pending="$pending$source"$'\n'
-    done
-    if [ -z "$pending" ]; then
-        grep -qE '^Source/Core/.*\.(h|hpp|inc)$' <<<"$changed" && selectsShader=1
-    fi
-    while [ -n "$pending" ]; do
-        source="${pending%%$'\n'*}"
-        pending="${pending#*$'\n'}"
-        while IFS= read -r include; do
-            resolved="$(dirname "$source")/$include"
-            resolved="${resolved//\/.\//\/}"
-            while [[ "$resolved" =~ $pattern ]] && [ "${BASH_REMATCH[2]}" != ".." ]; do
-                resolved="${BASH_REMATCH[1]}${BASH_REMATCH[3]}"
-            done
-            case $'\n'"$shaderInputs" in
-                *$'\n'"$resolved"$'\n'*) continue ;;
-            esac
-            shaderInputs="$shaderInputs$resolved"$'\n'
-            [ -f "$resolved" ] && pending="$pending$resolved"$'\n'
-        done < <(sed -n 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*"\([^"]*\)".*/\1/p' "$source")
-    done
-    if [ -n "$shaderInputs" ] && grep -qxF "${shaderInputs%$'\n'}" <<<"$changed"; then
-        selectsShader=1
-    fi
-    # The native snapshot command reads its words, states its configuration and
-    # draws its portable frame through these Core headers, so a change to them
-    # changes what the swift arm renders.
-    grep -qE '^Source/Core/(Diagnostics/SnapshotArguments|App/SnapshotRequest)\.h$' <<<"$changed" && selectsShader=1
-    if [ "$selectsShader" = 1 ]; then
-        case " $arms " in
-            *" swift "*) ;;
-            *) arms="$arms swift" ;;
-        esac
-    fi
+    changed="$(ubq_changed_with_libraries)" || return 0
+    kit_swift_arm_reached "$changed" && arms="$arms swift"
     printf '%s\n' "$changed" | grep -q '^Source/Core/' && arms="$arms portable"
     printf '%s\n' "$changed" | grep -q '^Source/Platform/Web/' && arms="$arms web"
     printf '%s\n' "$changed" | grep -q '^Source/Platform/Linux/' && arms="$arms linux"
@@ -539,7 +227,7 @@ ubq_renderer_arms() {
 # run.py's business — a second table of them here is one more thing to drift.
 ubq_arm_rebuild() {
     case "$1" in
-        portable) echo "./Scripts/build-core-snapshot.sh" ;;
+        portable) echo "$UBQ_CORE_ROOT/Scripts/build-core-snapshot.sh" ;;
         # Clean, not incremental: an incremental macOS rebuild after Swift
         # sources are re-dated can produce a binary that fails the surface
         # smoke's palette-epoch case while a CLEAN build of the same tree
@@ -554,6 +242,9 @@ ubq_arm_rebuild() {
 }
 
 gate_renderer_snapshots() {
+    # The harness reads its goldens, waivers and cases from the three
+    # repositories together.
+    ubq_whole_here "renderer snapshots" || return 0
     local arms
     arms="$(ubq_renderer_arms)"
     if [ -z "$arms" ]; then
@@ -607,7 +298,7 @@ gate_renderer_snapshots() {
         if [ -n "$arm_host" ]; then
             "$ROOT/Scripts/linux-host.sh" stages linux-build linux-snapshots >"$arm_log" 2>&1 || status=$?
         else
-            python3 "$ROOT/Tests/Snapshots/run.py" --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
+            python3 "$UBQ_CORE_ROOT/Tests/Snapshots/run.py" --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
         fi
         if [ "$status" = "2" ] && [ -z "$arm_host" ]; then
             # One rebuild before refusing. The commonest status-2 cause is a
@@ -622,7 +313,7 @@ gate_renderer_snapshots() {
             rebuild_command="$(ubq_arm_rebuild "$arm")"
             if (cd "$ROOT" && eval "$rebuild_command" >"$UBQ_CI_ROOT/snapshot-arm-$arm-rebuild.log" 2>&1); then
                 status=0
-                python3 "$ROOT/Tests/Snapshots/run.py" --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
+                python3 "$UBQ_CORE_ROOT/Tests/Snapshots/run.py" --backend "$arm" ${extra[@]+"${extra[@]}"} >"$arm_log" 2>&1 || status=$?
             fi
         fi
         if [ "$status" = "0" ]; then
@@ -705,7 +396,7 @@ gate_ios() {
         return 0
     fi
     run_scoped "iOS arm builds" \
-        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit Source/Platform/Apple Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/build-provenance.sh Scripts/portable-core-sources.txt" \
+        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit Source/Platform/Apple Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/build-provenance.sh Scripts/portable-core-sources.txt" \
         ./Scripts/build-ios.sh --sdk iphonesimulator
     # Building is not the subject. A view the toolkit never asks to draw and a
     # PAL seam with nothing installed in it both compile clean and need a
@@ -716,18 +407,21 @@ gate_ios() {
         return 0
     fi
     run_scoped "iOS smokes" \
-        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit Source/Platform/Apple Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/build-provenance.sh Scripts/portable-core-sources.txt Scripts/run-ios-smokes.sh Scripts/ios-simulator.sh" \
+        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit Source/Platform/Apple Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/build-provenance.sh Scripts/portable-core-sources.txt Scripts/run-ios-smokes.sh Scripts/ios-simulator.sh" \
         ./Scripts/run-ios-smokes.sh
     # The phone's own build of the Sync wire tests, linked against the archive
     # the app carries: the same source compiled for another ABI is not the same
     # bytes until a run of that build says so.
     run_scoped "iOS Sync conformance" \
-        "Source/Core/Protocol/Sync Source/Core Source/Base Source/PAL Tests/Core/Protocol/Sync Tests/Harness.h CMakeLists.txt Scripts/cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/run-ios-sync-conformance.sh Scripts/ios-simulator.sh" \
+        "Source/Core/Protocol/Sync Source/Core Source/Base Source/PAL Tests/Core/Protocol/Sync Tests/Harness.h CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/run-ios-sync-conformance.sh Scripts/ios-simulator.sh" \
         ./Scripts/run-ios-sync-conformance.sh
     # The real Data Protection backend, which only a simulator process exercises.
-    run_scoped "iOS protected file" \
-        "Source/Platform/iOS/ProtectedFile.h Source/UbiquittyKit/Swift/ProtectedFile.swift Source/Platform/POSIX/SystemPAL.cpp Tests/Platform/test_ios_protected_file.cpp Tests/Platform/test_ios_protected_file_probe.swift Tests/Harness.h Scripts/run-ios-protected-file-tests.sh Scripts/ios-simulator.sh Scripts/build-root.sh" \
-        ./Scripts/run-ios-protected-file-tests.sh
+    # The Kit's own suite: a repository that carries the Kit does not run it.
+    if ubq_runs_here "kit" "iOS protected file"; then
+        run_scoped "iOS protected file" \
+            "Source/Platform/iOS/ProtectedFile.h Source/UbiquittyKit/Swift/ProtectedFile.swift Source/Platform/POSIX/SystemPAL.cpp Tests/Platform/test_ios_protected_file.cpp Tests/Platform/test_ios_protected_file_probe.swift Tests/Harness.h Scripts/run-ios-protected-file-tests.sh Scripts/ios-simulator.sh Scripts/build-root.sh Scripts/ubq-library.sh" \
+            ./Scripts/run-ios-protected-file-tests.sh
+    fi
     # The smokes drive the app from INSIDE its own process: they build a
     # recogniser and call the action method themselves. That says nothing about
     # whether the recogniser is installed on the view a finger lands on, or
@@ -736,7 +430,7 @@ gate_ios() {
     # installed app from outside with synthesised touches, and needs its own
     # build because the XCUITest bundle is off by default.
     run_scoped "iOS UI tests build" \
-        "Source/Platform/iOS CMakeLists.txt Scripts/build-ios.sh Scripts/run-ios-ui-tests.sh Scripts/build-provenance.sh Scripts/build-root.sh" \
+        "Source/Platform/iOS CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/run-ios-ui-tests.sh Scripts/build-provenance.sh Scripts/build-root.sh" \
         ./Scripts/build-ios.sh --sdk iphonesimulator --ui-tests
     # The Xcode generator, because ninja is not the only consumer of these
     # CMakeLists and is the more forgiving one. A custom command attached to two
@@ -756,39 +450,15 @@ gate_ios() {
         "CMakeLists.txt Source/Platform/macOS/CMakeLists.txt cmake Scripts/cmake Scripts/generate-xcode-workspace.sh Scripts/check-xcode-workspace.py Scripts/apple-development-teams.py Scripts/macos-deployment-target.txt" \
         ./Scripts/generate-xcode-workspace.sh
     run_scoped "iOS UI tests" \
-        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit CMakeLists.txt Scripts/build-ios.sh Scripts/run-ios-ui-tests.sh Scripts/build-root.sh Scripts/ios-simulator.sh" \
+        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/run-ios-ui-tests.sh Scripts/build-root.sh Scripts/ios-simulator.sh" \
         ./Scripts/run-ios-ui-tests.sh
 }
 
+# The drivers are the Kit's own checks of its renderer; a repository that carries
+# the Kit does not run them.
 gate_swift_renderer_drivers() {
-    # Both passes need swiftc against Metal-importing sources, so both stand
-    # down off Darwin — through SKIPPED, because a gate that returns quietly
-    # reads in the summary exactly like one that ran and found nothing.
-    [ "$(uname -s)" = "Darwin" ] || {
-        SKIPPED+=("swift-renderer drivers (needs macOS toolchain; this host is $(uname -s))")
-        return 0
-    }
-    # The type-check pass on every branch, because these drivers break with
-    # compile errors reached from OUTSIDE the Swift renderer: an access level
-    # that moves with a module boundary, a Core protocol that grows members the
-    # stubs do not follow. Selecting this half on Swift renderer paths would
-    # leave exactly the branches that break it unwatched. It links nothing and
-    # opens no device, so it costs seconds.
-    run_scoped "swift-renderer drivers (type-check)" \
-        "Source Scripts Resources/fonts CMakeLists.txt" \
-        ./Scripts/check-swift-renderer.sh --typecheck-only
-    local arms
-    arms="$(ubq_renderer_arms)"
-    case " $arms " in
-    *" swift "*) ;;
-    *)
-        printf '  %-34s %s\n' "swift-renderer drivers (draw)" "none — this branch changes no Swift renderer source"
-        return 0
-        ;;
-    esac
-    run_scoped "swift-renderer drivers (draw)" \
-        "Source Scripts Resources/fonts CMakeLists.txt" \
-        ./Scripts/check-swift-renderer.sh
+    ubq_runs_here "kit" "swift-renderer drivers" || return 0
+    kit_gate_renderer_drivers
 }
 
 # ci.yml: snapshots (macOS) + portable-snapshots-linux.
@@ -826,7 +496,10 @@ gate_swift_renderer_drivers() {
 # some unrelated branch as a NEW FAILURE. Minting a case is what creates the
 # obligation, so minting a case is what pays for it.
 gate_wasm() {
-    [ -n "$(git -C "$ROOT" diff --name-only origin/main...HEAD -- Source/Core Source/Base Source/Platform/Web Tests/Snapshots/cases.json Tests/Snapshots/golden 2>/dev/null)" ] || return 0
+    # What the push changes, a library read as the files between its pins.
+    local changed
+    changed="$(ubq_changed_with_libraries 2>/dev/null)" || true
+    grep -qE '^(Source/(Core|Base|Platform/Web)/|Tests/Snapshots/(cases\.json|golden)|Libraries/ubiquitty-(core|kit)$)' <<<"$changed" || return 0
     if ! command -v emcmake >/dev/null 2>&1; then
         SKIPPED+=("wasm build (no emscripten; emsdk provides emcmake)")
         printf '  %-34s %s\n' "wasm build" "SKIPPED (no emscripten)"
@@ -835,15 +508,16 @@ gate_wasm() {
     # Prove the arm still disagrees with the host before trusting its Core build:
     # a build that compiles everything and says ok is indistinguishable from one
     # whose toolchain quietly stopped rejecting what the host accepts.
-    run "wasm arm disagrees with host" ./Scripts/check-wasm-oracle.sh
+    core_gate_wasm_oracle
     run "portable Core on wasm" ./Scripts/build-web.sh
 }
 
 gate_snapshots() {
+    ubq_whole_here "snapshot regressions" || return 0
     if [ "$(uname -s)" = "Darwin" ]; then
         run "macOS app build" ./Scripts/build-macos.sh --no-helpers
     fi
-    run "snapshot regressions" ./Scripts/run-tests.sh snapshots
+    run "snapshot regressions" "$UBQ_CORE_ROOT/Scripts/run-tests.sh" snapshots
 }
 
 # esctest2 read from OUTSIDE the whole stack: it runs as a child of the terminal
@@ -866,29 +540,6 @@ gate_esctest() {
         -- --include '^(?!XtermWinops).*'
 }
 
-# gate_style minus the one step in it that compiles.
-#
-# check-bench-compiles.sh builds the benchmarks Tests/Performance holds, which is
-# the whole of what gate_style spends a toolchain on. Everything else there reads
-# the tree: check-style.py, the capability SSOT, and the backlog ratchet against a
-# throwaway worktree at origin/main.
-#
-# The skipped gate is announced through the same SKIPPED channel a missing tool
-# uses, so the summary says a build gate stood down instead of reporting that
-# everything ran. A tier that quietly narrowed what it checked would be the
-# bypass this ladder refuses to have.
-gate_style_without_builds() {
-    run "style (check-style.py)" ./Scripts/check-style.py
-    run "workflow lint (actionlint)" ./Scripts/check-workflows.sh
-    run "capability SSOT" ./Scripts/check-capability-ssot.py
-    run "gate coverage" python3 ./Scripts/check-gate-coverage.py
-    run "CI orchestration tests" python3 ./Scripts/test-ci-batteries.py --workflow .github/workflows/ci.yml
-    run "UI scenario entries" python3 ./Scripts/check-ui-scenarios.py --entries
-    run "backlog growth" python3 ./Scripts/check-backlog-growth.py
-    SKIPPED+=("benchmarks compile (tier lint builds nothing; ask for quick to compile them)")
-    python3 ./Scripts/check-build-arm.py --since origin/main || true
-}
-
 # The frame report the built app makes about itself: that a frame was built by
 # the builder with a count that moved, and that the Swift and C++ assembly agree.
 #
@@ -903,7 +554,9 @@ gate_style_without_builds() {
 gate_core_builder_frames() {
     local changed
     changed="$(git diff --name-only origin/main...HEAD 2>/dev/null)" || return 0
-    if ! printf '%s\n' "$changed" | grep -qE '^Source/Core/Rendering/|^Source/Platform/macOS/'; then
+    # The Kit's build modules select it as the macOS frontend's sources do:
+    # they hold the render kit's Swift flags and source lists.
+    if ! printf '%s\n' "$changed" | grep -qE '^Source/Core/Rendering/|^Source/Platform/macOS/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$'; then
         printf '  %-34s %s\n' "core builder frames" "none — this branch changes no frame path"
         return 0
     fi
@@ -914,65 +567,6 @@ gate_core_builder_frames() {
     run "core builder frames" ./Scripts/check-core-builder-frames.sh
 }
 
-# One implementation, checked against the symbol tables the build just produced.
-#
-# Docs/coding-conventions.md §10 says portable policy lives in Core and every
-# frontend routes through it. A forked copy of that policy is fixed in one place
-# and tested in another: with two byte-identical copies of an ownership gate,
-# the test suite can link the copy that lacks a fix the other one carries.
-#
-# After gate_host, because it reads objects rather than sources and a build
-# directory this push did not refresh answers about an older tree. Only the
-# directories this tier actually built are passed.
-gate_forks() {
-    local dirs=""
-    [ -d "$UBQ_BUILD_ROOT/host" ] && dirs="$dirs $UBQ_BUILD_ROOT/host"
-    [ "$(uname -s)" = "Darwin" ] && [ -d "$UBQ_BUILD_ROOT/macos" ] \
-        && dirs="$dirs $UBQ_BUILD_ROOT/macos"
-    if [ -z "$dirs" ]; then
-        SKIPPED+=("one implementation (no built directory to read symbol tables from)")
-        return 0
-    fi
-    # shellcheck disable=SC2086
-    run "one implementation" ./Scripts/check-forks.sh $dirs
-}
-
-# One artifact root for this run. ci_batteries.py puts a battery's stage logs
-# and its events.jsonl under UBQ_CI_ROOT/<battery>, and its report reads the
-# same root, so everything this run starts agrees on one directory that no
-# other run on this machine has. Without it the root is /tmp/ubiquitty-ci for
-# every run on the machine, which two pushes gating at once would share.
-# Removed when every gate passed; kept and named when one failed, since that
-# is where a failed battery's logs are. UBQ_ rather than UBIQUITTY_ because
-# the verdict cache's key covers every UBIQUITTY_ variable, and a path that is
-# new on every run would make every verdict new on every run.
-UBQ_CI_ROOT="${TMPDIR:-/tmp}"
-UBQ_CI_ROOT="$(mktemp -d "${UBQ_CI_ROOT%/}/ubiquitty-ci-XXXXXX")" || exit 1
-export UBQ_CI_ROOT
-# The Linux arms that run on a Linux host share one remote tree and build for
-# the length of this run (Scripts/linux-host.sh); the exit trap below removes it.
-UBQ_LINUX_HOST_RUN="push-$$-$(date +%s)"
-export UBQ_LINUX_HOST_RUN
-
-# On exit rather than at the two verdicts, so an interrupted push or a run
-# that set -u ends does not leave a root behind either. An interrupt exits
-# with its own status, so it reads as the failure it is rather than as a pass.
-ubq_ci_root_finish() {
-    local status=$?
-    # The remote directory a Linux host run made, when one did; a no-op when no
-    # Linux arm ran there. Before the artifact root goes, which records it.
-    "$ROOT/Scripts/linux-host.sh" release >/dev/null 2>&1 || true
-    # Kept only when a failed run left something in it; an empty root names
-    # nothing a reader could open.
-    if [ "$status" -ne 0 ] && [ -n "$(ls -A "$UBQ_CI_ROOT" 2>/dev/null)" ]; then
-        echo "  battery artifacts: $UBQ_CI_ROOT" >&2
-        return
-    fi
-    rm -rf "$UBQ_CI_ROOT"
-}
-trap ubq_ci_root_finish EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 echo "pre-push gates (tier: $TIER) — the local stand-in for ci.yml" >&2
 case "$TIER" in
@@ -997,69 +591,4 @@ case "$TIER" in
         ;;
 esac
 
-# Whether anyone has built what the last merges produced. A rebase merge replays
-# a branch onto a base it was never built against and pushes without building
-# the result, so the first tree in which two changes coexist is main itself and
-# no gate here has seen it — these gates measure the tree this author has.
-#
-# Said at the end of a push because that is the moment someone is looking at
-# this output and has the repository in hand. It is not a failure: another
-# checkout's merge being unverified is not a reason to refuse this push.
-UBQ_VERIFIED_FILE="$UBQ_BUILD_ROOT/.merged-main-verified"
-UBQ_MAIN_TIP="$(git -C "$ROOT" rev-parse --verify --quiet origin/main 2>/dev/null || true)"
-UBQ_VERIFIED="$(cat "$UBQ_VERIFIED_FILE" 2>/dev/null || true)"
-if [ -n "$UBQ_MAIN_TIP" ] && [ "$UBQ_MAIN_TIP" != "$UBQ_VERIFIED" ]; then
-    echo >&2
-    if [ -z "$UBQ_VERIFIED" ]; then
-        echo "pre-push gates: no build has verified origin/main in this checkout." >&2
-    else
-        UBQ_BEHIND="$(git -C "$ROOT" rev-list --count "$UBQ_VERIFIED..$UBQ_MAIN_TIP" 2>/dev/null || echo "?")"
-        echo "pre-push gates: origin/main is $UBQ_BEHIND commit(s) past the last build that" >&2
-        echo "  verified it (${UBQ_VERIFIED:0:9})." >&2
-    fi
-    echo "  A rebase merge builds nothing, so those commits have coexisted only here:" >&2
-    echo "      ./Scripts/check-merged-main.sh" >&2
-fi
-
-echo >&2
-ubq_gate_report_skipped
-ubq_gate_report_warned
-if [ "${#FAILED[@]}" -gt 0 ]; then
-    gate_failed "pre-push gates" "gate(s) failed" "${FAILED[@]}"
-    # The name of a gate is not a diagnosis. By the time this prints, the
-    # detail is forty lines up and past whatever else ran; a reader who scrolls
-    # to the bottom gets "ctest suite" and nothing to act on. So each failure
-    # repeats the lines that name what broke, and where the whole log is.
-    ubq_i=0
-    for ubq_name in "${FAILED[@]}"; do
-        ubq_log="${FAILED_LOG[$ubq_i]:-}"
-        echo "  - $ubq_name" >&2
-        if [ -n "$ubq_log" ] && [ -f "$ubq_log" ]; then
-            # ctest names its casualties under a header; anything else falls
-            # back to its own last lines rather than to silence.
-            if grep -q 'The following tests FAILED:' "$ubq_log"; then
-                sed -n '/The following tests FAILED:/,$p' "$ubq_log" | sed -n '2,9p' \
-                    | sed 's/^/      /' >&2
-            else
-                tail -4 "$ubq_log" | sed 's/^/      /' >&2
-            fi
-            echo "      full log: $ubq_log" >&2
-        fi
-        ubq_i=$((ubq_i + 1))
-    done
-    echo >&2
-    exit 1
-fi
-echo "pre-push gates: ${#PASSED[@]} passed (${#CACHED[@]} cached). Uncovered here: musl, coverage," >&2
-echo "  fuzz, the bench gate, and every test this diff does not reach — the" >&2
-echo "  \"tests reaching the diff\" line above says which ran, and says so when none" >&2
-echo "  did. UBIQUITTY_PREPUSH=default adds the whole suite, =linux the Linux build." >&2
-# A list of names reads as boilerplate. wasm is the one worth a sentence, because
-# it is the lane that DISAGREES rather than the lane that is merely missing: it
-# builds portable Core against a different standard library, so a header every
-# other libc++ hands over transitively can be absent there, and a file every
-# other lane accepts can fail on that arm alone.
-#
-# Printed only when the branch touched what it decides, so a push that cannot be
-# affected does not learn to skip a paragraph.
-exit 0
+ubq_pre_push_finish

@@ -47,6 +47,10 @@ class EsctestSecurityTests(unittest.TestCase):
             UBIQUITTY_UNATTENDED="1",
             UBIQUITTY_ESCTEST=str(self.suite),
             ESC_FIXTURE_REPORT=str(self.report),
+            # The planted tree stands for every repository: its fixtures are the
+            # scripts a checkout would take from the libraries it carries.
+            UBIQUITTY_CORE_SOURCE_DIR=str(self.root),
+            UBIQUITTY_KIT_SOURCE_DIR=str(self.root),
         )
         self.app = self.root / "Fixture.app"
         binary = self.app / "Contents" / "MacOS" / "Ubiquitty"

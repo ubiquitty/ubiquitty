@@ -33,6 +33,8 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 MODE="gate"
 case "${1:-}" in
     --report) MODE="report" ;;
@@ -44,7 +46,7 @@ case "${1:-}" in
 esac
 
 PLATFORM="$(uname -s)-$(uname -m)"
-. "$ROOT/Scripts/perf-baseline-path.sh"
+. "$CORE_ROOT/Scripts/perf-baseline-path.sh"
 BASELINE_DIR="$(ubiquitty_perf_baseline_directory)"
 BASELINE="$BASELINE_DIR/render-profile-$PLATFORM.json"
 METRIC="${PROFILE_METRIC:-p95}"
@@ -81,5 +83,5 @@ GATE_FLAG=()
 # macOS ships bash 3.2, where expanding an EMPTY array under `set -u` is an
 # unbound-variable error. GATE_FLAG is empty in --report mode, so a plain
 # "${GATE_FLAG[@]}" kills exactly the mode that must never fail.
-"$ROOT/Scripts/compare-profile.py" "$BASELINE" "$CURRENT" \
+"$CORE_ROOT/Scripts/compare-profile.py" "$BASELINE" "$CURRENT" \
     --metric "$METRIC" --threshold "$THRESHOLD" ${GATE_FLAG[@]+"${GATE_FLAG[@]}"}

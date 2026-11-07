@@ -11,8 +11,8 @@
 
 - [ ] I accept the [contribution terms](https://github.com/ubiquitty/ubiquitty/blob/main/.github/contributing.md#contribution-terms) for my original work in this pull request, including the Apache-2.0 grant. I have the authority to grant these rights and have identified any third-party material and its terms.
 - [ ] Any other contributors have recorded their agreement, or an authorized representative has identified them and confirmed authority to grant these rights.
-- [ ] `./Scripts/run-tests.sh` passes
-- [ ] `./Scripts/check-style.py` passes (formatting, module boundaries, naming)
+- [ ] `./Libraries/ubiquitty-core/Scripts/run-tests.sh` passes
+- [ ] `./Libraries/ubiquitty-core/Scripts/check-style.py` passes (formatting, module boundaries, naming)
 - [ ] The relevant frontend builds clean (`build-macos.sh` / `build-host.sh`)
 - [ ] Tests added/updated for behavior changes
 - [ ] Visual changes have portable and/or platform-native snapshot coverage

@@ -14,6 +14,8 @@
 set -eu
 
 ROOT=$(unset CDPATH; cd -- "$(dirname -- "$0")/.." && pwd)
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 # One binary, two spellings. run-linux.sh mounts build/linux-container over
 # /src/build, so a path is not the same file inside the container and out: the
 # two below name one artefact. Spelled once, the shim checks a file the host can
@@ -22,7 +24,7 @@ ROOT=$(unset CDPATH; cd -- "$(dirname -- "$0")/.." && pwd)
 CONTAINER_BINARY=build/linux/ubiquitty-linux
 # The host side lives in the external build root, outside the checkout, which
 # is where run-linux.sh mounts the container's /src/build from.
-BUILD_ROOT=$(python3 "$ROOT/Scripts/build_root.py" "$ROOT")
+BUILD_ROOT=$(python3 "$CORE_ROOT/Scripts/build_root.py" "$ROOT")
 HOST_BINARY=$BUILD_ROOT/linux-container/linux/ubiquitty-linux
 
 # The driver asks which binary this stands for, so its freshness and provenance
@@ -184,7 +186,7 @@ fi
 # noise, and what remains is appended to UBIQUITTY_SHIM_LOG when that names a
 # file, and printed with the refusal below when no frame came back. A failure
 # whose only record is "no file" is a failure nobody can read.
-RENDER_OUTPUT=$("$ROOT/Scripts/run-linux.sh" sh -c \
+RENDER_OUTPUT=$(UBIQUITTY_LINUX_ROOT="$ROOT" "$CORE_ROOT/Scripts/run-linux.sh" sh -c \
     'fontconfig=$0; binary=$1; shift
      FONTCONFIG_FILE=$fontconfig xvfb-run -a "$binary" "$@" 2>&1 | grep -viE "Gdk-WARNING|powervr|drm devices|Loader Message" || true' \
     "/src/$STAGED_FONTCONFIG" "./$CONTAINER_BINARY" --snapshot "/src/$STAGED" "$@" 2>&1) || true

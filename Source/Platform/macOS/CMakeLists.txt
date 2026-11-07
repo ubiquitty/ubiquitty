@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Stanislav Yaglo
 # SPDX-License-Identifier: Apache-2.0
 
-include(${CMAKE_SOURCE_DIR}/Scripts/cmake/TypedPasteboard.cmake)
+include(${UBIQUITTY_KIT_SOURCE_DIR}/Scripts/cmake/TypedPasteboard.cmake)
 # Source/Platform/macOS/CMakeLists.txt
 #
 # AppKit + CoreText frontend. Compiles the portable Core subtree
@@ -62,25 +62,25 @@ set(UBIQUITTY_PORTABLE_CORE ${UBIQUITTY_MACOS_CORE} ${UBIQUITTY_MACOS_CORE_EXTRA
 
 # macOS frontend implementation files.
 set(UBIQUITTY_MACOS_SOURCES
-    Source/Platform/POSIX/SessionHandoff.cpp
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/SessionHandoff.cpp"
     # The bundled host installed where this Mac's host runs from, and started
     # to take over an older one (LocalHostInstall.h).
-    Source/Platform/POSIX/LocalHostInstall.cpp
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/LocalHostInstall.cpp"
     # A remote window's sealed resume owner (RemoteResumeBridge.h).
-    Source/Platform/macOS/RemoteResumeBridge.cpp
-    Source/Platform/macOS/SessionClipboardClient.cpp
-    Source/Platform/Apple/Clock.cpp
-    Source/Platform/Apple/ImageDecode.cpp
-    Source/Platform/macOS/Diag.cpp
-    Source/Platform/POSIX/PTYStream.cpp
-    Source/Platform/POSIX/SerialStream.cpp
-    Source/Platform/POSIX/PTYFacts.cpp
+    "${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/macOS/RemoteResumeBridge.cpp"
+    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/SessionClipboardClient.cpp"
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Apple/Clock.cpp"
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/Apple/ImageDecode.cpp"
+    "${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/macOS/Diag.cpp"
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/PTYStream.cpp"
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/SerialStream.cpp"
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/PTYFacts.cpp"
     # The gated kitty file read: hardening rules that belong to no single arm,
     # kept where both compile them (Source/Platform/POSIX/GatedFileRead.h).
-    Source/Platform/POSIX/GatedFileRead.cpp
-    Source/Platform/macOS/Clipboard.cpp
-    Source/Platform/macOS/Bell.cpp
-    Source/Platform/macOS/DECPSSound.cpp
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/GatedFileRead.cpp"
+    "${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/macOS/Clipboard.cpp"
+    "${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/macOS/Bell.cpp"
+    "${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/macOS/DECPSSound.cpp"
 )
 
 # In-process UI integration test harness (--ui-test). Drives the real
@@ -92,7 +92,7 @@ if(UBIQUITTY_UI_TESTS)
     list(APPEND UBIQUITTY_MACOS_SOURCES
         # Hands a scenario's directory client the showcase host, a fixture
         # under Tests/ no Swift module names.
-        Source/Platform/macOS/UITest/ShowcaseHostDoor.cpp
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/UITest/ShowcaseHostDoor.cpp"
     )
 endif()
 
@@ -104,60 +104,11 @@ endif()
 # reverse direction, C++ calling the pasteboard mapping that lives in Swift
 # (TypedPasteboard.swift, linked as the UbiquittyPasteboard module).
 set(UBIQUITTY_INTEROP_CPP
-    Source/Platform/macOS/App/ApplicationBridge.cpp
-    Source/Platform/macOS/App/UBClipboardReadInterop.cpp
-    Source/Platform/macOS/App/UBSettingsInterop.cpp
-    Source/Platform/macOS/TypedPasteboard.cpp
+    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ApplicationBridge.cpp"
+    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/UBClipboardReadInterop.cpp"
+    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/UBSettingsInterop.cpp"
+    "${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/macOS/TypedPasteboard.cpp"
 )
-
-# The Swift renderer, as its own module. What holds it apart is the export
-# wall: UbiquittyKit imports it internally, so the Kit's public interface can
-# name no renderer type and carries no C++ (see UbiquittyKit below), and a file
-# in the wrong one of the two shared lists fails to compile instead of leaking
-# the renderer into the consumer's API. The iOS arm compiles the same module
-# from the same list (Scripts/cmake/AppleSharedSwift.cmake).
-#
-# Speed does not separate it. The module compiles with dynamic exclusivity
-# checking off. Core imports the slot cache as a foreign reference type, so a
-# probe is a method call through a reference the renderer only reads, and
-# neither Swift arm's loop carries swift_beginAccess: Tools/seam-bench reads
-# 2.72 ns a crossing with the checks and 2.78 without, against 2.84 for inline
-# C++ and 3.37 for a virtual call. Whether the flag buys anything on the
-# renderer's other per-frame paths is unmeasured.
-#
-# This is also the boundary that makes the renderer extractable: it reaches
-# Core through the module maps and Metal/CoreText through the SDK, and
-# nothing in it names the app.
-# The Apple-shared layer, read from one list so this arm and the iOS one
-# cannot drift into rendering through different code.
-include(${CMAKE_SOURCE_DIR}/Scripts/cmake/AppleSharedSwift.cmake)
-set(UBIQUITTY_APPLE_SHARED_KIT_ABS "")
-foreach(_src IN LISTS UBIQUITTY_APPLE_SHARED_KIT_SOURCES)
-    list(APPEND UBIQUITTY_APPLE_SHARED_KIT_ABS "${CMAKE_SOURCE_DIR}/${_src}")
-endforeach()
-# Plus this shell's own chrome, which is AppKit and belongs to macOS.
-set(UBIQUITTY_RENDERKIT_SOURCES
-    ${UBIQUITTY_APPLE_SHARED_RENDERKIT_SOURCES}
-    Source/Platform/macOS/App/TerminalView/ProgressBar.swift
-    Source/Platform/macOS/App/TerminalView/PasswordPromptBadge.swift
-    Source/Platform/macOS/App/TerminalView/PasswordPromptRegistry.swift
-    Source/Platform/macOS/App/TerminalView/ChromeAccessoryBar.swift
-    Source/Platform/macOS/App/TerminalView/SecureKeyboardEntryLock.swift
-    Source/Platform/macOS/App/TerminalView/ClipboardScopeIndicator.swift
-    Source/Platform/macOS/App/TerminalView/HintAccessory.swift
-    Source/Platform/macOS/App/TerminalView/SessionPresenceIndicator.swift
-    Source/Platform/macOS/App/TerminalView/RemoteConnectionIndicator.swift
-    Source/Platform/macOS/App/TerminalView/TitlebarTagChip.swift
-    Source/Platform/macOS/App/TerminalView/BroadcastIndicator.swift
-    Source/Platform/macOS/App/TerminalView/TmuxSessionBadge.swift
-    Source/Platform/macOS/App/TerminalView/BuildIdentityBadge.swift
-    Source/Platform/macOS/App/TerminalView/ProgressTintPalette.swift
-    Source/Platform/macOS/App/TerminalView/WindowBlurBackdrop.swift
-    Source/Platform/macOS/App/TerminalView/TerminalScroller.swift
-    Source/Platform/macOS/App/TerminalView/PointerShapeCursor.swift
-    Source/Platform/macOS/App/TerminalView/SelectionPasteboard.swift
-    Source/Platform/macOS/App/TerminalView/WindowTabSelection.swift
-    Source/Platform/macOS/App/TerminalView/SurfaceFocus.swift)
 
 # The application's Swift: its entry point, delegate and menus, the windows'
 # shell and the settings window. Compiled with C++ interop; see the Swift flags
@@ -361,10 +312,15 @@ if(UBIQUITTY_UI_TESTS)
 endif()
 
 # Absolute paths so add_executable resolves them whether or not we
-# were entered via add_subdirectory.
-set(UBIQUITTY_ALL_SOURCES_ABS "")
-foreach(_src IN LISTS UBIQUITTY_MACOS_SOURCES UBIQUITTY_PORTABLE_CORE
-                      UBIQUITTY_INTEROP_CPP UBIQUITTY_SWIFT_SOURCES)
+# were entered via add_subdirectory. The macOS and interop lists name each
+# entry's root; the portable Core list is relative to the core root and the
+# Swift list to this checkout.
+set(UBIQUITTY_ALL_SOURCES_ABS ${UBIQUITTY_MACOS_SOURCES})
+foreach(_src IN LISTS UBIQUITTY_PORTABLE_CORE)
+    list(APPEND UBIQUITTY_ALL_SOURCES_ABS "${UBIQUITTY_CORE_SOURCE_DIR}/${_src}")
+endforeach()
+list(APPEND UBIQUITTY_ALL_SOURCES_ABS ${UBIQUITTY_INTEROP_CPP})
+foreach(_src IN LISTS UBIQUITTY_SWIFT_SOURCES)
     list(APPEND UBIQUITTY_ALL_SOURCES_ABS "${CMAKE_SOURCE_DIR}/${_src}")
 endforeach()
 
@@ -386,32 +342,21 @@ function(ub_c_family_compile_definitions target)
     endforeach()
 endfunction()
 
-# ThirdParty exemption, by construction: compile a vendored source
-# into `target` with the standard vendored-code policy applied to that one TU —
-# exceptions + RTTI restored (vendored C++ assumes the language defaults our
-# targets otherwise disable) and -Werror defeated (a newer toolchain's opinion of
-# code we don't own must not fail our build; warnings stay visible, only -Werror
-# is dropped). Use for anything landing under Source/ThirdParty/ so the exemption
-# holds by construction instead of a hand-copied per-file property block.
+# ThirdParty exemption, by construction: compile a vendored source into
+# `target` under Core's ThirdParty policy (ubiquitty_apply_third_party_policy),
+# applied in this directory. Use for anything landing under Source/ThirdParty/
+# so the exemption holds by construction instead of a hand-copied per-file
+# property block.
 function(ub_add_thirdparty_source target source)
     target_sources(${target} PRIVATE "${source}")
-    set_source_files_properties("${source}" PROPERTIES
-        COMPILE_OPTIONS "-fexceptions;-frtti;-Wno-error;-w")
+    ubiquitty_apply_third_party_policy("${source}")
 endfunction()
 
 # Built-in themes ship as TOML (Source/Core/Themes/builtin-themes.toml) embedded via
 # this generated TU — one source of truth, parsed at startup like user themes.
-# Mirrors the Unifont codegen and Scripts/run-tests.sh's generation step.
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(BUILTIN_THEMES_TOML ${CMAKE_SOURCE_DIR}/Source/Core/Themes/builtin-themes.toml)
-set(BUILTIN_THEMES_GEN ${CMAKE_CURRENT_BINARY_DIR}/BuiltinThemesData.gen.cpp)
-add_custom_command(
-    OUTPUT ${BUILTIN_THEMES_GEN}
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-            ${BUILTIN_THEMES_TOML} ${BUILTIN_THEMES_GEN}
-    DEPENDS ${BUILTIN_THEMES_TOML} ${CMAKE_SOURCE_DIR}/Scripts/embed-builtin-themes.py
-    COMMENT "Embedding built-in themes TOML"
-    VERBATIM)
+# This target's copy is the directory's first, so the framework below
+# generates its own.
+ubiquitty_embed_builtin_themes(BUILTIN_THEMES_GEN COMMENT "Embedding built-in themes TOML")
 target_sources(Ubiquitty PRIVATE ${BUILTIN_THEMES_GEN})
 
 set(UBIQUITTY_APP_NAME "Ubiquitty" CACHE STRING "macOS app bundle/display name")
@@ -520,8 +465,8 @@ set_target_properties(Ubiquitty PROPERTIES
 )
 
 target_include_directories(Ubiquitty PRIVATE
-    "${CMAKE_SOURCE_DIR}/Source"
-    "${CMAKE_SOURCE_DIR}/Tests" # Performance/Profiler.h — shared distribution harness for --profile-render
+    ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES}
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Tests" # Performance/Profiler.h — shared distribution harness for --profile-render
 )
 
 # simdutf — SIMD UTF-8 decode for the ingest hot path (utf8DecodeRun).
@@ -530,7 +475,7 @@ target_include_directories(Ubiquitty PRIVATE
 # manages its own runtime arch dispatch (NEON/AVX/scalar), so it needs the
 # exceptions/RTTI + -Werror exemption — applied via ub_add_thirdparty_source so
 # the ThirdParty policy holds by construction, not a hand-copied property block.
-set(SIMDUTF_DIR "${CMAKE_SOURCE_DIR}/Source/ThirdParty/simdutf")
+set(SIMDUTF_DIR "${UBIQUITTY_CORE_SOURCE_DIR}/Source/ThirdParty/simdutf")
 ub_add_thirdparty_source(Ubiquitty "${SIMDUTF_DIR}/simdutf.cpp")
 target_include_directories(Ubiquitty SYSTEM PRIVATE "${SIMDUTF_DIR}")
 message(STATUS "simdutf: vendored ${SIMDUTF_DIR}")
@@ -540,7 +485,7 @@ message(STATUS "simdutf: vendored ${SIMDUTF_DIR}")
 # plus the two util/ TUs the library needs, each through the ThirdParty
 # exemption. The include root is the ThirdParty dir so re2's own
 # `#include "re2/..."` and `#include "util/..."` paths resolve.
-set(RE2_DIR "${CMAKE_SOURCE_DIR}/Source/ThirdParty/re2")
+set(RE2_DIR "${UBIQUITTY_CORE_SOURCE_DIR}/Source/ThirdParty/re2")
 file(GLOB RE2_SOURCES "${RE2_DIR}/re2/*.cc")
 list(APPEND RE2_SOURCES "${RE2_DIR}/util/rune.cc" "${RE2_DIR}/util/strutil.cc")
 foreach(re2_source ${RE2_SOURCES})
@@ -558,7 +503,7 @@ target_compile_features(Ubiquitty PRIVATE cxx_std_23)
 # per-file.
 set(UBIQUITTY_PORTABLE_CORE_ABS "")
 foreach(_src IN LISTS UBIQUITTY_PORTABLE_CORE)
-    list(APPEND UBIQUITTY_PORTABLE_CORE_ABS "${CMAKE_SOURCE_DIR}/${_src}")
+    list(APPEND UBIQUITTY_PORTABLE_CORE_ABS "${UBIQUITTY_CORE_SOURCE_DIR}/${_src}")
 endforeach()
 set_source_files_properties(${UBIQUITTY_PORTABLE_CORE_ABS} PROPERTIES
     COMPILE_FLAGS "-std=c++23 -fno-exceptions -fno-rtti")
@@ -567,7 +512,7 @@ set_source_files_properties(${UBIQUITTY_PORTABLE_CORE_ABS} PROPERTIES
 # above must not stamp it. Set last: set_source_files_properties replaces,
 # so this assignment wins. ThirdParty policy: warnings suppressed (-w) and
 # -Werror defeated, matching re2/simdutf.
-set_source_files_properties("${CMAKE_SOURCE_DIR}/Source/ThirdParty/yyjson/yyjson.c"
+set_source_files_properties("${UBIQUITTY_CORE_SOURCE_DIR}/Source/ThirdParty/yyjson/yyjson.c"
     PROPERTIES COMPILE_FLAGS "-std=c99 -Wno-error -w")
 
 # The Swift read-bridge calls into the same Settings, and the pasteboard seam
@@ -576,7 +521,7 @@ set_source_files_properties("${CMAKE_SOURCE_DIR}/Source/ThirdParty/yyjson/yyjson
 set_source_files_properties(
     "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/UBClipboardReadInterop.cpp"
     "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/UBSettingsInterop.cpp"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/TypedPasteboard.cpp"
+    "${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/macOS/TypedPasteboard.cpp"
     PROPERTIES COMPILE_FLAGS "-std=c++23 -fno-exceptions -fno-rtti")
 
 # ----------------------------------------------------------------------
@@ -588,7 +533,7 @@ set_source_files_properties(
 # where the script writes when it is given no prefix. A default anywhere else
 # makes `fetch-sparkle.sh` then `build-macos.sh` build an app with no updater and
 # say so only in a configure status line. A cache still holding the in-tree
-# default is moved with it, as the QUIC prefix is. The answer is settled here,
+# default is moved with it. The answer is settled here,
 # ahead of the Swift flags, because it decides the framework search path the
 # Swift compile and its header-emit pass both need: App/Updater.swift asks
 # `canImport(Sparkle)`, so the search path is itself the compile-time switch.
@@ -598,7 +543,7 @@ option(UBIQUITTY_SPARKLE "Bundle Sparkle.framework for in-app auto-update" ON)
 if(UBIQUITTY_SPARKLE_PREFIX STREQUAL "${CMAKE_SOURCE_DIR}/build/sparkle")
     unset(UBIQUITTY_SPARKLE_PREFIX CACHE)
 endif()
-set(UBIQUITTY_SPARKLE_PREFIX "${_ubiquitty_build_root}/sparkle" CACHE PATH
+set(UBIQUITTY_SPARKLE_PREFIX "${UBIQUITTY_BUILD_ROOT}/sparkle" CACHE PATH
     "Prefix holding Sparkle.framework (populated by Scripts/fetch-sparkle.sh)")
 set(_sparkle_fw "${UBIQUITTY_SPARKLE_PREFIX}/Sparkle.framework")
 set(UBIQUITTY_SPARKLE_FOUND OFF)
@@ -613,8 +558,10 @@ endif()
 # are wired here:
 #
 #   Swift -> C++ : -cxx-interoperability-mode=default plus -I to the
-#                  Swift dir, where module.modulemap exposes this shell's own
-#                  bridge headers as the `UbiquittyAppBridge` module.
+#                  module maps: Core's (Source/Platform/Apple), the kit's
+#                  (Source/Platform/macOS) and, for this executable alone, the
+#                  Swift dir's, which exposes this shell's own bridge headers
+#                  as the `UbiquittyAppBridge` module.
 #   C     -> Swift: -import-objc-header on the bridging header, for the
 #                  Carbon secure-input calls and the harness's showcase door.
 # ----------------------------------------------------------------------
@@ -623,149 +570,60 @@ set(UBIQUITTY_SWIFT_DIR "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App")
 set_target_properties(Ubiquitty PROPERTIES
     Swift_MODULE_NAME "Ubiquitty")
 
-# Shared Swift frontend flags (interop mode, include paths, the ObjC ->
-# Swift bridging header). Reused by both the in-target Swift compile and
-# the header-emit pass below so they see an identical module.
-# Each include is a single -I<path> token (no space) so the SHELL:
-# space-join below keeps one path bound to each flag; the bridging header
-# is passed as its own -import-objc-header <path> pair.
+# The Kit's Swift flags (the interop mode, the app's -target floor, the module
+# maps of every checkout, this one's included), which this module compiles with
+# too, so the app and the modules it imports see one Core. The bridging header
+# is this module's alone, passed as its own -import-objc-header <path> pair.
+#
+# The flags read two switches this build declares: the HarfBuzz shaping probe,
+# and the Swift codegen profile flags, which only the codegen targets take.
+option(UBIQUITTY_HARFBUZZ_PROBE "Build the experimental uniform-face shaping comparison" OFF)
+set(UBIQUITTY_SWIFT_PGO_FLAGS "" CACHE STRING
+    "Swift codegen profile flags (empty = no PGO); set by Scripts/build-macos.sh")
+ubiquitty_kit_swift_flags(PLATFORM macOS SOURCE_ROOTS "${CMAKE_SOURCE_DIR}")
+if(UBIQUITTY_KIT_SWIFT_LINK_LIBRARIES)
+    target_link_libraries(Ubiquitty PRIVATE ${UBIQUITTY_KIT_SWIFT_LINK_LIBRARIES})
+endif()
+
+# The active-compilation conditions this build's switches give every Swift
+# module, the Kit's included, and what else the render kit's header-emit pass
+# takes: it runs swiftc by hand, so nothing given a target reaches it.
+set(UBIQUITTY_SWIFT_CONDITIONS "")
+if(UBIQUITTY_UI_TESTS)
+    list(APPEND UBIQUITTY_SWIFT_CONDITIONS UBIQUITTY_UI_TESTS)
+endif()
+set(UBIQUITTY_RENDERKIT_HEADER_PASS_OPTIONS "")
+# The window-server blur radius is a Swift call now (WindowBlurBackdrop), so
+# the gate reaches Swift as an active-compilation condition too.
+if(UBIQUITTY_BACKGROUND_BLUR)
+    list(APPEND UBIQUITTY_RENDERKIT_HEADER_PASS_OPTIONS "-DUBIQUITTY_BACKGROUND_BLUR")
+endif()
+# Sparkle reaches Swift as a search path rather than a condition: Updater.swift
+# asks `canImport(Sparkle)`, which is true exactly when the module is findable.
+if(UBIQUITTY_SPARKLE_FOUND)
+    list(APPEND UBIQUITTY_RENDERKIT_HEADER_PASS_OPTIONS "-F" "${UBIQUITTY_SPARKLE_PREFIX}")
+endif()
+
 # Whole-module, because Swift optimises a file at a time otherwise and no call
 # inlines across a file boundary — Tools/seam-bench records that source
 # annotations (@inline(__always), final) are no-ops without it, so a hot
 # function called from another file stays outlined whatever it is marked.
 #
 # Dynamic exclusivity stays ON here, where it is a safety property and no
-# per-frame seam runs. -wmo compiles a module as a unit, so the flag cannot be
-# scoped to a file; the render kit below turns it off for its whole module, and
-# seam-bench measures no price for the checks at the slot-cache seam.
-# Whole-module is set as the target property below rather than spelled here,
+# per-frame seam runs; the render kit alone turns it off for its whole module.
+# Whole-module is set as the target property rather than spelled as a flag,
 # and the difference is not cosmetic. As a raw flag, CMake still declares one
 # object per source while the compiler writes them all in one invocation with
 # timestamps spread across it — so the earliest object is older than the newest
 # source, ninja calls the archive dirty on a tree where nothing moved, and every
 # build relinks the module, the executable, the metallib and the helpers. The
 # property tells CMake to expect one object, which is what makes a no-op build a
-# no-op. The literal flag stays on the header-emit passes below, which invoke
-# swiftc directly and are not CMake targets.
-# Swift modules and header-emission passes share the application's API floor.
-# An omitted target inherits the build machine's OS and can produce modules
-# that the application cannot import.
-set(UBIQUITTY_SWIFT_FLAGS
-    -target "${CMAKE_SYSTEM_PROCESSOR}-apple-macos${UBIQUITTY_MACOS_APP_MIN}"
-    -package-name ubiquitty
-    -cxx-interoperability-mode=default
-    # The clang importer must compile the interop C++ modules at the same C++23
-    # standard as the Core build — the modulemap'd terminal-model headers reach
-    # Terminal.h → Encodings.h, which uses std::span (C++20). The importer's default
-    # standard is pre-C++20, so raise it to match Core or the module won't build.
-    -Xcc -std=c++23
-    "-I${UBIQUITTY_SWIFT_DIR}"
-    "-I${CMAKE_SOURCE_DIR}/Source"
-    # The shared Apple map ahead of this shell's own, because a map is searched
-    # in include order and the shared one owns Core's headers. Behind, this
-    # shell's map is reached first, parses a Core header the shared one owns,
-    # and defines its types a second time — which surfaces as a redefinition
-    # inside Core rather than as anything about module maps.
-    "-I${CMAKE_SOURCE_DIR}/Source/Platform/Apple"
-    "-I${CMAKE_SOURCE_DIR}/Source/Platform/macOS"
-    # Where the bridging header's precompiled form lands.
-    #
-    # swiftc precompiles -import-objc-header into a temporary directory and
-    # records that path in every object's debug info. The directory is reaped
-    # when the compile ends, so dsymutil later reports
-    #
-    #   warning: /var/folders/.../TemporaryDirectory.XXXX/Ubiquitty-Bridging-Header.pch:
-    #            No such file or directory
-    #
-    # on every build -- a warning nobody can act on, about a file that was
-    # correct when it was written. Naming a directory under the build tree makes
-    # the recorded path outlive the compile, and shares one PCH between the
-    # in-target compile and the header-emit pass instead of building it twice.
-    "-pch-output-dir" "${CMAKE_CURRENT_BINARY_DIR}/swift-pch"
-)
-# Inline C++ factories imported by Swift must see the same transport feature
-# as the linked C++ objects, including every generated-header emission pass.
-if(UBIQUITTY_QUIC)
-    list(APPEND UBIQUITTY_SWIFT_FLAGS -Xcc -DUBIQUITTY_QUIC=1
-        "-I${UBIQUITTY_QUIC_PREFIX}/include")
-endif()
-
-option(UBIQUITTY_HARFBUZZ_PROBE "Build the experimental uniform-face shaping comparison" OFF)
-if(UBIQUITTY_HARFBUZZ_PROBE)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(HARFBUZZ_PROBE REQUIRED IMPORTED_TARGET harfbuzz>=14.0)
-    find_path(HARFBUZZ_PROBE_HEADERS hb.h HINTS ${HARFBUZZ_PROBE_INCLUDE_DIRS} REQUIRED)
-    set(HARFBUZZ_PROBE_MODULE "${CMAKE_CURRENT_BINARY_DIR}/HarfBuzzProbe")
-    file(MAKE_DIRECTORY "${HARFBUZZ_PROBE_MODULE}")
-    file(WRITE "${HARFBUZZ_PROBE_MODULE}/module.modulemap"
-        "module HarfBuzzProbe [system] {\n header \"${HARFBUZZ_PROBE_HEADERS}/hb.h\"\n header \"${HARFBUZZ_PROBE_HEADERS}/hb-ot.h\"\n header \"${HARFBUZZ_PROBE_HEADERS}/hb-coretext.h\"\n export *\n}\n")
-    list(APPEND UBIQUITTY_SWIFT_FLAGS "-I${HARFBUZZ_PROBE_MODULE}" "-I${HARFBUZZ_PROBE_HEADERS}")
-    target_link_libraries(Ubiquitty PRIVATE PkgConfig::HARFBUZZ_PROBE)
-endif()
-
-# What the header-emit swiftc passes add to UBIQUITTY_SWIFT_FLAGS. They run
-# swiftc by hand, so neither the language mode CMake gives a Swift target (the
-# Xcode generator carries it as a build setting instead) nor the directory-wide
-# -warnings-as-errors reaches them. Both are stated here once, so a diagnostic
-# that exists in a target's compile exists in its header pass and fails the same
-# build: the Swift 6 mode, and -warnings-as-errors under UBIQUITTY_WERROR.
-set(UBIQUITTY_SWIFT_HEADER_PASS_FLAGS -swift-version 6)
-if(UBIQUITTY_WERROR)
-    list(APPEND UBIQUITTY_SWIFT_HEADER_PASS_FLAGS -warnings-as-errors)
-endif()
-
-# Active-compilation conditions for the header-emit swiftc pass (separate from
-# the in-target compile, so they must be propagated explicitly).
-set(UBIQUITTY_SWIFT_EXTRA_FLAGS "")
-if(UBIQUITTY_UI_TESTS)
-    list(APPEND UBIQUITTY_SWIFT_EXTRA_FLAGS
-        "-DUBIQUITTY_UI_TESTS" "-Xcc" "-DUBIQUITTY_UI_TESTS=1")
-endif()
-# The window-server blur radius is a Swift call now (WindowBlurBackdrop), so
-# the gate reaches Swift as an active-compilation condition too.
-if(UBIQUITTY_BACKGROUND_BLUR)
-    list(APPEND UBIQUITTY_SWIFT_EXTRA_FLAGS "-DUBIQUITTY_BACKGROUND_BLUR")
-endif()
-# Sparkle reaches Swift as a search path rather than a condition: Updater.swift
-# asks `canImport(Sparkle)`, which is true exactly when the module is findable.
-if(UBIQUITTY_SPARKLE_FOUND)
-    list(APPEND UBIQUITTY_SWIFT_EXTRA_FLAGS "-F" "${UBIQUITTY_SPARKLE_PREFIX}")
-endif()
-
-# Swift PGO, injected by build-macos.sh the way the C-family flags are — but
-# through its own variable, not UBIQUITTY_SWIFT_FLAGS: that list also feeds
-# the two -typecheck header-emit passes, whose command lines must not change
-# on a retrain (codegen never runs there, and a changed line would rebuild
-# the generated headers and everything behind them for nothing). Only the
-# codegen targets consume this.
-set(UBIQUITTY_SWIFT_PGO_FLAGS "" CACHE STRING
-    "Swift codegen profile flags (empty = no PGO); set by Scripts/build-macos.sh")
-set(UBIQUITTY_SWIFT_PGO_GENEX "")
-if(UBIQUITTY_SWIFT_PGO_FLAGS)
-    set(UBIQUITTY_SWIFT_PGO_GENEX "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_SWIFT_PGO_FLAGS}>")
-endif()
-
-# CMake deduplicates option lists before expanding a SHELL group. Keep repeated
-# -Xcc forwarding pairs in one group while raw custom commands keep list argv.
-set(UBIQUITTY_SWIFT_FLAGS_GROUPED "")
-foreach(_swift_flag IN LISTS UBIQUITTY_SWIFT_FLAGS)
-    string(APPEND UBIQUITTY_SWIFT_FLAGS_GROUPED " '${_swift_flag}'")
-endforeach()
-
-# How Debug is made whole-module, per generator. The reason is spelled on
-# UbiquittyRenderKit below; this is only the spelling. Ninja takes the mode as
-# a flag. Xcode plans a target's outputs from its own build setting, and a
-# `-wmo` among the other flags contradicts that plan, so there the mode is the
-# setting — on all three Swift targets, the app included, because an
-# incremental importer loses the same members an incremental emitter does.
+# no-op. Xcode takes the mode as its build setting instead
+# (Scripts/cmake/UbiquittyKit.cmake spells why, for every Swift target), and
 # Scripts/check-xcode-workspace.py reads the generated project for it.
-set(UBIQUITTY_SWIFT_DEBUG_WHOLE_MODULE "")
 if(CMAKE_GENERATOR MATCHES "Xcode")
     set_target_properties(Ubiquitty PROPERTIES
         XCODE_ATTRIBUTE_SWIFT_COMPILATION_MODE "wholemodule")
-else()
-    set(UBIQUITTY_SWIFT_DEBUG_WHOLE_MODULE
-        "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<CONFIG:Debug>>:SHELL:-wmo>")
 endif()
 set_target_properties(Ubiquitty PROPERTIES
     Swift_COMPILATION_MODE "wholemodule"
@@ -775,6 +633,9 @@ set_target_properties(Ubiquitty PROPERTIES
     XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "${UBIQUITTY_MACOS_APP_MIN}")
 target_compile_options(Ubiquitty PRIVATE
     "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_SWIFT_FLAGS_GROUPED}>"
+    # This shell's own map, which only this module imports, after the shared
+    # flags and so behind Core's map in the search order.
+    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-I ${UBIQUITTY_SWIFT_DIR}>"
     # The settings sources read the render kit's interface (the feature pane
     # draws its samples through the renderer's own face builder), so the app
     # module's Swift needs its swiftmodule on the search path.
@@ -785,279 +646,120 @@ target_compile_options(Ubiquitty PRIVATE
 
 
 # ----------------------------------------------------------------------
-# What the Swift modules INLINE, so Ninja knows to rebuild them when it moves.
-#
-# The mechanism, and every measurement behind it, is in
-# cmake/SwiftInteropStamp.cmake — shared with the iOS arm, whose modules inline
-# the same headers.
-include("${CMAKE_SOURCE_DIR}/cmake/SwiftInteropStamp.cmake")
-ubiquitty_swift_interop_stamp(UBIQUITTY_SWIFT_INTEROP_STAMP)
+# The Kit's Swift modules, UbiquittyRenderKit and UbiquittyKitModule (the
+# UbiquittyKit module), with the typed pasteboard beneath them. This shell's
+# window chrome compiles into the UbiquittyKit module, after the Kit's own
+# sources and in this order.
+# ----------------------------------------------------------------------
+ubiquitty_kit_add_swift_modules(PLATFORM macOS
+    MODULE_MAPS "${UBIQUITTY_SWIFT_DIR}/module.modulemap"
+    CONDITIONS ${UBIQUITTY_SWIFT_CONDITIONS}
+    HEADER_PASS_OPTIONS ${UBIQUITTY_RENDERKIT_HEADER_PASS_OPTIONS}
+    SHELL_SOURCES
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/StreamDebugView.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/StreamDebugWindowController.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/AdaptiveDriveDebugWindowController.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PerfDiagnosticsWindows.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+PerfDiagnostics.swift"
+        "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/PointerLockRegistry.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WindowCornerMask.swift"
+        "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/SystemDisplayOptions.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/SquareBottomWindow.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ZoomTrackingWindow.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TitlebarInk.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ProxyIconRevealController.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TitlebarDocumentActionsController.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TitlebarTagPalette.swift"
+        "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/ProcessIcons.swift"
+        "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/PhosphorIcons.swift"
+        "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/ShippedIconsSmoke.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TagIconPicker.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStripStyling.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStripMaterial.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PaneChrome.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PaneTransferCoordinator.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabTitleStyling.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabAttentionDots.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/BellMark.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabProgressIndicator.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStatusMark.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabAccessoryPresenter.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WindowLevelMemory.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/BroadcastInputMemory.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ChromelessWindowChrome.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabButtonProgressBar.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabTagDots.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/SessionAttention.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/LinkPreviewBubble.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Notifications.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ScriptingHook.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/FindBarMemory.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/LinkOpener.swift"
+        # The Welcome screen's buttons, which LinkOpener dispatches first, and the
+        # shell wrapper one of them installs: both shells open links through the
+        # opener, so the dispatch lives beside it.
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WelcomeActions.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ShellIntegrationInstaller.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/QuarantinedDownload.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ThemePreview.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalInspector.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/InspectorTarget.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalSettingsPreview.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+TmuxHosting.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+HostedWindows.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+RemoteHosting.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/RemoteSessionLifecycle.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/RemoteResume.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Refusal.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+SpawnRefusal.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ShareSessionSupport.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/LocalHostUpgrade.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Sharing.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+WindowOps.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ClosedWindowRecovery.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ProfileEditorModel.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Configuration.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Triggers.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TriggerActions.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/DropDown/QuakeController.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/DropDown/QuakeHotkey.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+RemoteWorkspace.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Paste.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Clear.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+SessionLog.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+SessionCapture.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Scripting.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ControlHost.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+EditMenu.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/UBFindBar.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Find.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+TitlebarIdentity.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TagRulePrefill.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WindowFrameMemory.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Beam.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ShellSmoke.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/SurfaceSmoke+WindowShell.swift")
 
-# Every Swift module that inlines those headers carries the stamp, and there are
-# four: this executable's own module, UbiquittyRenderKit, UbiquittyKitModule and
-# the UbiquittyKit framework (the last shares UBIQUITTY_KIT_SOURCES with the
-# third, so one append serves both). The executable's is the one that matters
-# most to trust the tests: UBIQUITTY_SWIFT_SOURCES is where every Swift UI
-# scenario is compiled, so without this the module holding the assertions is
-# built against a Core the rest of the app has already moved past — and an
-# ablation meant to prove a scenario can fail reaches nothing, reporting a
-# healthy test as vacuous.
-#
-# target_sources rather than a list append: add_executable(Ubiquitty) is above,
-# and the stamp does not exist as a name until here.
+# Every Swift module that inlines Core carries the interop stamp, this
+# executable's included, and it matters most here to trust the tests:
+# UBIQUITTY_SWIFT_SOURCES is where every Swift UI scenario is compiled, so
+# without it the module holding the assertions is built against a Core the rest
+# of the app has already moved past — and an ablation meant to prove a scenario
+# can fail reaches nothing, reporting a healthy test as vacuous.
 target_sources(Ubiquitty PRIVATE "${UBIQUITTY_SWIFT_INTEROP_STAMP}")
-
-# ----------------------------------------------------------------------
-# UbiquittyRenderKit: the Swift renderer module.
-# ----------------------------------------------------------------------
-set(UBIQUITTY_RENDERKIT_SOURCES_ABS "")
-foreach(_src IN LISTS UBIQUITTY_RENDERKIT_SOURCES)
-    list(APPEND UBIQUITTY_RENDERKIT_SOURCES_ABS "${CMAKE_SOURCE_DIR}/${_src}")
-endforeach()
-
-list(APPEND UBIQUITTY_RENDERKIT_SOURCES_ABS "${UBIQUITTY_SWIFT_INTEROP_STAMP}")
-add_library(UbiquittyRenderKit STATIC ${UBIQUITTY_RENDERKIT_SOURCES_ABS})
-# This property is honoured in the optimised configurations and not in Debug,
-# where CMake drives swiftc `-incremental`. The per-config spelling does not bind
-# it either — measured, by building Debug from scratch with each and comparing.
-# The mode is therefore forced as a flag below, and the difference it makes
-# reaches the module interface rather than only the object code: an
-# incrementally merged module is built from per-file partials, and a member whose
-# signature names an imported C++ type is dropped from the serialized interface
-# instead of being diagnosed. The consumer then fails at the call with "has no
-# member" while the member is public on the same tree, so nothing points at the
-# cause. Naming the mode per configuration is what makes the arm buildable in the
-# mode it is debugged in.
-set_target_properties(UbiquittyRenderKit PROPERTIES
-    Swift_MODULE_NAME "UbiquittyRenderKit"
-    Swift_COMPILATION_MODE "wholemodule")
-# No bridging header: the renderer reaches Core through the module maps and
-# the OS through the SDK. The six check-*.sh drivers compile these same
-# files with neither the bridging header nor the app module, which is the
-# standing proof this list stays self-contained.
-# `Swift_COMPILATION_MODE` above is honoured in the optimised configurations and
-# not in Debug, where CMake drives swiftc `-incremental`. That difference reaches
-# the module interface rather than only the object code: an incrementally merged
-# module is built from per-file partials, and a member whose signature names an
-# imported C++ type is dropped from the serialized interface instead of being
-# diagnosed. The consumer then fails at the call with "has no member", nothing
-# points at the cause, and the member is demonstrably public on the same tree.
-# Spelling the mode as a flag is what makes it hold in every configuration, so
-# the arm builds in the mode it is debugged in.
-if(CMAKE_GENERATOR MATCHES "Xcode")
-    # The app's floor, as the setting. UBIQUITTY_SWIFT_FLAGS names it with
-    # `-target`, which Xcode replaces with one built from this setting; left at
-    # the C++ floor, the module is compiled for an OS older than the API it
-    # is written against.
-    set_target_properties(UbiquittyRenderKit PROPERTIES
-        XCODE_ATTRIBUTE_SWIFT_COMPILATION_MODE "wholemodule"
-        XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "${UBIQUITTY_MACOS_APP_MIN}")
-endif()
-target_compile_options(UbiquittyRenderKit PRIVATE
-    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_SWIFT_FLAGS_GROUPED}>"
-    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-enforce-exclusivity=unchecked>"
-    ${UBIQUITTY_SWIFT_DEBUG_WHOLE_MODULE}
-    ${UBIQUITTY_SWIFT_PGO_GENEX})
-
-# The render kit's generated interface, which Scripts/check-swift-cxx-exports.py
-# reads for what the module exports across the seam. Emitted by its own pass so
-# Ninja orders it after the module it describes.
-set(UBIQUITTY_RENDERKIT_GENERATED_HEADER
-    "${CMAKE_CURRENT_BINARY_DIR}/UbiquittyRenderKit-Swift.h")
-add_custom_command(
-    OUTPUT  "${UBIQUITTY_RENDERKIT_GENERATED_HEADER}"
-    COMMAND xcrun swiftc
-            -module-name UbiquittyRenderKit
-            -emit-objc-header-path "${UBIQUITTY_RENDERKIT_GENERATED_HEADER}"
-            -typecheck
-            -wmo
-            ${UBIQUITTY_SWIFT_FLAGS}
-            ${UBIQUITTY_SWIFT_HEADER_PASS_FLAGS}
-            ${UBIQUITTY_SWIFT_EXTRA_FLAGS}
-            ${UBIQUITTY_RENDERKIT_SOURCES_ABS}
-    DEPENDS ${UBIQUITTY_RENDERKIT_SOURCES_ABS}
-            "${CMAKE_SOURCE_DIR}/Source/Platform/Apple/module.modulemap"
-            ${UBIQUITTY_SWIFT_INTEROP_HEADERS}
-    COMMENT "Emitting UbiquittyRenderKit-Swift.h"
-    VERBATIM)
-add_custom_target(UbiquittyRenderKitHeader
-    DEPENDS "${UBIQUITTY_RENDERKIT_GENERATED_HEADER}")
-# The header target waits for the library, and that is what makes the Xcode
-# generator accept this directory at all.
-#
-# UbiquittyInteropStamp.swift is generated by one custom command and is a source
-# of both UbiquittyRenderKit and (through UBIQUITTY_RENDERKIT_SOURCES_ABS) the
-# emit above. Xcode's "new build system" refuses a generating command attached to
-# two targets unless one is a dependency of the other — Ninja does not, which is
-# why `generate-xcode-workspace.sh` failed while every ninja build passed.
-#
-# Ordering it this way rather than the other: the emit reads the same sources the
-# library compiles, so running it after the library is the direction that was
-# already true in practice.
-add_dependencies(UbiquittyRenderKitHeader UbiquittyRenderKit)
 add_dependencies(Ubiquitty UbiquittyRenderKitHeader)
-
-# ----------------------------------------------------------------------
-# UbiquittyKit (module): the pure-Swift surface over the machinery.
-#
-# Its files import the render kit and every Core interop module INTERNALLY,
-# which is what keeps C++ out of the module's interface: a consumer of the
-# UbiquittyKit module needs no interoperability flags and no module maps.
-# The machinery it constructs is reached through package visibility — both
-# modules compile under -package-name ubiquitty.
-# ----------------------------------------------------------------------
-set(UBIQUITTY_KIT_SOURCES
-    ${UBIQUITTY_APPLE_SHARED_KIT_ABS}
-    # macOS only: the ASCII-capable-layout lookup is Carbon, and the question
-    # it answers — which Latin letter a physical key carries — has no iOS
-    # meaning. Its one caller is inside `#if canImport(AppKit)`, so the phone
-    # never names it.
-    "${CMAKE_SOURCE_DIR}/Source/UbiquittyKit/Swift/KeyboardLayout.swift"
-    # macOS only: every prompt it presents is an NSAlert, and the three
-    # questions it asks — an agent driving a session, a program reading the
-    # clipboard, an install copying a binary to a host — are the desktop's.
-    "${CMAKE_SOURCE_DIR}/Source/UbiquittyKit/Swift/ConsentAlert.swift"
-    # macOS only: a program's icon as AppKit images, read through ProcessIcons
-    # below from the process icons only the macOS products ship.
-    "${CMAKE_SOURCE_DIR}/Source/UbiquittyKit/Swift/TerminalSurface+ProgramIcon.swift"
-    # macOS only: the pasteboard half of the PAL clipboard backend, which
-    # Source/Platform/macOS/Clipboard.cpp calls through a C seam. It rides this
-    # list because the seam has to resolve in both products — the app links this
-    # module, and the framework compiles the same sources.
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/ClipboardPasteboard.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/StreamDebugView.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/StreamDebugWindowController.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/AdaptiveDriveDebugWindowController.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PerfDiagnosticsWindows.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+PerfDiagnostics.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PointerLockRegistry.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WindowCornerMask.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/SystemDisplayOptions.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/SquareBottomWindow.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ZoomTrackingWindow.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TitlebarInk.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ProxyIconRevealController.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TitlebarDocumentActionsController.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TitlebarTagPalette.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ProcessIcons.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PhosphorIcons.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ShippedIconsSmoke.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TagIconPicker.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStripStyling.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStripMaterial.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PaneChrome.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/PaneTransferCoordinator.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabTitleStyling.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabAttentionDots.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/BellMark.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabProgressIndicator.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStatusMark.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabAccessoryPresenter.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WindowLevelMemory.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/BroadcastInputMemory.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ChromelessWindowChrome.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabButtonProgressBar.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabTagDots.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/SessionAttention.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/LinkPreviewBubble.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Notifications.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ScriptingHook.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/FindBarMemory.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/LinkOpener.swift"
-    # The Welcome screen's buttons, which LinkOpener dispatches first, and the
-    # shell wrapper one of them installs: both shells open links through the
-    # opener, so the dispatch lives beside it.
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WelcomeActions.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ShellIntegrationInstaller.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/QuarantinedDownload.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ThemePreview.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalInspector.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/InspectorTarget.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalSettingsPreview.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+TmuxHosting.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+HostedWindows.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+RemoteHosting.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/RemoteSessionLifecycle.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/RemoteResume.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Refusal.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+SpawnRefusal.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ShareSessionSupport.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/LocalHostUpgrade.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Sharing.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+WindowOps.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ClosedWindowRecovery.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ProfileEditorModel.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Configuration.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Triggers.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TriggerActions.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/DropDown/QuakeController.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/DropDown/QuakeHotkey.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+RemoteWorkspace.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Paste.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Clear.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+SessionLog.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+SessionCapture.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Scripting.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/ControlHost.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+EditMenu.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/UBFindBar.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Find.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+TitlebarIdentity.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TagRulePrefill.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WindowFrameMemory.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Beam.swift"
-    "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ShellSmoke.swift")
-list(APPEND UBIQUITTY_KIT_SOURCES "${UBIQUITTY_SWIFT_INTEROP_STAMP}")
-add_library(UbiquittyKitModule STATIC ${UBIQUITTY_KIT_SOURCES})
-# Forced as a flag below for the reason spelled on UbiquittyRenderKit. This
-# target reads the other's interface, so it is where a dropped member is
-# observed — but both need it, since either one built incrementally can serialize
-# a module the next reader finds short.
-set_target_properties(UbiquittyKitModule PROPERTIES
-    Swift_MODULE_NAME "UbiquittyKit"
-    Swift_COMPILATION_MODE "wholemodule")
-# Debug takes the mode as a flag for the reason spelled on UbiquittyRenderKit:
-# the property alone is not honoured there, and an incrementally merged module
-# drops interop members from its interface. This target is the consumer that
-# reads the other's interface, so it is where the drop is observed — but both
-# need the flag, since either one built incrementally can serialize a module the
-# next reader finds short.
-if(CMAKE_GENERATOR MATCHES "Xcode")
-    set_target_properties(UbiquittyKitModule PROPERTIES
-        XCODE_ATTRIBUTE_SWIFT_COMPILATION_MODE "wholemodule"
-        # The module's name, as the setting Xcode reads: it names a module
-        # for its product, which here is the target's name and not the name
-        # the app imports.
-        XCODE_ATTRIBUTE_PRODUCT_MODULE_NAME "UbiquittyKit"
-        XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "${UBIQUITTY_MACOS_APP_MIN}")
-endif()
-target_compile_options(UbiquittyKitModule PRIVATE
-    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_SWIFT_FLAGS_GROUPED}>"
-    ${UBIQUITTY_SWIFT_DEBUG_WHOLE_MODULE}
-    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-I ${CMAKE_CURRENT_BINARY_DIR}>"
-    ${UBIQUITTY_SWIFT_PGO_GENEX})
-add_dependencies(UbiquittyKitModule UbiquittyRenderKit)
-target_link_libraries(UbiquittyKitModule PRIVATE UbiquittyRenderKit PUBLIC UbiquittyPasteboard)
 target_link_libraries(Ubiquitty PRIVATE UbiquittyKitModule)
 # AppKit resolves Swift extension actions through Objective-C metadata, without
 # a direct symbol reference that would pull their archive members into the app.
 target_link_options(Ubiquitty PRIVATE "LINKER:-ObjC")
 
 # The harness's Swift seams and C++ lock-hold counter are members under
-# UBIQUITTY_UI_TESTS, so every Swift module needs the active-compilation
-# condition and its clang importer must see the same C++ definition as the
-# app's translation units. A module importing the header without the latter
-# lays TerminalRuntime out one field short, and the Swift shell's first ingest
-# pass faults. One SHELL: group per target avoids CMake de-duplicating a second
-# bare `-Xcc` away from its argument.
-if(UBIQUITTY_UI_TESTS)
-    foreach(_swift_target Ubiquitty UbiquittyRenderKit UbiquittyKitModule)
-        target_compile_options(${_swift_target} PRIVATE
-            "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-DUBIQUITTY_UI_TESTS>"
-            "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xcc -DUBIQUITTY_UI_TESTS=1>")
-    endforeach()
-endif()
+# UBIQUITTY_UI_TESTS, so this module compiles under the conditions the Kit's
+# modules are given, with the same definitions for its clang importer: imported
+# without them, TerminalRuntime is laid out one field short, and the Swift
+# shell's first ingest pass faults.
+ubiquitty_kit_add_swift_conditions(Ubiquitty ${UBIQUITTY_SWIFT_CONDITIONS})
 # The window-server blur radius is set from Swift (WindowBlurBackdrop) under
 # the same gate the C-family definition above carries.
 if(UBIQUITTY_BACKGROUND_BLUR)
@@ -1099,15 +801,15 @@ target_link_libraries(Ubiquitty PRIVATE
 if(UBIQUITTY_QUIC)
     ubiquitty_ensure_quic_deps() # fetch the pinned QUIC TLS deps if absent
     target_sources(Ubiquitty PRIVATE
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/QUICClient.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/DatagramBatch.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Core/Transport/QUICChannel.cpp")
+        "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/QUICClient.cpp"
+        "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/DatagramBatch.cpp"
+        "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Transport/QUICChannel.cpp")
     # QUICClient.cpp + QUICChannel.cpp are portable C++ — same strict ABI flags as
     # the Core TUs.
     set_source_files_properties(
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/QUICClient.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/DatagramBatch.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Core/Transport/QUICChannel.cpp"
+        "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/QUICClient.cpp"
+        "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Platform/POSIX/DatagramBatch.cpp"
+        "${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Transport/QUICChannel.cpp"
         PROPERTIES COMPILE_FLAGS "-std=c++23 -fno-exceptions -fno-rtti")
     target_include_directories(Ubiquitty PRIVATE "${UBIQUITTY_QUIC_PREFIX}/include")
     ub_c_family_compile_definitions(Ubiquitty UBIQUITTY_QUIC=1)
@@ -1193,7 +895,7 @@ endif()
 # them at runtime via [NSBundle resourcePath]/shell-integration and
 # exports UBIQUITTY_INTEGRATION_DIR to every spawned shell.
 set(UBIQUITTY_SHELL_INTEGRATION_DIR
-    "${CMAKE_SOURCE_DIR}/Resources/shell-integration")
+    "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/shell-integration")
 add_custom_command(TARGET Ubiquitty POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_CONTENT_DIR:Ubiquitty>/Resources/shell-integration"
@@ -1227,7 +929,7 @@ add_custom_command(TARGET Ubiquitty POST_BUILD
 # bundle keeps the file the tree dropped — the exact failure this rule exists
 # to close. The list changes whenever the set does, and `file(GENERATE)` leaves
 # its mtime alone when the content matches, so this costs nothing per build.
-file(GLOB UBIQUITTY_BUNDLED_FONT_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/Resources/fonts/*")
+file(GLOB UBIQUITTY_BUNDLED_FONT_FILES CONFIGURE_DEPENDS "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts/*")
 list(SORT UBIQUITTY_BUNDLED_FONT_FILES)
 set(UBIQUITTY_BUNDLED_FONTS_LIST "${CMAKE_CURRENT_BINARY_DIR}/bundled-fonts.list")
 file(GENERATE OUTPUT "${UBIQUITTY_BUNDLED_FONTS_LIST}"
@@ -1250,7 +952,7 @@ add_custom_command(
     OUTPUT "${UBIQUITTY_BUNDLED_FONTS_STAMP}"
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${UBIQUITTY_BUNDLED_FONTS_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/Resources/fonts"
+            "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts"
             "${UBIQUITTY_BUNDLED_FONTS_DIR}"
     COMMAND ${CMAKE_COMMAND} -E touch "${UBIQUITTY_BUNDLED_FONTS_STAMP}"
     DEPENDS ${UBIQUITTY_BUNDLED_FONT_FILES} "${UBIQUITTY_BUNDLED_FONTS_LIST}"
@@ -1268,7 +970,7 @@ add_dependencies(ubiquitty-bundled-fonts Ubiquitty)
 # sit in the Private Use Area, where a registered font would answer a
 # terminal's own icon codepoints. The same stamp-inside-the-copy rule as the
 # fonts, for the same reasons.
-file(GLOB UBIQUITTY_PHOSPHOR_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/Resources/phosphor/*")
+file(GLOB UBIQUITTY_PHOSPHOR_FILES CONFIGURE_DEPENDS "${UBIQUITTY_KIT_SOURCE_DIR}/Resources/phosphor/*")
 list(SORT UBIQUITTY_PHOSPHOR_FILES)
 set(UBIQUITTY_PHOSPHOR_LIST "${CMAKE_CURRENT_BINARY_DIR}/bundled-phosphor.list")
 file(GENERATE OUTPUT "${UBIQUITTY_PHOSPHOR_LIST}"
@@ -1280,7 +982,7 @@ add_custom_command(
     OUTPUT "${UBIQUITTY_PHOSPHOR_STAMP}"
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${UBIQUITTY_PHOSPHOR_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/Resources/phosphor"
+            "${UBIQUITTY_KIT_SOURCE_DIR}/Resources/phosphor"
             "${UBIQUITTY_PHOSPHOR_DIR}"
     COMMAND ${CMAKE_COMMAND} -E touch "${UBIQUITTY_PHOSPHOR_STAMP}"
     DEPENDS ${UBIQUITTY_PHOSPHOR_FILES} "${UBIQUITTY_PHOSPHOR_LIST}"
@@ -1292,7 +994,7 @@ add_dependencies(ubiquitty-bundled-phosphor Ubiquitty)
 # Bundle the process icons (Resources/process-icons/: the icons, their catalog and
 # their notice) into Contents/Resources/process-icons/, read by ProcessIcons.swift
 # by the file Core's catalog names. The same stamp-inside-the-copy rule.
-file(GLOB UBIQUITTY_PROCESS_ICON_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/Resources/process-icons/*")
+file(GLOB UBIQUITTY_PROCESS_ICON_FILES CONFIGURE_DEPENDS "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/process-icons/*")
 list(SORT UBIQUITTY_PROCESS_ICON_FILES)
 set(UBIQUITTY_PROCESS_ICON_LIST "${CMAKE_CURRENT_BINARY_DIR}/bundled-process-icons.list")
 file(GENERATE OUTPUT "${UBIQUITTY_PROCESS_ICON_LIST}"
@@ -1304,7 +1006,7 @@ add_custom_command(
     OUTPUT "${UBIQUITTY_PROCESS_ICON_STAMP}"
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${UBIQUITTY_PROCESS_ICON_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/Resources/process-icons"
+            "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/process-icons"
             "${UBIQUITTY_PROCESS_ICON_DIR}"
     COMMAND ${CMAKE_COMMAND} -E touch "${UBIQUITTY_PROCESS_ICON_STAMP}"
     DEPENDS ${UBIQUITTY_PROCESS_ICON_FILES} "${UBIQUITTY_PROCESS_ICON_LIST}"
@@ -1325,80 +1027,13 @@ add_custom_command(TARGET Ubiquitty POST_BUILD
     COMMENT "Bundling AppleScript dictionary (Ubiquitty.sdef)"
     VERBATIM)
 
-# Metal shader compilation. The Makefile / Ninja generators do not
-# compile .metal sources natively, so we drive the metal compiler by
-# hand and copy the resulting default.metallib into the bundle's
-# Resources directory where [MTLDevice newDefaultLibrary] looks for it.
-#
-# Compiling .metal requires the Metal Toolchain, which ships with full
-# Xcode (and, on recent macOS, as a separately downloaded component:
-# `xcodebuild -downloadComponent MetalToolchain`). When the toolchain
-# is absent we skip the shader build so the target still configures,
-# compiles, and links; the runtime detects the missing library and
-# reports it instead of crashing. Building the metallib then only
-# requires a rebuild once the toolchain is installed.
-set(UBIQUITTY_METAL_SRC "${CMAKE_SOURCE_DIR}/Source/UbiquittyRenderKit/UBShaders.metal")
-set(UBIQUITTY_METAL_AIR "${CMAKE_CURRENT_BINARY_DIR}/UBShaders.air")
-set(UBIQUITTY_METAL_LIB "${CMAKE_CURRENT_BINARY_DIR}/default.metallib")
-
-# Without a version-min the metal compiler targets the newest Metal language
-# version, producing a metallib older systems refuse to load. It is pinned to
-# CMAKE_OSX_DEPLOYMENT_TARGET, the C++ floor, which is at or below the app's, so
-# the shaders load everywhere the app installs.
-set(UBIQUITTY_METAL_FLAGS "")
-if(CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(UBIQUITTY_METAL_FLAGS "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
-endif()
-
-# Probe for a usable metal compiler. The Xcode-bundled metal at
-# Toolchains/XcodeDefault.xctoolchain/usr/bin/metal is a stub that
-# exits with "missing Metal Toolchain"; the real compiler lives in
-# the cryptex-mounted Metal.xctoolchain and is reachable through
-# `xcrun -f metal`. Always resolve via xcrun first.
-execute_process(
-    COMMAND xcrun -f metal
-    OUTPUT_VARIABLE UBIQUITTY_METAL_TOOL
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-execute_process(
-    COMMAND xcrun -f metallib
-    OUTPUT_VARIABLE UBIQUITTY_METALLIB_TOOL
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-
-set(UBIQUITTY_HAVE_METAL_TOOL FALSE)
-if(UBIQUITTY_METAL_TOOL AND UBIQUITTY_METALLIB_TOOL)
-    # Confirm the binary can actually compile (the Metal Toolchain
-    # component must be downloaded — `xcodebuild -downloadComponent
-    # MetalToolchain` on recent macOS).
-    execute_process(
-        COMMAND "${UBIQUITTY_METAL_TOOL}" -c "${UBIQUITTY_METAL_SRC}"
-                -o "${UBIQUITTY_METAL_AIR}.probe"
-        RESULT_VARIABLE _metal_probe_rc
-        OUTPUT_QUIET ERROR_QUIET)
-    if(_metal_probe_rc EQUAL 0)
-        set(UBIQUITTY_HAVE_METAL_TOOL TRUE)
-        file(REMOVE "${UBIQUITTY_METAL_AIR}.probe")
-    endif()
-endif()
-
-if(UBIQUITTY_HAVE_METAL_TOOL)
-    add_custom_command(
-        OUTPUT  "${UBIQUITTY_METAL_AIR}"
-        COMMAND "${UBIQUITTY_METAL_TOOL}" ${UBIQUITTY_METAL_FLAGS}
-                -c "${UBIQUITTY_METAL_SRC}"
-                -o "${UBIQUITTY_METAL_AIR}"
-        DEPENDS "${UBIQUITTY_METAL_SRC}" "${CMAKE_SOURCE_DIR}/Source/Core/Tek/BeamRaster.h"
-        COMMENT "Compiling UBShaders.metal -> AIR"
-        VERBATIM)
-    add_custom_command(
-        OUTPUT  "${UBIQUITTY_METAL_LIB}"
-        COMMAND "${UBIQUITTY_METALLIB_TOOL}" "${UBIQUITTY_METAL_AIR}"
-                -o "${UBIQUITTY_METAL_LIB}"
-        DEPENDS "${UBIQUITTY_METAL_AIR}"
-        COMMENT "Linking default.metallib"
-        VERBATIM)
-    add_custom_target(UbiquittyMetalLib DEPENDS "${UBIQUITTY_METAL_LIB}")
+# The shaders, compiled by the Kit's step into the default.metallib that
+# [MTLDevice newDefaultLibrary] finds in the bundle's Resources. Without a Metal
+# toolchain the step is absent, the app still builds, and the renderer reports
+# the missing library at launch.
+ubiquitty_kit_add_metal_library(UbiquittyMetalLib PLATFORM macOS)
+if(TARGET UbiquittyMetalLib)
+    get_target_property(UBIQUITTY_METAL_LIB UbiquittyMetalLib UBIQUITTY_KIT_METAL_LIBRARY)
     add_dependencies(Ubiquitty UbiquittyMetalLib)
 
     add_custom_command(TARGET Ubiquitty POST_BUILD
@@ -1406,172 +1041,20 @@ if(UBIQUITTY_HAVE_METAL_TOOL)
                 "$<TARGET_BUNDLE_CONTENT_DIR:Ubiquitty>/Resources/default.metallib"
         COMMENT "Copying default.metallib into bundle Resources"
         VERBATIM)
-else()
-    message(WARNING
-        "Metal Toolchain not found; UBShaders.metal will NOT be compiled. "
-        "The app links but the renderer reports a missing default library "
-        "at launch. Install full Xcode or run "
-        "`xcodebuild -downloadComponent MetalToolchain`, then rebuild.")
 endif()
 
 # ----------------------------------------------------------------------
 # UbiquittyKit: the embeddable terminal framework (UBIQUITTY_KIT=ON).
 #
-# The render-kit sources plus the portable Core they link, packaged as a
-# macOS framework an external app consumes with no Ubiquitty app around it.
-# Off by default: the app links the static UbiquittyRenderKit above, and a
-# second whole-module Swift compile on every developer build would be paid
-# for a product most builds do not ship. Scripts/check-ubiquittykit.sh builds
-# it, embeds it in a signed app and exercises it from there.
-#
-# v1 recompiles the Core TUs into the framework, the same way the app builds
-# them, so one configure produces the product. The Core frontend already
-# exports install(EXPORT UbiquittyCoreTargets) archives; pointing this target
-# at find_package(UbiquittyCore) instead is the later unification, taken when
-# the Linux UbiquittyKit needs the same split.
+# Off by default: the app links the static UbiquittyKitModule above, and a
+# second whole-module Swift compile on every developer build would be paid for a
+# product most builds do not ship. Scripts/check-ubiquittykit.sh builds and
+# exercises it from its own tree. It compiles the portable Core this app
+# compiles, with the same per-file flags.
 # ----------------------------------------------------------------------
 option(UBIQUITTY_KIT "Build the UbiquittyKit framework" OFF)
 if(UBIQUITTY_KIT)
-    # The OS-seam TUs the runtime needs beneath the portable Core: the PTY
-    # transport, the clock, the diagnostics sink and the serial/pty facts.
-    # App chrome (UB* classes, main, profile harnesses) stays out — the
-    # framework is the terminal, not the application around it.
-    #
-    # Every one is C++ over a C API, so the framework links no Objective-C at
-    # all. The clipboard's pasteboard half is Swift and rides
-    # UBIQUITTY_KIT_SOURCES above.
-    set(UBIQUITTY_KIT_SEAMS
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/PTYStream.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/SerialStream.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/PTYFacts.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/SessionHandoff.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/LocalHostInstall.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/RemoteResumeBridge.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/Apple/Clock.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/Diag.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/Bell.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/Clipboard.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/DECPSSound.cpp")
-    add_library(UbiquittyKit SHARED
-        ${UBIQUITTY_KIT_SOURCES}
-        "${CMAKE_CURRENT_BINARY_DIR}/BuiltinThemesData.gen.cpp"
-        ${UBIQUITTY_KIT_SEAMS}
-        ${UBIQUITTY_PORTABLE_CORE_ABS})
-    add_dependencies(UbiquittyKit UbiquittyRenderKit)
-    # The Kit sources import UbiquittyPasteboard, as UbiquittyKitModule's do;
-    # the framework compiles the same sources and needs the same module.
-    target_link_libraries(UbiquittyKit PRIVATE UbiquittyRenderKit UbiquittyPasteboard)
-    # The Kit holds the window shell, and a shell's remote session offers the
-    # QUIC carrier: it builds the same sources under the same define as the
-    # app, or its sessions would fall back to the subprocess carrier on every
-    # connect while the app beside it dialled QUIC. The two must agree, since
-    # which one opened a window is a user default rather than a build.
-    if(UBIQUITTY_QUIC)
-        target_sources(UbiquittyKit PRIVATE
-            "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/QUICClient.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/DatagramBatch.cpp"
-            "${CMAKE_SOURCE_DIR}/Source/Core/Transport/QUICChannel.cpp")
-        set_source_files_properties(
-            "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/QUICClient.cpp"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/POSIX/DatagramBatch.cpp"
-            "${CMAKE_SOURCE_DIR}/Source/Core/Transport/QUICChannel.cpp"
-            PROPERTIES COMPILE_FLAGS "-std=c++23 -fno-exceptions -fno-rtti")
-        target_include_directories(UbiquittyKit PRIVATE "${UBIQUITTY_QUIC_PREFIX}/include")
-        ub_c_family_compile_definitions(UbiquittyKit UBIQUITTY_QUIC=1)
-        target_link_libraries(UbiquittyKit PRIVATE
-            "${UBIQUITTY_QUIC_PREFIX}/lib/libngtcp2_crypto_boringssl.a"
-            "${UBIQUITTY_QUIC_PREFIX}/lib/libngtcp2.a"
-            "${UBIQUITTY_QUIC_PREFIX}/lib/libssl.a"
-            "${UBIQUITTY_QUIC_PREFIX}/lib/libcrypto.a")
-    endif()
-    # The bundle's version is the Kit version, which versions the framework's
-    # Swift interface: a host requires a version by reading its Info.plist.
-    # Read at configure time, so the header is a configure dependency.
-    set(_ubq_kit_version_header "${CMAKE_SOURCE_DIR}/Source/UbiquittyKit/Version.h")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ubq_kit_version_header}")
-    file(READ "${_ubq_kit_version_header}" _ubq_kit_version_text)
-    string(REGEX MATCH "kitVersionString = \"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _ "${_ubq_kit_version_text}")
-    if(NOT CMAKE_MATCH_1)
-        message(FATAL_ERROR "no kitVersionString in ${_ubq_kit_version_header}")
-    endif()
-    set(UBIQUITTY_KIT_VERSION "${CMAKE_MATCH_1}")
-    set_target_properties(UbiquittyKit PROPERTIES
-        FRAMEWORK TRUE
-        FRAMEWORK_VERSION A
-        MACOSX_FRAMEWORK_IDENTIFIER "dev.ubiquitty.UbiquittyKit"
-        MACOSX_FRAMEWORK_SHORT_VERSION_STRING "${UBIQUITTY_KIT_VERSION}"
-        MACOSX_FRAMEWORK_BUNDLE_VERSION "${UBIQUITTY_KIT_VERSION}"
-        Swift_MODULE_NAME "UbiquittyKit"
-        Swift_COMPILATION_MODE "wholemodule"
-        # Its own module directory: the app's static veneer target emits the
-        # same module name into the default location, and two rules for one
-        # output stop the build before either runs.
-        Swift_MODULE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/UbiquittyKitFramework")
-    target_compile_options(UbiquittyKit PRIVATE
-        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_SWIFT_FLAGS_GROUPED}>"
-        # Library evolution is what makes the internal imports invisible to a
-        # consumer: the binary swiftmodule records every dependency, but the
-        # textual interface names only the public ones, and the framework
-        # ships the interface.
-        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-enable-library-evolution>"
-        "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-emit-module-interface-path ${CMAKE_CURRENT_BINARY_DIR}/UbiquittyKitFramework/UbiquittyKit.swiftinterface>"
-        ${UBIQUITTY_SWIFT_PGO_GENEX})
-    target_compile_features(UbiquittyKit PRIVATE cxx_std_23)
-    target_include_directories(UbiquittyKit PRIVATE
-        "${CMAKE_SOURCE_DIR}/Source"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS"
-        "${CMAKE_CURRENT_BINARY_DIR}")
-    target_include_directories(UbiquittyKit SYSTEM PRIVATE "${RE2_DIR}" "${SIMDUTF_DIR}")
-    # ScrollSearch links the vendored re2 and the ingest path the vendored
-    # simdutf, exactly as the app does.
-    foreach(re2_source ${RE2_SOURCES})
-        ub_add_thirdparty_source(UbiquittyKit "${re2_source}")
-    endforeach()
-    ub_add_thirdparty_source(UbiquittyKit "${SIMDUTF_DIR}/simdutf.cpp")
-    target_link_libraries(UbiquittyKit PRIVATE
-        "-framework AppKit"
-        "-framework Metal"
-        "-framework QuartzCore"
-        "-framework CoreText"
-        "-framework CoreGraphics"
-        "-framework AudioToolbox"
-        "-framework UniformTypeIdentifiers")
-
-    # The framework carries its own shaders: the pipelines resolve the
-    # metallib from ShippedResources.bundle, which is this one.
-    if(UBIQUITTY_HAVE_METAL_TOOL)
-        add_dependencies(UbiquittyKit UbiquittyMetalLib)
-        add_custom_command(TARGET UbiquittyKit POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy "${UBIQUITTY_METAL_LIB}"
-                    "$<TARGET_FILE_DIR:UbiquittyKit>/Resources/default.metallib"
-            COMMENT "Copying default.metallib into UbiquittyKit Resources"
-            VERBATIM)
-    endif()
-
-    # The rest of what its code reads from that bundle, as the app carries it:
-    # the shipped fonts with each licence beside its font, the icons a title
-    # and a tag draw, and the notices of everything the framework links. Each
-    # directory is staged whole, as the app's are, so a file the tree drops
-    # leaves the framework a host embeds. ShippedFonts registers the fonts for
-    # the host's process, since the system reads ATSApplicationFontsPath from
-    # the app's Info.plist only.
-    ubiquitty_bundle_resource_directory(UbiquittyKit "fonts" ${UBIQUITTY_BUNDLED_FONT_FILES})
-    ubiquitty_bundle_resource_directory(UbiquittyKit "phosphor" ${UBIQUITTY_PHOSPHOR_FILES})
-    ubiquitty_bundle_resource_directory(UbiquittyKit "process-icons" ${UBIQUITTY_PROCESS_ICON_FILES})
-    ubiquitty_bundle_license_notices(UbiquittyKit)
-
-    # The swiftmodule rides the framework's Modules directory, which is what
-    # lets a consumer import the module from -F alone, and the bundle takes
-    # the versioned layout codesign seals in an app: see
-    # cmake/FrameworkBundleLayout.cmake. After every step that writes into
-    # the bundle, since the script refuses one that breaks the layout.
-    add_custom_command(TARGET UbiquittyKit POST_BUILD
-        COMMAND ${CMAKE_COMMAND}
-                "-DUBIQUITTY_FRAMEWORK=$<TARGET_BUNDLE_DIR:UbiquittyKit>"
-                "-DUBIQUITTY_FRAMEWORK_VERSION=$<TARGET_PROPERTY:UbiquittyKit,FRAMEWORK_VERSION>"
-                "-DUBIQUITTY_FRAMEWORK_INTERFACE=${CMAKE_CURRENT_BINARY_DIR}/UbiquittyKitFramework/UbiquittyKit.swiftinterface"
-                "-DUBIQUITTY_FRAMEWORK_INTERFACE_NAME=${CMAKE_SYSTEM_PROCESSOR}-apple-macos.swiftinterface"
-                -P "${CMAKE_SOURCE_DIR}/cmake/FrameworkBundleLayout.cmake"
-        COMMENT "Laying out UbiquittyKit.framework"
-        VERBATIM)
+    ubiquitty_kit_add_framework(
+        CORE_SOURCES ${UBIQUITTY_PORTABLE_CORE_ABS}
+        METAL_LIBRARY UbiquittyMetalLib)
 endif()

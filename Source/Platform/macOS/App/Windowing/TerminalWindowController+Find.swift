@@ -157,7 +157,7 @@ extension TerminalWindowController: UBFindBarDelegate {
     ///
     /// - Parameter surface: The pane whose search changed.
     func surfaceDidChangeSearch(_ surface: TerminalSurface) {
-        Self.beamPresenter?.searchDidChange?(surface)
+        TerminalSurface.beamPresenter?.searchDidChange?(surface)
         guard surface === focusedPaneSurface, findBar.superview != nil, !findBar.query.isEmpty else { return }
         findBar.setStatus(Self.statusText(surface.searchStatus))
     }

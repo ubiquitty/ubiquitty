@@ -1,9 +1,0 @@
-// Copyright (C) 2026 Stanislav Yaglo
-// SPDX-License-Identifier: Apache-2.0
-
-// The C++ arms, for the Swift harness.
-module SeamCppArms {
-    header "SeamCppArms.h"
-    requires cplusplus
-    export *
-}

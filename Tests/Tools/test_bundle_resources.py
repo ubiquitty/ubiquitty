@@ -13,6 +13,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+# Core's checkout: the submodule where the app carries it, this checkout otherwise.
+CORE_ROOT = Path(os.environ.get("UBQ_CORE_ROOT") or (ROOT / "Libraries" / "ubiquitty-core"
+                                                       if (ROOT / "Libraries" / "ubiquitty-core").exists() else ROOT))
+
+KIT_ROOT = Path(os.environ.get("UBQ_KIT_ROOT") or (ROOT / "Libraries" / "ubiquitty-kit"
+                                                     if (ROOT / "Libraries" / "ubiquitty-kit").exists() else ROOT))
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Apple bundle builds require macOS")
@@ -47,7 +53,7 @@ class BundleResources(unittest.TestCase):
                  "noticePath": "Resources/fonts/font-OFL.txt; Source/ThirdParty/vendor/LICENSE"}
             ]))
             font = source / "SymbolsNerdFontMono-Regular.ttf"
-            shutil.copyfile(ROOT / "Resources/fonts" / font.name, font)
+            shutil.copyfile(CORE_ROOT / "Resources/fonts" / font.name, font)
             bracketed = source / "font [weight].ttf"
             bracketed.write_bytes(b"font resource fixture")
             icon = source / "icon.png"
@@ -73,7 +79,7 @@ class BundleResources(unittest.TestCase):
                 '"-DUBIQUITTY_FRAMEWORK=$<TARGET_BUNDLE_DIR:BundleFixture>" -DUBIQUITTY_FRAMEWORK_VERSION=A '
                 '"-DUBIQUITTY_FRAMEWORK_INTERFACE=${CMAKE_SOURCE_DIR}/main.swift" '
                 "-DUBIQUITTY_FRAMEWORK_INTERFACE_NAME=fixture.swiftinterface "
-                f'-P "{ROOT}/cmake/FrameworkBundleLayout.cmake" VERBATIM)\n'
+                f'-P "{KIT_ROOT}/cmake/FrameworkBundleLayout.cmake" VERBATIM)\n'
                 if layout else "")
             languages = "CXX Swift" if mixedSources else "Swift"
             sources = "main.swift support.cpp" if mixedSources else "main.swift"
@@ -91,7 +97,8 @@ set_target_properties(BundleFixture PROPERTIES
     XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)"""
             (source / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.13)
 project(BundleFixture LANGUAGES {languages})
-include("{ROOT}/cmake/LicenseNotices.cmake")
+include("{CORE_ROOT}/cmake/LicenseNotices.cmake")
+include("{KIT_ROOT}/cmake/BundleLicenseNotices.cmake")
 {declaration}
 {dropStep}ubiquitty_bundle_license_notices(BundleFixture)
 ubiquitty_bundle_resources(BundleFixture "fonts"
@@ -201,7 +208,7 @@ ubiquitty_bundle_resources(BundleFixture "" "${{CMAKE_SOURCE_DIR}}/{icon.name}")
         (source / "main.swift").write_text("public func bundleFixtureValue() -> Int { 1 }\n")
         (source / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.13)
 project(BundleFixture LANGUAGES Swift)
-include("{ROOT}/cmake/BundleResources.cmake")
+include("{KIT_ROOT}/cmake/BundleResources.cmake")
 add_library(BundleFixture SHARED main.swift)
 set_target_properties(BundleFixture PROPERTIES
     FRAMEWORK TRUE

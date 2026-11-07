@@ -1,9 +1,0 @@
-// Copyright (C) 2026 Stanislav Yaglo
-// SPDX-License-Identifier: Apache-2.0
-
-// The C++ arm, for the Swift harness.
-module ClassifyCppArm {
-    header "ClassifyCppArm.h"
-    requires cplusplus
-    export *
-}

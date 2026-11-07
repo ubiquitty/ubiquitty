@@ -98,7 +98,8 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import gate_report
+import library_scripts  # noqa: F401 — makes the libraries' modules importable
+import gate_report  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
@@ -262,18 +263,20 @@ def modules():
     Every other Source/<name> is one module.
     """
     found = []
-    root = os.path.join(REPO, SOURCE)
-    for name in sorted(os.listdir(root)):
-        path = os.path.join(root, name)
-        if not os.path.isdir(path) or name in NOT_A_MODULE:
-            continue
-        if name == PLATFORM:
-            for inner in sorted(os.listdir(path)):
-                innerPath = os.path.join(path, inner)
-                if os.path.isdir(innerPath):
-                    found.append(("Platform/" + inner, innerPath))
-            continue
-        found.append((name, path))
+    # Every checkout holding a Source/ tree: the libraries' modules own Terminals
+    # too, and a policy missing there is as open as one missing in the app's.
+    for root in library_scripts.directories(SOURCE):
+        for name in sorted(os.listdir(root)):
+            path = os.path.join(root, name)
+            if not os.path.isdir(path) or name in NOT_A_MODULE:
+                continue
+            if name == PLATFORM:
+                for inner in sorted(os.listdir(path)):
+                    innerPath = os.path.join(path, inner)
+                    if os.path.isdir(innerPath):
+                        found.append(("Platform/" + inner, innerPath))
+                continue
+            found.append((name, path))
     return found
 
 
@@ -290,7 +293,7 @@ def surveyModule(root, wires, constructs):
             with open(path, encoding="utf-8", errors="replace") as handle:
                 lines = handle.read().splitlines()
             clients, policies = scan(lines, wires)
-            relative = os.path.relpath(path, REPO)
+            relative = library_scripts.relative(path)
             wirings += ["%s:%d" % (relative, n) for n in clients]
             constructions += ["%s:%d" % (relative, n) for n in scanConstructions(lines, constructs)]
             installs += ["%s:%d" % (relative, n) for n in policies]
@@ -300,7 +303,7 @@ def surveyModule(root, wires, constructs):
 def readRepositoryFile(relativePath):
     """A repository file's text, or None when it is absent."""
     try:
-        with open(os.path.join(REPO, relativePath), encoding="utf-8", errors="replace") as handle:
+        with open(library_scripts.locate(relativePath), encoding="utf-8", errors="replace") as handle:
             return handle.read()
     except FileNotFoundError:
         return None
@@ -440,7 +443,7 @@ def main():
     if "--self-test" in sys.argv:
         return selfTest()
 
-    headerPath = os.path.join(REPO, TERMINAL_HEADER)
+    headerPath = library_scripts.locate(TERMINAL_HEADER)
     try:
         with open(headerPath, encoding="utf-8") as handle:
             members = clientMembers(handle.read())

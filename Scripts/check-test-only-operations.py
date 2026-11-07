@@ -46,7 +46,6 @@ Three bounds, so the record cannot rot in either direction:
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -56,7 +55,10 @@ from pathlib import Path
 # from ctest while a by-hand run from the root stays green, the two-verdicts-by-cwd
 # class check-sync-struct-defaults also guards against.
 REPO = Path(__file__).resolve().parent.parent
-HEADER = str(REPO / "Source/Core/TerminalOperations.h")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import library_scripts  # noqa: E402 — the operations are Core's and their callers are in every repository
+
+HEADER = library_scripts.locate("Source/Core/TerminalOperations.h")
 SHIPPING = ("Source/Platform", "Source/PAL", "Source/Agent", "Tools", "Source/Core")
 SUFFIXES = (".cpp", ".mm", ".h", ".swift", ".cc", ".js")
 
@@ -105,13 +107,12 @@ def shippingText(root):
     - Parameter root: the repository root.
     - Returns: one string over every frontend, PAL, agent, tool and Core source.
     """
-    listed = subprocess.run(["git", "ls-files", *SHIPPING],
-                            capture_output=True, text=True, cwd=root).stdout.split()
+    listed = library_scripts.tracked(*SHIPPING)
     lines = []
     for path in listed:
         if not path.endswith(SUFFIXES):
             continue
-        for line in (Path(root) / path).read_text(errors="ignore").splitlines():
+        for line in Path(library_scripts.locate(path)).read_text(errors="ignore").splitlines():
             lines.append(line.split("//")[0])
     return "\n".join(lines)
 

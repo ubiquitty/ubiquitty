@@ -12,7 +12,7 @@ import AppKit
 /// tile's untiled frame through a drag-resize and offers no way to leave the
 /// tile in place.
 @objc(UBZoomTrackingWindow)
-open class ZoomTrackingWindow: NSWindow {
+open class ZoomTrackingWindow: TerminalWindow {
     fileprivate var zoomResize: ZoomResizeTracker?
 
     /// The frame the window held when it last zoomed in. AppKit keeps its own

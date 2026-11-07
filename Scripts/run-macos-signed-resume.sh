@@ -32,6 +32,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 export UBIQUITTY_TEAM_ID="${UBIQUITTY_TEAM_ID:-5TC8J8TCS3}"
 
 # The team's identity: the first code-signing certificate whose organizational
@@ -65,7 +67,7 @@ echo "run-macos-signed-resume: signing with \"$UBIQUITTY_SIGN_IDENTITY\" (team $
 status="${PIPESTATUS[0]}"
 
 # What the run was signed with, so the result names the signature it answers for.
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 APP="${UBIQUITTY_BUILD_DIR:-$UBQ_BUILD_ROOT/macos-uitest}/Source/Platform/macOS/Ubiquitty.app"
 echo "--- signature"
 codesign -dv "$APP" 2>&1 | grep -E '^(Identifier|TeamIdentifier|Authority)=' || true

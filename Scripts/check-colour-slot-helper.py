@@ -58,6 +58,8 @@ from pathlib import Path
 # that as "the tree has no arms", a clean verdict that belongs to the cwd and not
 # to the tree. The script sits in Scripts/, so its parent's parent is the root.
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import library_scripts  # noqa: E402 — the arms live in the app and in the libraries it builds on
 
 HELPER = "colourGlyphSquareInPixels"
 BINDING = "ColorAtlasBinding"
@@ -122,7 +124,7 @@ def zeroTreatmentFindings():
         if evidence is None:
             continue
         try:
-            text = (REPO / path).read_text()
+            text = Path(library_scripts.locate(path)).read_text()
         except OSError:
             text = ""
         if evidence not in text:
@@ -142,9 +144,7 @@ def grepFiles(pattern):
     - Parameter pattern: a fixed string to search for.
     - Returns: a sorted list of repository-relative paths.
     """
-    result = subprocess.run(["git", "-C", str(REPO), "grep", "-l", pattern],
-                            capture_output=True, text=True)
-    return sorted(line for line in result.stdout.splitlines() if line)
+    return library_scripts.grepFiles(pattern)
 
 
 def namesInCode(path):
@@ -160,7 +160,7 @@ def namesInCode(path):
     # The working tree, not HEAD: a gate that reads the committed file passes an
     # uncommitted fork, which is the state a gate exists to catch.
     try:
-        contents = (REPO / path).read_text()
+        contents = Path(library_scripts.locate(path)).read_text()
     except OSError:
         return False
     inBlockComment = False

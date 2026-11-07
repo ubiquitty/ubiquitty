@@ -42,11 +42,12 @@ Stdlib only, no build.
 
 import os
 import re
-import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
+sys.path.insert(0, HERE)
+import library_scripts  # noqa: E402 — the arms are in every repository the app builds on
 
 CAPTURE = "Source/Core/Rendering/TerminalFrameInputs.cpp"
 OWNER = "Source/Core/Rendering/TerminalFrameInputs"
@@ -103,9 +104,7 @@ FIELD = re.compile(r"m_inputs\.(glyph\w+|subpixelGlyphs)\b")
 
 
 def tracked():
-    listing = subprocess.run(["git", "-C", REPO, "ls-files"],
-                             capture_output=True, text=True)
-    return [path for path in listing.stdout.split("\n") if path]
+    return library_scripts.tracked()
 
 
 def capture_fields(text):
@@ -162,10 +161,10 @@ def classify(text, fields):
 def main():
     paths = tracked()
     try:
-        with open(os.path.join(REPO, CAPTURE), encoding="utf-8") as handle:
+        with open(library_scripts.locate(CAPTURE), encoding="utf-8") as handle:
             captureText = handle.read()
         fields = capture_fields(captureText)
-        with open(os.path.join(REPO, GEOMETRY), encoding="utf-8") as handle:
+        with open(library_scripts.locate(GEOMETRY), encoding="utf-8") as handle:
             members = geometry_members(handle.read())
     except OSError:
         fields, members = None, None
@@ -194,7 +193,7 @@ def main():
         if path.startswith("Tests/"):
             continue
         try:
-            with open(os.path.join(REPO, path), encoding="utf-8",
+            with open(library_scripts.locate(path), encoding="utf-8",
                       errors="replace") as handle:
                 texts[path] = handle.read()
         except OSError:
