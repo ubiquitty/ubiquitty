@@ -177,7 +177,7 @@ extension TerminalWindowController {
         guard
             let renderer = TerminalSurface.makeRenderer(
                 configuration: Ubiquitty.Preferences.Effective.liveRenderConfiguration(),
-                systemTransparency: systemTransparency
+                systemTransparency: TerminalSurface.systemTransparency
             )
         else {
             return nil

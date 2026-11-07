@@ -30,7 +30,7 @@ matching fails here rather than in whatever the arm would have caught.
 ## Why it runs the real function rather than restating the rule
 
 A second copy of the table would agree with itself forever. The check extracts
-`ubq_renderer_arms` from the script and evaluates that text, with a stand-in `git`
+`ubq_renderer_arms` and `kit_swift_arm_reached` from their scripts and evaluates that text, with a stand-in `git`
 answering a fixture's file list, so what is measured is the code that ships.
 
 Three bounds:
@@ -51,8 +51,16 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import library_scripts  # noqa: E402 — the shaders and their headers are read from the libraries
 GATES = REPO / "Scripts" / "pre-push-gates.sh"
 FUNCTION = "ubq_renderer_arms"
+# The swift arm's selection is the kit's family function the selector calls.
+# The library-aware diff both call is the shared lib's.
+KIT_GATES = Path(library_scripts.locate("Scripts/pre-push-gates-kit.sh"))
+KIT_FUNCTION = "kit_swift_arm_reached"
+LIB_GATES = Path(library_scripts.locate("Scripts/pre-push-gates-lib.sh"))
+LIB_FUNCTION = "ubq_changed_with_libraries"
 
 # Each case: the tier, the changed files, and the arms that must come back.
 #
@@ -76,6 +84,12 @@ CASES = [
     ("quick", ["Source/UbiquittyKit/Swift/SnapshotRunner.swift"], ["swift"]),
     ("quick", ["Source/Core/App/SnapshotRequest.h"], ["portable", "swift"]),
     ("quick", ["Source/Platform/macOS/App/Application/AppDelegate.swift"], ["swift"]),
+    # The Kit's build modules hold the render kit's Swift flags and source
+    # lists, so an edit to either renders on the swift arm; Core's build
+    # modules do not reach the renderer's flags.
+    ("quick", ["Scripts/cmake/UbiquittyKit.cmake"], ["swift"]),
+    ("quick", ["Scripts/cmake/AppleSharedSwift.cmake"], ["swift"]),
+    ("quick", ["Scripts/cmake/UbiquittyCoreLibrary.cmake"], []),
     ("quick", ["Source/Platform/macOS/UITest/Swift/NativeTestContext.swift"], []),
     ("quick", ["Docs/note.md"], []),
     ("linux", ["Source/Core/Rendering/CellInstanceBuilder.cpp"], ["portable", "linux"]),
@@ -87,12 +101,16 @@ CASES = [
 
 
 def functionText():
-    """Returns the shipping text of the selector, or None when absent."""
-    if not GATES.is_file():
+    """Returns the shipping text of the selector and the function it calls, or None when either is absent."""
+    if not GATES.is_file() or not KIT_GATES.is_file() or not LIB_GATES.is_file():
         return None
-    text = GATES.read_text(errors="replace")
-    match = re.search(rf"^{FUNCTION}\(\) \{{.*?^\}}", text, re.S | re.M)
-    return match.group(0) if match else None
+    found = []
+    for path, name in ((LIB_GATES, LIB_FUNCTION), (KIT_GATES, KIT_FUNCTION), (GATES, FUNCTION)):
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}", path.read_text(errors="replace"), re.S | re.M)
+        if not match:
+            return None
+        found.append(match.group(0))
+    return "\n".join(found)
 
 
 def selectedArms(body, tier, changed, checkout=REPO):
@@ -111,7 +129,12 @@ def selectedArms(body, tier, changed, checkout=REPO):
         standIn.chmod(0o755)
         script = Path(directory) / "run.sh"
         script.write_text(f'export PATH="{directory}:$PATH"\n{body}\n{FUNCTION}\n')
-        environment = dict(os.environ, TIER=tier, UBQ_FAKE_CHANGED=" ".join(changed))
+        # The shaders are the Kit's and the headers they include Core's; an
+        # empty checkout stands for a tree holding neither, and the real
+        # checkout is its own library.
+        environment = dict(os.environ, TIER=tier, UBQ_FAKE_CHANGED=" ".join(changed),
+                           UBQ_CORE_ROOT=library_scripts.CORE_ROOT if checkout == REPO else str(checkout),
+                           UBQ_KIT_ROOT=library_scripts.KIT_ROOT if checkout == REPO else str(checkout))
         # From the checkout, as the gate runs it: the selector reads the shader's
         # includes off the tree.
         result = subprocess.run(["bash", str(script)], capture_output=True, text=True,

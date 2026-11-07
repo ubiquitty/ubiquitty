@@ -50,6 +50,9 @@ shutil.copyfile(os.environ["FETCH_SPARKLE_ARCHIVE"], arguments[arguments.index("
         curl.chmod(0o755)
         self.environment = os.environ | {
             "UBQ_BUILD_ROOT": str(self.root / "build"),
+            # The planted tree stands for the checkout and for the library whose
+            # build-root.sh it plants.
+            "UBIQUITTY_CORE_SOURCE_DIR": str(self.root),
             "FETCH_SPARKLE_ARCHIVE": str(self.archive),
             "FETCH_SPARKLE_EVENTS": str(self.events),
             "PATH": str(binary) + os.pathsep + os.environ.get("PATH", ""),

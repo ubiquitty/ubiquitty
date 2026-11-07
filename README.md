@@ -9,9 +9,23 @@
 
 **A terminal and multiplexer for humans and agents working together.**
 
+| You are building | Reach for | Repository |
+|---|---|---|
+| The Ubiquitty apps themselves | the macOS, iOS, Linux and web frontends | `ubiquitty` |
+| A terminal view to drop into a macOS or iOS app | UbiquittyKit's `TerminalSurface` (Metal) | [`ubiquitty-kit`](Libraries/ubiquitty-kit) |
+| A terminal view in a Linux app, or a software-rendered surface | the Vulkan, FreeType and software renderers and the GTK platform layer | [`ubiquitty-kit`](Libraries/ubiquitty-kit) |
+| A renderer drawing into a texture or layer your app owns | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | [`ubiquitty-kit`](Libraries/ubiquitty-kit) |
+| Your own UI that draws the terminal itself: a GPU UI toolkit, a game engine, or an editor with its own text system | libubiquitty's public C++ umbrella header and render model | [`ubiquitty-core`](Libraries/ubiquitty-core) |
+| The same from C++, linking Core in your own CMake graph | the C++ session facade and Core's headers | [`ubiquitty-core`](Libraries/ubiquitty-core) |
+| Persistent sessions, a session daemon, attach and reattach across machines | the multiplexer: `ubiquitty-host`, Sync, the `ubq` command and the agent | [`ubiquitty-core`](Libraries/ubiquitty-core) |
+
+Ubiquitty is three repositories. Each depends only on the ones below it:
+`ubiquitty` → `ubiquitty-kit` → `ubiquitty-core`. This is the top one: the apps.
+It carries the other two as submodules under `Libraries/`.
+
 ![A translucent Ubiquitty window over the desktop wallpaper, attached to a host session on a Linux machine and split in two panes: OpenCode answering in rich text, in proportional type with commands in monospace, beside a deployment monitor drawing a canary rollout's latency and error-rate graphs; the title bar names the host, hub, with its homelab tag, its badge counts one agent attached to the session, and the tabs show OpenCode, an idle Codex and a Claude Code waiting for a sign-in](Docs/images/opencode-proportional.png)
 
-*OpenCode, patched to write its answers as Ubiquitty [rich text blocks](Docs/rich-text.md)
+*OpenCode, patched to write its answers as Ubiquitty [rich text blocks](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/rich-text.md)
 (OSC 7404), beside a deployment monitor in a host session on a Linux machine. Its prose is set
 in proportional type, code stays in the grid, and each tab shows what its program is doing.
 The badge at the top right counts the agents attached to the same session: here one agent is
@@ -40,7 +54,7 @@ process and terminal state; each client draws its own view.
 | Advantage | What you get |
 |---|---|
 | **Terminal compatibility** | ECMA-48, DEC and VT behavior, plus modern extensions; every applicable case in our full-suite comparison passes. [Scope](#conformance). |
-| **Native rendering** | CoreText shaping, ligatures and color emoji on macOS. The Apple Metal renderer retains unchanged content and repaints changed regions. [Renderer](Docs/swift-renderer.md). |
+| **Native rendering** | CoreText shaping, ligatures and color emoji on macOS. The Apple Metal renderer retains unchanged content and repaints changed regions. [Renderer](https://github.com/ubiquitty/ubiquitty-kit/blob/main/Docs/swift-renderer.md). |
 | **Everyday macOS workflow** | Draggable tabs and split panes, the Beam command palette, prompt navigation, styled copy and clipboard history. |
 | **Accessibility** | VoiceOver access to terminal screen text on macOS and a GTK accessible-text interface on Linux. [Guide](Docs/guides/accessibility.md). |
 | **Persistent sessions** | Disconnect a client and reconnect to the same host-owned processes, screen and scrollback. |
@@ -74,7 +88,7 @@ downloads from clients built from source.
 | **Neovim client** | Lua client through the host attach bridge; snapshots and row deltas ([reference](Source/Platform/Neovim/README.md)) |
 
 The portable Core also builds independently as
-[`libUbiquittyCore`](Docs/libubiquittycore.md).
+[`libUbiquittyCore`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/libubiquittycore.md).
 
 ## Install
 
@@ -106,12 +120,15 @@ start.
 list each frontend's prerequisites and command. For the macOS app:
 
 ```sh
+git clone --recurse-submodules https://github.com/ubiquitty/ubiquitty.git
+cd ubiquitty
+git submodule update --init Libraries/ubiquitty-core Libraries/ubiquitty-kit
 ./Scripts/build-macos.sh          # the app, under the build root
 ./Scripts/install-macos.sh        # a release build, installed into /Applications
 ```
 
 A local macOS build also builds the static Linux hosts it bundles, with
-`./Scripts/build-host-linux.sh`, which needs Docker (OrbStack or Docker
+`./Libraries/ubiquitty-core/Scripts/build-host-linux.sh`, which needs Docker (OrbStack or Docker
 Desktop). On a Mac without Docker, `./Scripts/build-macos.sh --no-linux-hosts`
 or `UBIQUITTY_LINUX_HOSTS=0 ./Scripts/install-macos.sh` builds the app without
 them, and Connect then gives manual install instructions for a Linux server.
@@ -166,8 +183,8 @@ the daemon rather than requested from the agent:
   approve argument. Command-input policy uses allow/confirm/deny rules and an
   audit log; `--yes` answers a confirm decision only from a person's terminal.
 
-- [Agent token auth →](Docs/agent-token-auth.md)
-- [The who axis →](Docs/capability-origin.md)
+- [Agent token auth →](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/agent-token-auth.md)
+- [The who axis →](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/capability-origin.md)
 
 **A running shell can move without dying.** Share This Window hands the live PTY
 from the macOS app to `ubiquitty-host`; the app becomes a thin client of the
@@ -182,7 +199,7 @@ Computing glyphs and Powerline separators are drawn as geometry, so they meet
 without seams.
 The Apple renderer reuses unchanged grid pixels, shifts retained content during
 scrolling, and composes the cursor separately.
-[Renderer architecture](Docs/swift-renderer.md).
+[Renderer architecture](https://github.com/ubiquitty/ubiquitty-kit/blob/main/Docs/swift-renderer.md).
 
 **Broad escape-sequence coverage.** Beyond truecolor, OSC 8 links, styled
 underlines, ligatures, bracketed paste, and mouse modes, Ubiquitty covers the
@@ -191,13 +208,13 @@ vectors, tmux Control Mode (`-CC`) in the macOS app, DEC double-width /
 double-height lines, UAX #29 grapheme clustering, and the rarer corners of the
 DEC and ECMA-48 SGR surface.
 
-- [ECMA-48 conformance audit →](Docs/ecma48_conformance.md)
-- [Feature test matrix →](Docs/feature_test_matrix.md)
+- [ECMA-48 conformance audit →](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/ecma48_conformance.md)
+- [Feature test matrix →](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/feature_test_matrix.md)
 
 **Host effects have named capabilities.** Anything that can print
 bytes can set your title, read your clipboard, move your window, reprogram a
 key, or ask the terminal to open a file. Each of those side effects has an entry
-in one `Capability` vocabulary (`Source/PAL/Capability.h`). Policies are checked
+in one `Capability` vocabulary (`Libraries/ubiquitty-core/Source/PAL/Capability.h`). Policies are checked
 where the effect happens, not where the sequence parses. The verdict keys on **who
 drove it** — `Local`, `Agent`, or `Remote` — so a local program's OSC 52 read
 follows `[security] clipboard_read` (a prompt by default), an attached agent's
@@ -220,8 +237,8 @@ missing-policy defaults remain a security limitation.
 Consent grants access to a session; it does not serialize typing between clients
 or isolate commands in an operating-system sandbox.
 
-- [The who axis →](Docs/capability-origin.md)
-- [The host policy →](Docs/capability-host-policy.md)
+- [The who axis →](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/capability-origin.md)
+- [The host policy →](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/capability-host-policy.md)
 
 The capability model distinguishes exfiltration from observation. `DECRQCRA`
 can checksum cells a viewer never saw and
@@ -270,7 +287,7 @@ modem control, connection-triggered answerback and serial half-duplex are
 unsupported. DECRQM reports them as unrecognized. Transmit rate limiting is
 permanently reset.
 
-[Conformance decisions](Docs/conformance.md) link each behavior to its authority
+[Conformance decisions](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/conformance.md) link each behavior to its authority
 and Core regression tests.
 
 ## Benchmarks
@@ -288,12 +305,12 @@ Measure parser throughput, input latency, rendering, and energy separately;
 one number does not establish all four. Run measurements on a quiet machine
 with recorded hardware, versions, geometry, fonts, and workload.
 
-[The performance guide](Docs/benchmarks.md) covers the tools and measurement
+[The performance guide](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/benchmarks.md) covers the tools and measurement
 methods.
 
 ## Session synchronization
 
-The [synchronization specification](Docs/sync.md) defines how clients share
+The [synchronization specification](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/sync.md) defines how clients share
 authoritative host state. A checkpoint establishes terminal state; incremental
 updates carry changed rows, dictionaries, and state blocks. A client verifies
 the state digest before accepting an update. History travels in bounded ranges
@@ -412,7 +429,7 @@ terminal understands:
 It is a proof of concept. The client embeds Core and runs local PTY tabs; it does not attach to a
 `ubiquitty-host` session. It has been run against the simulator, not real hardware, and it has no mouse,
 wide characters or heavy and double box lines. It lives in its own repository; see
-[its README](https://github.com/ubiquitty/vt520/blob/main/README.md) for how to run it and its limits.
+[its README](https://github.com/yaglo/ubiquitty-vt520/blob/main/README.md) for how to run it and its limits.
 
 ### MS-DOS
 
@@ -425,7 +442,7 @@ over COM1.
 | <a href="Docs/images/dos-claude-80x25.png"><img src="Docs/images/dos-claude-80x25.png" width="440" alt="Claude Code answering &quot;What is the capital of France?&quot; on an 80x25 DOS text screen, on an emulated IBM 8513 VGA monitor"></a> | <a href="Docs/images/dos-mc-80x25.png"><img src="Docs/images/dos-mc-80x25.png" width="440" alt="Midnight Commander's blue two-panel file manager on the same DOS screen, with the F-key bar and the Ubiquitty tab bar"></a> |
 
 *Live sessions (`claude --model opus`, then `mc` in a second tab) in DOSBox-X at 80x25, on an emulated IBM 8513
-colour monitor through MyCRT ([the setup](https://github.com/ubiquitty/dos-mycrt)): CP437 and 16 colours. The mascot, bullets and chevron are glyphs loaded into the VGA
+colour monitor through MyCRT ([the setup](https://github.com/yaglo/ubiquitty-dos-mycrt)): CP437 and 16 colours. The mascot, bullets and chevron are glyphs loaded into the VGA
 font; the bottom row is the tab bar. Midnight Commander looks the way a DOS file manager is supposed to, because
 on this screen it is one.*
 
@@ -437,7 +454,7 @@ on this screen it is one.*
 - **The line** is a CRC-checked framed protocol that survives a noisy serial cable, and paces itself to 9600 baud if asked.
 
 It is a proof of concept, tested in DOSBox-X rather than on a real PC. See
-[Ubiquitty for DOS](https://github.com/ubiquitty/dos), its own repository.
+[Ubiquitty for DOS](https://github.com/yaglo/ubiquitty-dos), its own repository.
 
 ### Mac OS 9, again
 
@@ -445,7 +462,7 @@ MacTerm's Classic frontend left the repository on 2 June 2026, when Core moved t
 Retro68 couldn't follow. It is back as a thin client. All the terminal processing happens on the host:
 `ubiquitty-classic-host` runs the programs and Ubiquitty's Core, which parses their output and keeps the screen.
 The old machine only gets the finished screen, as characters and attributes, and draws it with QuickDraw; a small
-PowerPC program in [Ubiquitty Classic](https://github.com/ubiquitty/classic), its own repository, does that and sends the keys back.
+PowerPC program in [Ubiquitty Classic](https://github.com/yaglo/ubiquitty-classic), its own repository, does that and sends the keys back.
 
 <a href="Docs/images/macos9-claude-code.png"><img src="Docs/images/macos9-claude-code.png" width="720" alt="Claude Code on Opus in Ubiquitty Classic on Mac OS 9: a Platinum window titled with the session, MacTerm's tab strip with three tabs, Noir colours and Monaco 9, on the purple desktop"></a>
 
@@ -460,14 +477,14 @@ Mac OS 9 has no Unicode fonts, so the host decides how each glyph is drawn. Char
 bytes and draw in Monaco; everything else is rasterised on the host at the client's cell size and sent
 once as a small bitmap the client caches by id. Colour emoji go as RGBA. Only the cells that changed are sent,
 and keys come back as Mac virtual key codes, which the host maps to what the session expects. See
-[the host](https://github.com/ubiquitty/classic/blob/main/Source/Platform/ClassicHost/README.md) and [the client](https://github.com/ubiquitty/classic/blob/main/Clients/MacOS9/README.md).
+[the host](https://github.com/yaglo/ubiquitty-classic/blob/main/Source/Platform/ClassicHost/README.md) and [the client](https://github.com/yaglo/ubiquitty-classic/blob/main/Clients/MacOS9/README.md).
 
 ## What's in the box
 
 **Terminal engine** (portable Core, shared by every frontend)
 
 - [Conformance](#conformance): full-suite coverage of standard control-sequence
-  behavior and extensions. [Conformance decisions](Docs/conformance.md) document
+  behavior and extensions. [Conformance decisions](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/conformance.md) document
   the authorities and Core regression tests.
 - Hand-written Williams-style DEC/ANSI parser DFA — C0 and C1 controls, OSC,
   DCS, APC, PM, SOS. Identifies as a VT525-level terminal and implements the
@@ -521,8 +538,8 @@ and keys come back as Mac virtual key codes, which the host maps to what the ses
   Reads require a native drop; offers require a native gesture.
 - Text sizing: [OSC 66](https://sw.kovidgoyal.net/kitty/text-sizing-protocol/)
   supports scaled text and explicit cell widths. Ubiquitty also provides
-  [proportional text runs](Docs/proportional-text.md) and
-  [rich text blocks](Docs/rich-text.md).
+  [proportional text runs](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/proportional-text.md) and
+  [rich text blocks](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/rich-text.md).
 - Kitty color control: [OSC 21](https://sw.kovidgoyal.net/kitty/color-stack/)
   sets and queries palette, default, cursor and selection colors; OSC 30001 /
   30101 save and restore them.
@@ -535,7 +552,7 @@ and keys come back as Mac virtual key codes, which the host maps to what the ses
   [OSC 99](https://sw.kovidgoyal.net/kitty/desktop-notifications/) and urxvt's
   OSC 777, including chunked title/body messages, display occasions and
   support queries. OSC 99 icons, buttons, close requests and activation
-  reports are not implemented; [notification details](Docs/tab-status.md).
+  reports are not implemented; [notification details](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/tab-status.md).
 - iTerm2 extensions: [OSC 1337](https://iterm2.com/documentation-escape-codes.html)
   supports [inline images](https://iterm2.com/documentation-images.html),
   selected commands for marks, working directory, remote host, user variables
@@ -643,7 +660,7 @@ permission-controlled.
   status / wait / events / api) and the `terminal_*` tools of its MCP server
   (`ubq mcp`, JSON-RPC over stdio) come from one method registry.
   `-H [user@]host` drives a daemon on another machine over ssh. The manual is
-  [Docs/ubq.md](Docs/ubq.md).
+  [Docs/ubq.md](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/ubq.md).
 - The daemon enforces agent access. Agents need a capability token by default;
   tokens are scoped and can expire or be revoked. An agent attaching to a
   session a person occupies waits for that person's consent. Commands pass an
@@ -661,21 +678,21 @@ permission-controlled.
   serves newline-delimited JSON-RPC 2.0 on a local unix-domain socket, routed
   by the same method registry — `ping` / `initialize` / `list` / `describe` /
   `ls` / `focus` / `send-text` / `get-text` / `new-window` / `new-tab` /
-  `split` / `set-title` (see `Docs/control-socket.md`). It is off by default.
+  `split` / `set-title` (see [`Docs/control-socket.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/control-socket.md)). It is off by default.
   The socket is owner-only (0600) inside the 0700 `~/.ubiquitty` directory, the
   listener checks the connecting peer's uid, and an optional `[control] token`
   adds a shared secret. Typing, reading and opening go through the agent
   policy and audit log `ubq` uses.
 
 For conformance results, see [Conformance](#conformance) and
-`Docs/conformance.md`. `Docs/ecma48_conformance.md` and
-`Docs/ecma35_conformance.md` audit the control functions and character sets
-against the standards; `Docs/feature_test_matrix.md` is the showcase's fixture
+[`Docs/conformance.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/conformance.md). [`Docs/ecma48_conformance.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/ecma48_conformance.md) and
+[`Docs/ecma35_conformance.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/ecma35_conformance.md) audit the control functions and character sets
+against the standards; [`Docs/feature_test_matrix.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/feature_test_matrix.md) is the showcase's fixture
 inventory, not a conformance score. The sequences
 Ubiquitty adds to the standards (password input, fullscreen content, rich text
 blocks, pointer lock, sound reports, sound voices and downloadable samples,
 variable weight, emoji presentation, Tektronix bright pen) are specified in
-`Docs/extensions.md`.
+[`Docs/extensions.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/extensions.md).
 
 ## Setup (after cloning)
 
@@ -683,7 +700,7 @@ Install the repository's git hooks once per clone, so naming, formatting and
 module-boundary violations are caught at the commit rather than in CI:
 
 ```sh
-./Scripts/install-hooks.sh
+./Libraries/ubiquitty-core/Scripts/install-hooks.sh
 ```
 
 ## Building
@@ -697,9 +714,9 @@ the repository root.
 | [macOS](Docs/platform-builds.md#macos) | `./Scripts/build-macos.sh` |
 | [iOS / iPadOS](Docs/platform-builds.md#ios-and-ipados) | `./Scripts/build-ios.sh` |
 | [Linux GTK4 / Vulkan](Docs/platform-builds.md#linux-gtk4-and-vulkan) | `./Scripts/build-linux-gtk.sh` |
-| [Headless host](Docs/platform-builds.md#headless-host-and-ubq) | `./Scripts/build-host.sh` |
-| [ubq CLI / MCP](Docs/platform-builds.md#headless-host-and-ubq) | `./Scripts/build-agent.sh` |
-| [Static Linux host assets](Docs/platform-builds.md#static-linux-host-binaries) | `./Scripts/build-host-linux.sh` |
+| [Headless host](Docs/platform-builds.md#headless-host-and-ubq) | `./Libraries/ubiquitty-core/Scripts/build-host.sh` |
+| [ubq CLI / MCP](Docs/platform-builds.md#headless-host-and-ubq) | `./Libraries/ubiquitty-core/Scripts/build-agent.sh` |
+| [Static Linux host assets](Docs/platform-builds.md#static-linux-host-binaries) | `./Libraries/ubiquitty-core/Scripts/build-host-linux.sh` |
 | [Web / Wasm](Docs/platform-builds.md#web-and-webassembly) | `./Scripts/build-web.sh` |
 | [OpenBSD / NetBSD wscons](Docs/platform-builds.md#openbsd-and-netbsd-wscons) | CMake: `-DUBIQUITTY_FRONTEND=Wscons` |
 | [Emacs](Docs/platform-builds.md#emacs) | Build the host, then load or byte-compile the Elisp client |
@@ -725,41 +742,49 @@ explicit, freshly built binary; it does not discover an older installed app.
 ## Testing
 
 ```sh
-./Scripts/run-tests.sh                              # full host suite: CTest, then the shell stanzas
-./Scripts/run-tests.sh --list-stanzas               # the stanza names the filter accepts
-./Scripts/run-tests.sh test_display test_host_tools # run named stanzas only, without CTest
-./Scripts/run-tests.sh snapshots # every snapshot catalog this machine renders; the native arms need macOS
-./Scripts/run-coverage.sh       # the suite again with source-based line coverage
-python3 Tests/Snapshots/run.py --check-catalog # catalog/baseline integrity
-./Scripts/check-style.py        # every content gate on this branch's changes; --full for the whole tree
-./Scripts/check-acronyms.py     # WebKit/Cocoa naming lint (acronyms + abbreviations)
+./Libraries/ubiquitty-core/Scripts/run-tests.sh                # App CTest cases, then its shell stanzas
+./Libraries/ubiquitty-core/Scripts/run-tests.sh --list-stanzas # the stanza names the filter accepts
+./Libraries/ubiquitty-core/Scripts/run-tests.sh test_app_tools # one named stanza, without CTest
+./Libraries/ubiquitty-core/Scripts/run-coverage.sh   # Core tests with line coverage
+python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --check-catalog # catalog/baseline integrity
+./Libraries/ubiquitty-core/Scripts/check-style.py        # every content gate on this branch's changes; --full for the whole tree
+./Libraries/ubiquitty-core/Scripts/check-acronyms.py     # WebKit/Cocoa naming lint (acronyms + abbreviations)
 ```
 
-The hooks `./Scripts/install-hooks.sh` installs need Bash, Git and Python 3.
+Run the shared driver from the App checkout root. With external libraries or a
+gitless export, invoke the chosen Core checkout's `Scripts/run-tests.sh`, set
+`UBQ_TESTS_ROOT` to the App root and `UBQ_KIT_ROOT` to its chosen Kit. The driver
+uses the Core checkout that owns it.
+
+The hooks `./Libraries/ubiquitty-core/Scripts/install-hooks.sh` installs need Bash, Git and Python 3.
 `pre-commit` also checks staged C and C++ with clang-format 23 and staged shell
 scripts with shellcheck, and prints that a check was skipped when its tool is
-missing. `commit-msg` checks the message with `Scripts/check-slop.py`.
+missing. `commit-msg` checks the message with `Libraries/ubiquitty-core/Scripts/check-slop.py`.
 `pre-push` runs `Scripts/pre-push-gates.sh` at its default `quick` tier, which
 builds the host and the other targets whose sources the push changes, so it
 needs the build toolchain from the [platform build guide](Docs/platform-builds.md);
-its Linux compile runs only where `docker` is available. Its time follows the
+its Linux checks use a configured native host or the container route. Its time follows the
 push: on a 15-core Mac at four jobs, a push that reaches the iOS sources took
 76 minutes from a cold build root, 46 of them the iOS UI tests; the gates
 before those tests took 30 minutes cold and 19 warm.
 `UBIQUITTY_PREPUSH=lint git push` runs only the gates that need no build.
 
+Core’s engine tests and standalone consumer checks are documented in its
+[test guide](Libraries/ubiquitty-core/Tests/README.md). The shared CI batteries
+run the Core and App host suites separately.
+
 Stanza names and CTest case names are separate namespaces. Each
-`Tests/**/test_*.cpp` is a CTest case, such as `test_appruntime`, and the
+`Tests/**/test_*.cpp` is a CTest case, such as `test_web_font_inventory`, and the
 `run-tests.sh` filter never selects one. `ctest` needs a configured test tree;
 `run-tests.sh` configures this one on a full run, and the `cmake` line below
 configures it without running the suite. The test's build fixture builds the
 binaries a case needs:
 
 ```sh
-CTEST_BUILD_DIR="$(python3 Scripts/build_root.py .)/BuildHostTests/ctest"
+CTEST_BUILD_DIR="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)/BuildHostTests/ctest"
 cmake -S . -B "$CTEST_BUILD_DIR" -G Ninja -DUBIQUITTY_FRONTEND=Core -DUBIQUITTY_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
 ctest --test-dir "$CTEST_BUILD_DIR" -N                                   # list the cases
-ctest --test-dir "$CTEST_BUILD_DIR" -R '^test_appruntime$' --output-on-failure # run one case
+ctest --test-dir "$CTEST_BUILD_DIR" -R '^test_web_font_inventory$' --output-on-failure # run one case
 ```
 
 Under ctest the suite is two lanes: the C++ unit binaries, and the shell
@@ -770,15 +795,15 @@ below any run that left stanzas out, naming how many. A stanza that declined for
 want of a dependency reports as Skipped rather than as a pass.
 
 Build outputs live outside the checkout. Resolve their root with
-`export UBQ_BUILD_ROOT="$(python3 Scripts/build_root.py .)"`. macOS uses Xcode's
+`export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)"`. macOS uses Xcode's
 DerivedData; Linux uses `$XDG_CACHE_HOME/ubiquitty/build` (default
 `~/.cache/ubiquitty/build`), with a separate hashed directory per checkout.
 `UBQ_BUILD_ROOT` overrides the location on either platform.
 
-Host tests go under `$UBQ_BUILD_ROOT/BuildHostTests/`. `./Scripts/run-coverage.sh`
-writes its per-file summary to
+Host tests go under `$UBQ_BUILD_ROOT/BuildHostTests/`. Core’s
+`./Libraries/ubiquitty-core/Scripts/run-coverage.sh` writes its per-file summary to
 `$UBQ_BUILD_ROOT/BuildHostTests/coverage/summary.txt`.
-`./Scripts/check-coverage-floor.sh` reads that summary without running tests:
+`./Libraries/ubiquitty-core/Scripts/check-coverage-floor.sh` reads that summary without running tests:
 it fails when a file it lists, or the weighted total, is below its line-coverage
 floor or has no row, and refuses a summary older than any `Source/` `.cpp` file.
 
@@ -786,14 +811,23 @@ A Linux machine renders the portable catalog from the core snapshot binary,
 which it builds first:
 
 ```sh
-./Scripts/build-core-snapshot.sh
-python3 Tests/Snapshots/run.py --backend portable   # the cases every arm shares
+export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)"
+./Libraries/ubiquitty-core/Scripts/build-core-snapshot.sh &&
+python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend portable
+```
+
+On macOS, also build the app and run both native catalogs against that build:
+
+```sh
+./Scripts/build-macos.sh --no-linux-hosts &&
+python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend macos &&
+python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend swift
 ```
 
 ## Repository layout
 
 Every top-level entry under `Source/` and every directory at the repository root
-is listed; under `Source/Core/` only the larger modules are. [Architecture](Docs/architecture.md#source-tree)
+is listed; under `Source/Core/` only the larger modules are. [Architecture](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/architecture.md#source-tree)
 describes every Core module.
 
 ```
@@ -849,23 +883,23 @@ checkout are gitignored.
 
 ## More
 
-- [`Docs/README.md`](Docs/README.md) — every document, grouped as guides, reference,
+- [`Docs/README.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/README.md) — every document, grouped as guides, reference,
   protocols, design notes, and build and release.
 - **`Docs/guides/`** — end-user guides for the macOS app (getting started,
   appearance & fonts, tabs & splits, selection & clipboard, shell integration,
   inline images & escape sequences, tmux, remote sessions & AI agents,
   accessibility, session resurrection, terminal identity, keyboard shortcuts).
   Start at `Docs/guides/README.md`.
-- `Docs/benchmarks.md` — reproducible performance checks and measurement limits.
-- `Docs/measuring-a-core-change.md` — how to measure one so the number means
+- [`Docs/benchmarks.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/benchmarks.md) — reproducible performance checks and measurement limits.
+- [`Docs/measuring-a-core-change.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/measuring-a-core-change.md) — how to measure one so the number means
   something: isolation, controls, the ways a lane reads as a win and is not.
-- `Docs/ecma48_conformance.md` / `Docs/ecma35_conformance.md` — control-function
+- [`Docs/ecma48_conformance.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/ecma48_conformance.md) / [`Docs/ecma35_conformance.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/ecma35_conformance.md) — control-function
   and character-set conformance audited against the standards, control by control.
-- `Docs/feature_test_matrix.md` — the showcase's fixture inventory: each entry's
+- [`Docs/feature_test_matrix.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/feature_test_matrix.md) — the showcase's fixture inventory: each entry's
   snapshot or reply check.
-- `Docs/sync.md` — synchronization contracts; `Docs/sync-protocol.md` — transport framing; `Docs/session-model.md` — the Core-owned layout tree.
-- `Docs/architecture.md` — architecture & pipeline: layer map, the byte→pixel walkthrough, and the tree layout.
-- `Docs/coding-conventions.md` — coding conventions: naming, comments, ownership,
+- [`Docs/sync.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/sync.md) — synchronization contracts; [`Docs/sync-protocol.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/sync-protocol.md) — transport framing; [`Docs/session-model.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/session-model.md) — the Core-owned layout tree.
+- [`Docs/architecture.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/architecture.md) — architecture & pipeline: layer map, the byte→pixel walkthrough, and the tree layout.
+- [`Docs/coding-conventions.md`](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/coding-conventions.md) — coding conventions: naming, comments, ownership,
   error handling, and the gates that enforce them.
 - GitHub issues — feature backlog and open work.
 

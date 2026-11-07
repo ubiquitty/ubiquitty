@@ -20,7 +20,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import wire_tables  # noqa: E402 — the path above is what makes it importable
+import library_scripts  # noqa: F401, E402 — makes the libraries' modules importable
+import wire_tables  # noqa: E402
 
 
 def main():
@@ -39,8 +40,13 @@ def main():
         if "--print" in arguments:
             sys.stdout.write(text)
             continue
-        target = os.path.join(wire_tables.REPO, path)
-        current = wire_tables.read(path)
+        # The headers are Core's; the files written from them are this checkout's.
+        target = os.path.join(library_scripts.APP_ROOT, path)
+        try:
+            with open(target, encoding="utf-8", errors="replace") as handle:
+                current = handle.read()
+        except OSError:
+            current = ""
         if current == text:
             print("gen-wire-tables: %s is current" % path)
             continue

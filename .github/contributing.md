@@ -9,9 +9,9 @@ and a Linux/GTK frontend.
 
 ## Getting started
 
-Start with [`Docs/architecture.md`](../Docs/architecture.md) for the layer map
+Start with [`Core architecture`](../Libraries/ubiquitty-core/Docs/architecture.md) for the layer map
 and end-to-end pipeline, then read
-[`Docs/coding-conventions.md`](../Docs/coding-conventions.md) for how the code
+[`coding conventions`](../Libraries/ubiquitty-core/Docs/coding-conventions.md) for how the code
 is written. The one rule everything hangs on: **no
 platform-specific API (Cocoa/Metal/AppKit/GTK/Vulkan) in Core or any shared,
 host-tested translation unit** — platform code lives behind the PAL seam.
@@ -21,7 +21,7 @@ violation is caught before it reaches a pull request. Install them once per
 clone:
 
 ```sh
-Scripts/install-hooks.sh
+Libraries/ubiquitty-core/Scripts/install-hooks.sh
 ```
 
 ### Choose work
@@ -38,7 +38,7 @@ unless you have push access.
 Repository hooks run the checks shipped here. A clone can add checks of its
 own: the pre-commit and pre-push hooks also run every executable file in the
 clone's `.git/hooks.d/pre-commit/` and `.git/hooks.d/pre-push/`
-([`run-local-hooks.sh`](../Scripts/run-local-hooks.sh)), and a clone with none
+([`run-local-hooks.sh`](../Libraries/ubiquitty-core/Scripts/run-local-hooks.sh)), and a clone with none
 runs none. A maintainer can protect a shared checkout with
 `UBIQUITTY_SHARED_CHECKOUT`; ordinary clones are writable.
 
@@ -52,35 +52,35 @@ with it).
 
 ```sh
 ./Scripts/build-macos.sh      # the macOS app
-./Scripts/build-host.sh       # the headless ubiquitty-host daemon
+./Libraries/ubiquitty-core/Scripts/build-host.sh # the headless daemon
 ./Scripts/build-linux-gtk.sh  # the Linux GTK4 + Vulkan frontend (on Linux)
-./Scripts/run-tests.sh        # the host-buildable test suite (must pass)
-./Scripts/run-tests.sh --list-stanzas # the shell stanza names run-tests.sh accepts
-./Scripts/run-tests.sh test_host_tools # one stanza while iterating
-./Scripts/run-tests.sh snapshots # portable + native terminal snapshot catalogs (macOS)
-./Scripts/check-style.py      # every content gate on this branch's changes; --full for the whole tree
+./Libraries/ubiquitty-core/Scripts/run-tests.sh        # the App host test suite (must pass)
+./Libraries/ubiquitty-core/Scripts/run-tests.sh --list-stanzas # the shell stanza names run-tests.sh accepts
+./Libraries/ubiquitty-core/Scripts/run-tests.sh test_app_tools # one stanza while iterating
+python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --check-catalog
+./Libraries/ubiquitty-core/Scripts/check-style.py      # every content gate on this branch's changes; --full for the whole tree
 ```
 
-A C++ unit test such as `Tests/Core/VT/test_vt100_cursor.cpp` is a CTest case,
+A C++ unit test such as `Tests/Platform/test_web_font_inventory.cpp` is a CTest case,
 not a stanza, so `run-tests.sh` does not select it by name. Configure the test
 tree once, list its cases, and run one by exact name:
 
 ```sh
-CTEST_BUILD_DIR="$(python3 Scripts/build_root.py .)/BuildHostTests/ctest"
+CTEST_BUILD_DIR="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)/BuildHostTests/ctest"
 cmake -S . -B "$CTEST_BUILD_DIR" -G Ninja -DUBIQUITTY_FRONTEND=Core -DUBIQUITTY_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
 ctest --test-dir "$CTEST_BUILD_DIR" -N
-ctest --test-dir "$CTEST_BUILD_DIR" -R '^test_vt100_cursor$' --output-on-failure
+ctest --test-dir "$CTEST_BUILD_DIR" -R '^test_web_font_inventory$' --output-on-failure
 ```
 
 Build outputs live outside the checkout. Resolve their root with
-`python3 Scripts/build_root.py .`, or set `UBQ_BUILD_ROOT` explicitly.
+`python3 Libraries/ubiquitty-core/Scripts/build_root.py .`, or set `UBQ_BUILD_ROOT` explicitly.
 See the [platform build guide](../Docs/platform-builds.md) for per-platform
 prerequisites and output paths, and [building and
 releasing](../Docs/building-and-releasing.md) for signing and packaging.
 
 A change is ready when `run-tests.sh` and `check-style.py` both pass, relevant
 snapshot catalogs are green, and the affected frontends build clean. Follow the
-[snapshot workflow](../Tests/Snapshots/README.md) when fixing rendering bugs,
+[snapshot workflow](../Libraries/ubiquitty-core/Tests/Snapshots/README.md) when fixing rendering bugs,
 adding visual cases, or introducing renderer features; baseline replacement is
 a reviewed part of the code change, never a way to silence a mismatch. Hosted
 CI runs the preflight checks and the secret scan. The maintainers run the test
@@ -91,13 +91,13 @@ before every landing.
 
 New code meets all three simultaneously: **WebKit C++ guidelines**, **Safe C++
 (`CheckedPtr`/`CheckedRef`)**, and **Cocoa/Swift Foundation naming**. See
-[`Docs/coding-conventions.md`](../Docs/coding-conventions.md), the reference
+[`coding conventions`](../Libraries/ubiquitty-core/Docs/coding-conventions.md), the reference
 every pull request is reviewed against. The codebase is
 `-fno-exceptions -fno-rtti`. Names spell words out
 (`inputEncoding`, not `inputEnc`); acronyms are ALL-CAPS (`UTF8`). Comments
 state present-tense invariants, not history.
 
-`Scripts/check-style.py` enforces formatting (clang-format), the module-boundary
+`Libraries/ubiquitty-core/Scripts/check-style.py` enforces formatting (clang-format), the module-boundary
 invariants (`check-boundaries.py`), and the naming lints — run it before opening
 a PR.
 
@@ -115,8 +115,8 @@ a PR.
   what landed on `main` meanwhile.
 - A commit that removes a line landed in the last two weeks by someone else's
   commit names that commit (hash or subject) and says why. The commit-msg hook
-  and `Scripts/check-stale-landing.py` enforce it.
-- Maintainers merge with `Scripts/merge-pr.sh <number>`: it refuses a PR not
+  and `Libraries/ubiquitty-core/Scripts/check-stale-landing.py` enforce it.
+- Maintainers merge with `Libraries/ubiquitty-core/Scripts/merge-pr.sh <number>`: it refuses a PR not
   rebased onto the current tip, runs the stale-landing check, records it as the
   `stale-landing` commit status, and rebase-merges.
 
@@ -175,7 +175,7 @@ trailer, if you add one out of habit, is neither needed nor a substitute.
 
 Follow the destination file's distribution license. Original files use
 `SPDX-License-Identifier: Apache-2.0`; [the licensing guide](../Docs/licensing.md)
-names the two exceptions, and `Scripts/check-licenses.py` fails a header that
+names the two exceptions, and `Libraries/ubiquitty-core/Scripts/check-licenses.py` fails a header that
 disagrees with `license-scope.json`.
 Third-party material and the Emacs client keep their own identifiers and
 notices. Do not change a file's identifier merely because your contribution

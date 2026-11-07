@@ -44,7 +44,7 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import library_scripts  # noqa: F401 — makes the libraries' modules importable
 import gate_report  # noqa: E402
 
 GATE = "check-assertions-against-magic-bounds"
@@ -106,21 +106,19 @@ def scan(root):
     """
     suspects = []
     floors = 0
-    base = Path(root)
-    if not base.is_dir():
-        return suspects, floors
-    for path in sorted(base.rglob("*")):
-        if path.suffix not in (".mm", ".swift", ".m"):
-            continue
-        for number, line in enumerate(path.read_text().splitlines(), 1):
-            if FLOOR.search(line):
-                floors += 1
-            if not SUSPECT.search(line):
+    for base in map(Path, library_scripts.directories(root)):
+        for path in sorted(base.rglob("*")):
+            if path.suffix not in (".mm", ".swift", ".m"):
                 continue
-            stripped = line.strip()
-            if isExempt(path, stripped):
-                continue
-            suspects.append(f"{path}:{number}: {stripped[:110]}")
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                if FLOOR.search(line):
+                    floors += 1
+                if not SUSPECT.search(line):
+                    continue
+                stripped = line.strip()
+                if isExempt(path, stripped):
+                    continue
+                suspects.append(f"{path}:{number}: {stripped[:110]}")
     return suspects, floors
 
 
@@ -150,17 +148,15 @@ def exemptIsLive(roots):
     """
     live = set()
     for root in roots:
-        base = Path(root)
-        if not base.is_dir():
-            continue
-        for path in base.rglob("*"):
-            if path.suffix not in (".mm", ".swift", ".m"):
-                continue
-            for line in path.read_text().splitlines():
-                for key in EXEMPT:
-                    keyPath, _, fragment = key.partition(":")
-                    if keyPath in str(path) and fragment in line:
-                        live.add(key)
+        for base in map(Path, library_scripts.directories(root)):
+            for path in base.rglob("*"):
+                if path.suffix not in (".mm", ".swift", ".m"):
+                    continue
+                for line in path.read_text().splitlines():
+                    for key in EXEMPT:
+                        keyPath, _, fragment = key.partition(":")
+                        if keyPath in str(path) and fragment in line:
+                            live.add(key)
     return live
 
 
@@ -210,7 +206,7 @@ def main():
         found, floorCount = scan(root)
         suspects += found
         floors += floorCount
-        scanned += 1 if Path(root).is_dir() else 0
+        scanned += 1 if library_scripts.directories(root) else 0
     if scanned == 0:
         print(f"{GATE}: SKIPPED — none of the scanned roots are in this tree", file=sys.stderr)
         return 0

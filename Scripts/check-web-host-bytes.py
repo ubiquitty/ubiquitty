@@ -38,7 +38,8 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import gate_report
+import library_scripts  # noqa: F401, E402 — makes the libraries' modules importable
+import gate_report  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))

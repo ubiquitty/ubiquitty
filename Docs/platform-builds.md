@@ -8,7 +8,7 @@ the scripts resolve a separate directory for each checkout. Set it explicitly
 when following the output paths below:
 
 ```sh
-export UBQ_BUILD_ROOT="$(python3 Scripts/build_root.py .)"
+export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)"
 export UBQ_BUILD_JOBS=4
 export CMAKE_BUILD_PARALLEL_LEVEL="$UBQ_BUILD_JOBS"
 ```
@@ -23,8 +23,8 @@ Do not run timing-sensitive tests alongside another build.
   the native headless and Linux scripts can also use Make.
 - C++23 and a standard library with `std::expected`: GCC 14+ or Clang 19+
   for non-Apple native builds. Apple builds use Xcode's toolchain. The compiler
-  and library feature checks live in `Scripts/cmake/ToolchainFloor.cmake` and
-  `Source/Base/ToolchainFloor.h`.
+  and library feature checks live in `Libraries/ubiquitty-core/Scripts/cmake/ToolchainFloor.cmake` and
+  `Libraries/ubiquitty-core/Source/Base/ToolchainFloor.h`.
 - Set `CC` and `CXX` before configuring if the system default is older. For
   example, after installing GCC 14, use `CC=gcc-14 CXX=g++-14`. Choose a fresh
   build directory when switching compilers; CMake caches the compiler.
@@ -107,7 +107,7 @@ Optional X11/XFixes or Wayland client/protocol/scanner packages enable their
 respective pointer-lock backends.
 
 ```sh
-./Scripts/check-linux-build-prerequisites.sh
+./Libraries/ubiquitty-kit/Scripts/check-linux-build-prerequisites.sh
 ./Scripts/build-linux-gtk.sh
 ./Scripts/build-linux-gtk.sh Release
 "$UBQ_BUILD_ROOT/linux/ubiquitty-linux"
@@ -140,14 +140,15 @@ and network access for its dependency build. The `ubq` build does not build
 that QUIC dependency stack.
 
 ```sh
-./Scripts/build-host.sh
-./Scripts/build-agent.sh
+./Libraries/ubiquitty-core/Scripts/build-host.sh
+./Libraries/ubiquitty-core/Scripts/build-agent.sh
 ```
 
 Both default to Release; each accepts `--debug`. The executables are
 `$UBQ_BUILD_ROOT/host/ubiquitty-host` and `$UBQ_BUILD_ROOT/agent/ubq`.
 Building does not install or start a daemon. See
-[host operation](host-management.md) and the [CLI reference](ubq.md).
+[host operation](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/host-management.md)
+and the [CLI reference](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/ubq.md).
 
 The Linux local-handover admission gate needs headers exposing `SO_PEERPIDFD`
 and a kernel implementing it (Linux 6.5 or a backport). A build or kernel without
@@ -166,8 +167,8 @@ its configured emulation; the script builds dependencies inside its pinned
 Linux container.
 
 ```sh
-./Scripts/build-host-linux.sh          # x86_64 and arm64
-./Scripts/build-host-linux.sh arm64    # one architecture
+./Libraries/ubiquitty-core/Scripts/build-host-linux.sh          # x86_64 and arm64
+./Libraries/ubiquitty-core/Scripts/build-host-linux.sh arm64    # one architecture
 ```
 
 Outputs are `$UBQ_BUILD_ROOT/host-cross/ubiquitty-host-linux-x86_64` and
@@ -193,7 +194,7 @@ The browser files, fonts, `ubiquitty.js`, and `ubiquitty.wasm` are staged in
 and builds the `ubiquitty-web` target. It does not require a native GUI SDK.
 
 For the standalone Core's Wasm consumer under Node, run
-`./Scripts/wasm-smoke.sh`; it builds in `$UBQ_BUILD_ROOT/wasm`.
+`./Libraries/ubiquitty-core/Scripts/wasm-smoke.sh`; it builds in `$UBQ_BUILD_ROOT/wasm`.
 These scripts report a skip when required tools are missing. A successful
 shell exit after a skip is not evidence that the Wasm artifact was built.
 
@@ -278,9 +279,9 @@ cmake --build "$UBQ_BUILD_ROOT/core" \
 Link the CMake target `ubiquitty-core` or the session facade
 `ubiquitty-kit`, not one archive in isolation; the targets carry the model,
 behavior, and backend dependencies. See the
-[Core embedding reference](libubiquittycore.md) and
-[UbiquittyKit API](ubiquittykit-api.md).
+[Core embedding reference](https://github.com/ubiquitty/ubiquitty-core/blob/main/Docs/libubiquittycore.md)
+and [UbiquittyKit API](https://github.com/ubiquitty/ubiquitty-kit/blob/main/Docs/ubiquittykit-api.md).
 
 The separate `ubiquitty-snapshot` target is the portable render tool;
-`./Scripts/build-core-snapshot.sh` builds it for the
-[snapshot test catalog](../Tests/Snapshots/README.md).
+`./Libraries/ubiquitty-core/Scripts/build-core-snapshot.sh` builds it for the
+[snapshot test catalog](https://github.com/ubiquitty/ubiquitty-core/blob/main/Tests/Snapshots/README.md).

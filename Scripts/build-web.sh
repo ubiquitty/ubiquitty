@@ -19,9 +19,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
+# shellcheck source=Scripts/ubq-roots.sh
+. "$CORE_ROOT/Scripts/ubq-roots.sh"
 BUILD="$UBQ_BUILD_ROOT/web"
 STAGE="$UBQ_BUILD_ROOT/web-dist"
 
@@ -56,7 +61,7 @@ fi
 # Ninja, explicitly, because emcmake defaults to Unix Makefiles and every other
 # build directory in the tree is Ninja.
 #
-# run-tests.sh sweeps every build/*/CMakeCache.txt through
+# Core's run-tests.sh sweeps every build/*/CMakeCache.txt through
 # ubq_reset_on_generator_change and removes any directory whose generator does
 # not match, so that a stanza adding a build directory inherits the check rather
 # than needing an edit there. Nothing in that file owns build/web, so a build
@@ -68,6 +73,7 @@ echo "build-web: configuring for wasm32 ..." >&2
 # AWS-LC underneath, and a wasm target has neither. A browser reaches a host
 # through the page's socket, which is the web frontend's own transport.
 emcmake cmake -S "$ROOT" -B "$BUILD" -G Ninja \
+    "-DUBIQUITTY_CORE_SOURCE_DIR=$CORE_ROOT" "-DUBIQUITTY_KIT_SOURCE_DIR=$KIT_ROOT" \
     -DUBIQUITTY_FRONTEND=Core -DUBIQUITTY_QUIC=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
 
 echo "build-web: building ..." >&2
@@ -164,8 +170,8 @@ cp "$ROOT/Source/Platform/Web/index.html" "$ROOT/Source/Platform/Web/terminal.js
 cp "$ROOT/Source/Platform/Web/workspace.html" "$ROOT/Source/Platform/Web/workspace.css"    "$ROOT/Source/Platform/Web/workspace.js" "$ROOT/Source/Platform/Web/workspace-layout.js" "$STAGE/"
 cp "$ROOT/Source/Platform/Web/workspace-search.js" "$STAGE/"
 mkdir -p "$STAGE/phosphor" "$STAGE/process-icons"
-cp "$ROOT/Resources/phosphor/Phosphor.ttf" "$ROOT/Resources/phosphor/catalog.json" "$ROOT/Resources/phosphor/LICENSE" "$STAGE/phosphor/"
-cp "$ROOT"/Resources/process-icons/* "$STAGE/process-icons/"
+cp "$KIT_ROOT/Resources/phosphor/Phosphor.ttf" "$KIT_ROOT/Resources/phosphor/catalog.json" "$KIT_ROOT/Resources/phosphor/LICENSE" "$STAGE/phosphor/"
+cp "$CORE_ROOT"/Resources/process-icons/* "$STAGE/process-icons/"
 python3 - "$STAGE/process-icons" <<'PYICONS'
 import json, pathlib, sys
 icons = pathlib.Path(sys.argv[1])
@@ -183,22 +189,22 @@ mkdir -p "$STAGE/fonts"
 # looks for a file whose name has one character from {w,g,h,t} there, finds
 # none, and passes the pattern through — which happens to work here and would
 # stop working the moment such a file existed.
-cp "$ROOT/Resources/fonts/JetBrainsMono[wght].ttf" \
-   "$ROOT/Resources/fonts/JetBrainsMono-Italic[wght].ttf" "$STAGE/fonts/"
+cp "$CORE_ROOT/Resources/fonts/JetBrainsMono[wght].ttf" \
+   "$CORE_ROOT/Resources/fonts/JetBrainsMono-Italic[wght].ttf" "$STAGE/fonts/"
 # The bundled symbol/Nerd-font fallback, as macOS and Linux ship it. Without
 # this the page's `symbol_fallback` route
 # names a family the page never served, and `validateFamily` declines every
 # route to it — the gap this stage exists to close degrades right back to
 # Unifont on every machine, not just the ones missing the font locally.
-cp "$ROOT/Resources/fonts/SymbolsNerdFontMono-Regular.ttf" "$STAGE/fonts/"
+cp "$CORE_ROOT/Resources/fonts/SymbolsNerdFontMono-Regular.ttf" "$STAGE/fonts/"
 # Serving a font redistributes it, and its license has to travel with it: OFL
 # section 2 and MIT both require the notice in every copy. The stage carries
 # the same notice set every other package does, under licenses/, and is
 # checked against the inventory the way a bundle is. The folder is rebuilt so a
 # notice the inventory dropped does not linger from an earlier stage.
 rm -rf "$STAGE/licenses"
-python3 "$ROOT/Scripts/license_notices.py" --source "$ROOT" --copy "$STAGE/licenses"
-if ! python3 "$ROOT/Scripts/license_notices.py" --source "$ROOT" --verify "$STAGE/licenses"; then
+python3 "$CORE_ROOT/Scripts/license_notices.py" --source "$ROOT" --core "$CORE_ROOT" --kit "$KIT_ROOT" --copy "$STAGE/licenses"
+if ! python3 "$CORE_ROOT/Scripts/license_notices.py" --source "$ROOT" --core "$CORE_ROOT" --kit "$KIT_ROOT" --verify "$STAGE/licenses"; then
     echo "build-web: FAIL — the staged licenses/ does not match the inventory's notices." >&2
     exit 1
 fi
@@ -234,7 +240,7 @@ fi
 # The stage is a copy no build step refreshes, so the stanzas that drive it ask
 # this stamp whether the bytes it was staged from are still the tree's.
 # shellcheck source=Scripts/build-provenance.sh
-source "$ROOT/Scripts/build-provenance.sh"
+source "$CORE_ROOT/Scripts/build-provenance.sh"
 build_provenance_stamp "$ROOT" "$BUILD"
 echo "build-web: staged $STAGE" >&2
 

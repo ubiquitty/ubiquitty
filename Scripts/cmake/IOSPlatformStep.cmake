@@ -20,6 +20,8 @@
 # answer.
 #
 #   cmake -DSTEP=<ssh|shaders|icon|stage> -DSOURCE_DIR=<checkout>
+#         -DCORE_SOURCE_DIR=<ubiquitty-core checkout>
+#         -DKIT_SOURCE_DIR=<ubiquitty-kit checkout>
 #         -DBINARY_DIR=<build tree> -DIOS_MIN=<deployment target>
 #         [-DPLATFORM=<iphoneos|iphonesimulator>] [-DPER_PLATFORM=ON]
 #         [-DBUNDLE=<app bundle>] -P IOSPlatformStep.cmake
@@ -30,7 +32,7 @@
 # says it is current.
 #
 
-foreach(_required STEP SOURCE_DIR BINARY_DIR IOS_MIN)
+foreach(_required STEP SOURCE_DIR CORE_SOURCE_DIR KIT_SOURCE_DIR BINARY_DIR IOS_MIN)
     if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
         message(FATAL_ERROR "IOSPlatformStep.cmake needs -D${_required}=...")
     endif()
@@ -143,11 +145,13 @@ if(STEP STREQUAL "ssh")
 elseif(STEP STREQUAL "shaders")
     # The shaders the renderer loads, compiled for this SDK. Same source as the
     # macOS arm: a shader is not platform code, and a second copy would be a
-    # second renderer by another route.
+    # second renderer by another route. It includes Core's Tek raster by its
+    # path under Core's Source root.
     set(_air "${_outputDirectory}/UBShaders.air")
     ubiquitty_ios_run("metal"
         xcrun -sdk "${PLATFORM}" metal ${_metalVersionFlag}
-        -c "${SOURCE_DIR}/Source/UbiquittyRenderKit/UBShaders.metal"
+        -I "${CORE_SOURCE_DIR}/Source"
+        -c "${KIT_SOURCE_DIR}/Source/UbiquittyRenderKit/UBShaders.metal"
         -o "${_air}")
     ubiquitty_ios_run("metallib"
         xcrun -sdk "${PLATFORM}" metallib "${_air}" -o "${_metalLibrary}")

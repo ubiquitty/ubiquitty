@@ -324,7 +324,7 @@ enum WindowGroundScenarios {
 
                 let saved = t.configureAppending("[appearance]\nbackground_opacity = 0.5\n")
                 defer {
-                    TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                    TerminalSurface.systemTransparencyOverrideForTesting = nil
                     t.restoreConfiguration(saved)
                     TerminalWindowController.applyBackgroundEffectsToOpenWindows()
                 }
@@ -334,7 +334,7 @@ enum WindowGroundScenarios {
                 // The control: the switch moving with nobody announcing it
                 // moves nothing, so whatever the post below changes came from
                 // the post.
-                TerminalWindowController.systemTransparencyOverrideForTesting = .Reduced
+                TerminalSurface.systemTransparencyOverrideForTesting = .Reduced
                 t.pump(0.2)
                 t.expect(!window.isOpaque, desc: "an unannounced switch leaves the open window's ground where it was")
 
@@ -345,7 +345,7 @@ enum WindowGroundScenarios {
                 t.pump(0.3)
                 t.expect(window.isOpaque, desc: "the switch moving re-realizes the ground on a window already open")
 
-                TerminalWindowController.systemTransparencyOverrideForTesting = nil
+                TerminalSurface.systemTransparencyOverrideForTesting = nil
                 NSWorkspace.shared.notificationCenter.post(
                     name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
                     object: NSWorkspace.shared

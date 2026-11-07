@@ -26,13 +26,18 @@ non-blank check passes; and a single-frame tier never enters the path at all.
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "Tests/Snapshots"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import library_scripts  # noqa: E402 — the snapshot tier is Core's and is found through its root
+
+# The snapshot tier's runner is Core's, and its goldens are spread over the
+# repositories by file, so each golden is found in the checkout that holds it.
+sys.path.insert(0, str(pathlib.Path(library_scripts.locate("Tests/Snapshots/run.py")).parent))
 from run import read_png_rgb  # noqa: E402 — the tier's own decoder, one spelling
 
 # The macOS native tier is the one that renders every frame of a frames case;
 # the unifont tier holds a frames case's first frame only, so its directory
 # has no typed half to pair with and is not checked here.
-GOLDEN_ROOT = pathlib.Path(__file__).resolve().parent.parent / "Tests/Snapshots/golden"
+GOLDEN_ROOT = pathlib.Path("Tests/Snapshots/golden")
 GOLDENS = [GOLDEN_ROOT / "native/coretext"]
 
 # Each pair is two goldens that must be byte-identical because they hold
@@ -123,7 +128,7 @@ def main():
 def check_tier(GOLDEN):
     failures = []
     for whole_name, typed_name in PAIRS:
-        whole, typed = GOLDEN / whole_name, GOLDEN / typed_name
+        whole, typed = (pathlib.Path(library_scripts.locate(str(GOLDEN / name))) for name in (whole_name, typed_name))
         missing = [p.name for p in (whole, typed) if not p.is_file()]
         if missing:
             # A missing half is not an absent check, it is an unnoticed one:
@@ -136,7 +141,7 @@ def check_tier(GOLDEN):
             )
 
     for first_name, second_name, grid in CURSOR_PAIRS:
-        first, second = GOLDEN / first_name, GOLDEN / second_name
+        first, second = (pathlib.Path(library_scripts.locate(str(GOLDEN / name))) for name in (first_name, second_name))
         missing = [p.name for p in (first, second) if not p.is_file()]
         if missing:
             failures.append(f"{', '.join(missing)}: golden missing, so the cursor pair compared nothing")

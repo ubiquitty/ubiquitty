@@ -20,9 +20,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The libraries this repository carries; build-root.sh and ubq_roots.py are Core's.
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 
 # What a stand-down leaves uncovered, sized against the branch.
 #
@@ -39,11 +42,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # attributes to this branch every file someone else moved since it forked.
 uncoveredByASkip()
 {
-    local base
-    base="$(git -C "$ROOT" merge-base HEAD origin/main 2>/dev/null)" || return 0
-    [ -n "$base" ] || return 0
-    git -C "$ROOT" diff --name-only "$base"...HEAD -- \
-        Source/Platform/Linux Source/Core 2>/dev/null
+    # A library mount that moved is read as the files between its pins.
+    (cd "$ROOT" && python3 "$CORE_ROOT/Scripts/ubq_roots.py" changed origin/main \
+        Source/Platform/Linux Source/Core) 2>/dev/null || return 0
 }
 
 reportSkip()
@@ -140,7 +141,7 @@ trap 'rm -f "$buildInputs"' EXIT
 # binary compiles, the second which headers they reached. Without the second the
 # header population is "everything under Source/", which is not derived from
 # anything and refuses permanently on a header no Linux unit includes.
-"$ROOT/Scripts/run-linux.sh" sh -c \
+UBIQUITTY_LINUX_ROOT="$ROOT" "$CORE_ROOT/Scripts/run-linux.sh" sh -c \
     'ninja -C build/linux >/dev/null 2>&1; ninja -C build/linux -t inputs ubiquitty-linux 2>/dev/null; ninja -C build/linux -t deps 2>/dev/null' \
     > "$buildInputs" 2>/dev/null || true
 
@@ -257,7 +258,7 @@ fi
 # Every mode runs in ONE container: each invocation is several seconds of
 # startup, and thirty-three of those is the difference between a gate someone
 # runs and one they do not.
-report="$("$ROOT/Scripts/run-linux.sh" xvfb-run -a sh -c '
+report="$(UBIQUITTY_LINUX_ROOT="$ROOT" "$CORE_ROOT/Scripts/run-linux.sh" xvfb-run -a sh -c '
     for mode in '"$(echo "$modes" | tr "\n" " ")"'; do
         output=$(./build/linux/ubiquitty-linux --smoke-"$mode" 2>&1)
         code=$?

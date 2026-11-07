@@ -9,15 +9,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 APP="$UBQ_BUILD_ROOT/ios-iphonesimulator/Ubiquitty.app"
 EXECUTABLE="$APP/Ubiquitty"
 # The device this checkout owns, booted for this run and shut down when it
 # ends; see Scripts/ios-simulator.sh. The snapshot harness renders many cases
 # through this shim in one run and sets UBQ_IOS_KEEP_BOOTED for the batch.
 # shellcheck source=Scripts/ios-simulator.sh
-. "$ROOT/Scripts/ios-simulator.sh"
+. "$KIT_ROOT/Scripts/ios-simulator.sh"
 BUNDLE_ID="org.ubiquitty.Ubiquitty"
 
 if [ "${1:-}" = "--print-render-binary" ]; then

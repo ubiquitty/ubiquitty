@@ -1,1 +1,0 @@
-# No known snapshot failures are waived for this backend.

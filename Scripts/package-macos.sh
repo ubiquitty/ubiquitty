@@ -22,9 +22,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 APP="${1:-$UBQ_BUILD_ROOT/macos/Source/Platform/macOS/Ubiquitty.app}"
 OUT="$UBQ_BUILD_ROOT/share"
 STAGE="$OUT/Ubiquitty"
@@ -78,7 +81,7 @@ EOF
 
 # Third-party license texts travel with the distribution (redistribution
 # compliance): the project notice + the per-dependency texts ride beside the .app.
-python3 "$ROOT/Scripts/license_notices.py" --source "$ROOT" --copy "$STAGE"
+python3 "$CORE_ROOT/Scripts/license_notices.py" --source "$ROOT" --core "$CORE_ROOT" --kit "$KIT_ROOT" --copy "$STAGE"
 
 ditto -c -k --keepParent "$STAGE" "$ZIP"
 echo "Packaged: $ZIP ($(du -h "$ZIP" | cut -f1))"

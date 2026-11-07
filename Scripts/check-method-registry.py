@@ -39,6 +39,8 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import library_scripts  # noqa: E402 — the registry and the agent are Core's, the control host the app's
 GATE = "check-method-registry"
 
 REGISTRY = "Source/Core/Protocol/Control/MethodRegistry.cpp"
@@ -431,7 +433,7 @@ def selftest(verbose):
 
 
 def read(path):
-    with open(os.path.join(ROOT, path), encoding="utf-8") as handle:
+    with open(library_scripts.locate(path), encoding="utf-8") as handle:
         return handle.read()
 
 

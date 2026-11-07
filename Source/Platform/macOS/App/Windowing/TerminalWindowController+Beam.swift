@@ -1,13 +1,14 @@
 // Copyright (C) 2026 Stanislav Yaglo
 // SPDX-License-Identifier: Apache-2.0
 
-// TerminalWindowController+Beam.swift — the command palette, as the Kit
-// reaches it.
+// TerminalWindowController+Beam.swift — the command palette, as this window
+// summons it.
 //
-// The palette is an overlay only a shell has, so it arrives as closures rather
-// than as a dependency the Kit could not satisfy on its own, the call-in the
-// paste-push panel already takes. What the Kit supplies is the window and the
-// live theme, both read off the pane the user is looking at.
+// The palette is an overlay only a shell has, so it arrives as the Kit's
+// ``TerminalSurface/beamPresenter`` closures rather than as a dependency the
+// Kit could not satisfy on its own, the call-in the paste-push panel already
+// takes. What the window supplies is itself and the live theme, both read off
+// the pane the user is looking at.
 
 import AppKit
 internal import UbiquittyCore
@@ -22,47 +23,6 @@ package struct BeamPaneDestination {
         self.title = title
         self.paneID = paneID
         self.isCurrent = isCurrent
-    }
-}
-
-/// A shell's command palette, as the Kit reaches it.
-///
-/// Closures rather than a protocol: the shell that fills these is in another
-/// module, and the Kit needs only to call them.
-public struct BeamPresenter {
-    /// Summons the palette over a window, or dismisses the one already up.
-    ///
-    /// - Parameters:
-    ///   - window: The window the overlay covers.
-    ///   - foreground: The live theme's foreground.
-    ///   - background: The live theme's background.
-    ///   - accent: The live theme's accent.
-    ///   - cursor: The live theme's cursor colour.
-    public var toggle: (_ window: NSWindow, _ foreground: NSColor, _ background: NSColor, _ accent: NSColor, _ cursor: NSColor) -> Void
-
-    /// Whether the palette is up over a window.
-    ///
-    /// The key-equivalent pass asks this: while the palette holds the
-    /// responder, the surface still claims the chord that dismisses it.
-    public var isActive: (_ window: NSWindow) -> Bool
-
-    /// Delivers a pane's search publication to the shell's open palette.
-    public var searchDidChange: ((_ surface: TerminalSurface) -> Void)?
-
-    /// Builds a presenter.
-    ///
-    /// - Parameters:
-    ///   - toggle: What summons and dismisses the palette.
-    ///   - isActive: What says whether it is up over a window.
-    ///   - searchDidChange: What refreshes results from a pane's search publication.
-    public init(
-        toggle: @escaping (NSWindow, NSColor, NSColor, NSColor, NSColor) -> Void,
-        isActive: @escaping (NSWindow) -> Bool,
-        searchDidChange: ((TerminalSurface) -> Void)? = nil
-    ) {
-        self.toggle = toggle
-        self.isActive = isActive
-        self.searchDidChange = searchDidChange
     }
 }
 
@@ -131,10 +91,6 @@ extension TerminalWindowController {
         refreshTabGroupForFocusChange()
     }
 
-    /// The shell's palette. A Kit with none summons nothing, which is the
-    /// right answer for an embedder that has no palette to show.
-    public static var beamPresenter: BeamPresenter?
-
     /// Summons or dismisses the command palette over this window.
     ///
     /// The colours are the live theme, each of the four Core's own derivation
@@ -147,7 +103,7 @@ extension TerminalWindowController {
     @objc
     public func toggleBeam(_ sender: Any?) {
         guard let window, let surface = beamSurface,
-            let presenter = Self.beamPresenter
+            let presenter = TerminalSurface.beamPresenter
         else {
             return
         }

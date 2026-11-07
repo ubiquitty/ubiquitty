@@ -27,16 +27,22 @@
 set -euo pipefail
 
 TOOLS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The toolchain launcher belongs to the tools checkout, even when the package
+# below is built from a different tagged source tree.
+TOOLS_CORE_ROOT="$TOOLS_ROOT/Libraries/ubiquitty-core"
 export UBIQUITTY_PGO=REQUIRE
 if [ -z "${UBQ_CI_LINUX_IMAGE_ID:-}" ]; then
-    exec python3 "$TOOLS_ROOT/Scripts/pgo_toolchain.py" run "$TOOLS_ROOT/Scripts/package-linux-appimage.sh" "$@"
+    exec python3 "$TOOLS_CORE_ROOT/Scripts/pgo_toolchain.py" run "$TOOLS_ROOT/Scripts/package-linux-appimage.sh" "$@"
 fi
 export PATH="$UBQ_PGO_LLVM:$PATH"
 export CC=clang CXX=clang++
 ROOT="${UBIQUITTY_PACKAGE_SOURCE:-$TOOLS_ROOT}"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 case "$(uname -m)" in
     x86_64) ARCH=x86_64 ;;
     aarch64 | arm64) ARCH=aarch64 ;;
@@ -98,7 +104,7 @@ if [ "$BUILD" = 1 ]; then
 fi
 BIN="$UBQ_BUILD_ROOT/linux/ubiquitty-linux"
 [ -x "$BIN" ] || { echo "ERROR: no binary at $BIN" >&2; exit 1; }
-python3 "$ROOT/Scripts/check-pgo-applies.py" --recorded-budget --max-discarded 0
+python3 "$CORE_ROOT/Scripts/check-pgo-applies.py" --recorded-budget --max-discarded 0
 
 # The binary links the host's glibc and libstdc++, so the newest symbol version
 # it asks of each is the oldest host it starts on. README.md,
@@ -170,7 +176,7 @@ cmake --install "$UBQ_BUILD_ROOT/linux" --prefix "$APPDIR/usr"
 # say so. Every shader source has its compiled form beside the binary, or no
 # AppImage is built.
 missingShaders=()
-for shader in "$ROOT"/Source/Platform/Linux/shaders/*; do
+for shader in "$KIT_ROOT"/Source/Platform/Linux/shaders/*; do
     spv="$(basename "$shader").spv"
     [ -s "$APPDIR/usr/bin/$spv" ] || missingShaders+=("$spv")
 done
@@ -180,7 +186,7 @@ if [ "${#missingShaders[@]}" -gt 0 ]; then
 fi
 # Each Noto release's own licence travels with its faces, beside the binary.
 for notice in NotoSans-OFL.txt NotoColorEmoji-OFL.txt; do
-    install -Dm644 "$ROOT/Resources/fonts/$notice" "$APPDIR/usr/bin/$notice"
+    install -Dm644 "$CORE_ROOT/Resources/fonts/$notice" "$APPDIR/usr/bin/$notice"
 done
 # The updater uses its private shared libraries without changing the terminal
 # process's library search path. Its notices and matching sources travel with it.
@@ -188,7 +194,7 @@ python3 "$TOOLS_ROOT/Scripts/appimage-support.py" stage "$SUPPORT" "$ARCH" "$APP
 # Third-party license texts ship inside the AppImage (redistribution compliance):
 # the project notice + the per-dependency texts the bundled binary links/embeds.
 DOCDIR="$APPDIR/usr/share/doc/ubiquitty"
-python3 "$TOOLS_ROOT/Scripts/license_notices.py" --source "$TOOLS_ROOT" --copy "$DOCDIR"
+python3 "$TOOLS_CORE_ROOT/Scripts/license_notices.py" --source "$ROOT" --core "$CORE_ROOT" --kit "$KIT_ROOT" --copy "$DOCDIR"
 install -Dm644 "$ROOT/Resources/linux/org.ubiquitty.linux.desktop" \
     "$APPDIR/usr/share/applications/org.ubiquitty.linux.desktop"
 # appimagetool wants the .desktop + icon at the AppDir root too.

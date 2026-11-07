@@ -44,6 +44,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
+sys.path.insert(0, HERE)
+import library_scripts  # noqa: E402 — Core's and the Kit's files are read through their checkouts
+import ubq_roots  # noqa: E402
 
 # Which build compiles a frontend file. A directory is the right key because it
 # is what CMake targets select on, and a file that moves between them changes
@@ -93,7 +96,7 @@ def coreNamespaces():
     - Refuses (exit 2) when the directory is gone, since a namespace set of zero
       would make CORE_TYPE match nothing and the gate pass over every assert.
     """
-    core = os.path.join(REPO, "Source", "Core")
+    core = library_scripts.locate(os.path.join("Source", "Core"))
     try:
         names = sorted(entry for entry in os.listdir(core)
                        if os.path.isdir(os.path.join(core, entry)))
@@ -126,9 +129,7 @@ FRONTEND_DIRECTORIES = tuple(prefix for prefix, _, _ in ARMS)
 
 
 def tracked(prefix):
-    listing = subprocess.run(["git", "-C", REPO, "ls-files", prefix],
-                             capture_output=True, text=True)
-    return [path for path in listing.stdout.split("\n") if path]
+    return library_scripts.tracked(prefix)
 
 
 def databaseFor(build):
@@ -272,7 +273,7 @@ def frontendSources():
     for directory in FRONTEND_DIRECTORIES:
         for path in tracked(directory):
             try:
-                with open(os.path.join(REPO, path), encoding="utf-8",
+                with open(library_scripts.locate(path), encoding="utf-8",
                           errors="replace") as handle:
                     yield path, handle.read()
             except OSError:
@@ -310,7 +311,9 @@ def shaderHeaders():
     """{Core header: {shader}} for every header a frontend shader includes.
 
     Followed transitively, because a header the included one includes is
-    compiled into the shader as well.
+    compiled into the shader as well. A quoted include resolves as the
+    compiler resolves it: beside the including file, then under Source/, the
+    root every shader compile names with -I.
     """
     found = collections.defaultdict(set)
     for shader, text in frontendSources():
@@ -322,12 +325,14 @@ def shaderHeaders():
             source, body = pending.pop()
             for include in SHADER_INCLUDE.findall(body):
                 header = os.path.normpath(os.path.join(os.path.dirname(source), include))
+                if not os.path.isfile(library_scripts.locate(header)):
+                    header = os.path.normpath(os.path.join("Source", include))
                 if header in seen:
                     continue
                 seen.add(header)
                 found[header].add(shader)
                 try:
-                    with open(os.path.join(REPO, header), encoding="utf-8",
+                    with open(library_scripts.locate(header), encoding="utf-8",
                               errors="replace") as handle:
                         pending.append((header, handle.read()))
                 except OSError:
@@ -425,7 +430,7 @@ def declaringHeaders(names):
         if not path.endswith((".h", ".hpp")):
             continue
         try:
-            with open(os.path.join(REPO, path), encoding="utf-8",
+            with open(library_scripts.locate(path), encoding="utf-8",
                       errors="replace") as handle:
                 text = handle.read()
         except OSError:
@@ -445,12 +450,8 @@ def changedFiles(argv):
             index = argv.index("--since")
             if index + 1 < len(argv):
                 base = argv[index + 1]
-        merge = subprocess.run(["git", "-C", REPO, "merge-base", "HEAD", base],
-                               capture_output=True, text=True)
-        if merge.returncode != 0:
-            return None
-        command = ["git", "-C", REPO, "diff", "--name-only",
-                   merge.stdout.strip(), "HEAD"]
+        # A library mount that moved is read as the files between its pins.
+        return ubq_roots.changed_paths(base, REPO)
     listing = subprocess.run(command, capture_output=True, text=True)
     return [path for path in listing.stdout.split("\n") if path]
 

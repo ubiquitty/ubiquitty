@@ -4,8 +4,10 @@
 # Open the Sync web client, or add a host to this checkout's running browser launcher.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 host=""
 should_build=1
 extra=()

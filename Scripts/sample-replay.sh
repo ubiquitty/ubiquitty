@@ -31,7 +31,7 @@ path=$(ubq_dev_stream_path "$stream" "$grid" "$streams")
 [ -f "$path" ] || { echo "sample-replay.sh: no stream at $path" >&2; exit 1; }
 dir=$(ubq_dev_config "$columns" "$rows")
 pid=$(ubq_dev_launch "$dir" "$dir/app.log" UBIQUITTY_ADAPTIVE_FPS=1 \
-    -- /usr/bin/python3 "$ROOT/Scripts/replay-stream.py" --stream "$path" --counter "$dir/bytes")
+    -- /usr/bin/python3 "$CORE_ROOT/Scripts/replay-stream.py" --stream "$path" --counter "$dir/bytes")
 [ -n "$pid" ] || { echo "sample-replay.sh: the instance did not start" >&2; exit 1; }
 sleep 6
 out=$dir/sample.txt

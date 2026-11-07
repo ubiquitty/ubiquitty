@@ -33,7 +33,10 @@ import readme_demo_home
 
 
 ROOT = Path(__file__).resolve().parent.parent
-with (ROOT / "Source/Core/Themes/builtin-themes.toml").open("rb") as source:
+# Core's checkout: the submodule where the app carries it, this checkout otherwise.
+CORE_ROOT = Path(os.environ.get("UBQ_CORE_ROOT") or (ROOT / "Libraries" / "ubiquitty-core"
+                                                       if (ROOT / "Libraries" / "ubiquitty-core").exists() else ROOT))
+with (CORE_ROOT / "Source/Core/Themes/builtin-themes.toml").open("rb") as source:
     NOIR = next(theme for theme in tomllib.load(source)["themes"] if theme["name"] == "Noir")
 
 

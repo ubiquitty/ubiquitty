@@ -47,13 +47,14 @@ EXTRA=("$@")
 # at the same commit.
 #
 # The tree's optimized compiles map the checkout, its build directory and the
-# QUIC prefix to relative names (CMakeLists.txt), and Scripts/fetch-quic-deps.sh
-# builds AWS-LC and ngtcp2 with the same map, so those __FILE__ strings do not
-# name the directory. The app is RelWithDebInfo, and its debug information keeps
-# absolute paths for Instruments and lldb, so an unstripped bundle still names
-# its sources in the debug map dsymutil reads. Until both arms are known to
-# carry no path that moves an address, building them in one directory is what
-# makes them comparable — `git checkout` in place, not a second worktree.
+# QUIC prefix to relative names (Scripts/cmake/UbiquittyOptimize.cmake), and
+# Scripts/fetch-quic-deps.sh builds AWS-LC and ngtcp2 with the same map, so
+# those __FILE__ strings do not name the directory. The app is RelWithDebInfo,
+# and its debug information keeps absolute paths for Instruments and lldb, so an
+# unstripped bundle still names its sources in the debug map dsymutil reads.
+# Until both arms are known to carry no path that moves an address, building
+# them in one directory is what makes them comparable — `git checkout` in place,
+# not a second worktree.
 #
 # Two markers rather than one, because the obvious single marker is absent from
 # the configuration that most needs the check: aws-lc disappears under

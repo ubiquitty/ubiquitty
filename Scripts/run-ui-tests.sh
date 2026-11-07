@@ -41,11 +41,13 @@ set -euo pipefail
 unset SSH_CONNECTION SSH_CLIENT SSH_TTY
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
-. "$ROOT/Scripts/build-root.sh"
+. "$CORE_ROOT/Scripts/build-root.sh"
 # shellcheck source=Scripts/test-run-hygiene.sh
-. "$ROOT/Scripts/test-run-hygiene.sh"
+. "$CORE_ROOT/Scripts/test-run-hygiene.sh"
 # The app and its helper host must link the same persistent QUIC build. CMake's
 # source-tree default otherwise makes every managed worktree compile AWS-LC and
 # ngtcp2 again instead of using the checkout-specific DerivedData cache.

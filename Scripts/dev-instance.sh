@@ -17,7 +17,9 @@
 # The launched pid is the one process that appeared
 # while launching, read back rather than guessed.
 ROOT=${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
-. "$ROOT/Scripts/build-root.sh"
+# The checkouts holding the scripts this one runs; see CMakeLists.txt.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+. "$CORE_ROOT/Scripts/build-root.sh"
 
 ubq_dev_app() { # -> the app bundle this checkout builds, or the one UBQ_DEV_APP names
     # The override is for a control: a pair of instances from two builds — this
