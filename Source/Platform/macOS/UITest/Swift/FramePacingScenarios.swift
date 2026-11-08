@@ -108,6 +108,8 @@ private let repaintOnInputSource = """
 /// SGR hidden bit there; wide cells retain a cell instance even when hidden.
 /// The response overwrites without erasing: a capture between control bytes
 /// still sees the previous marker's opposite hidden state.
+/// A short prepared marker precedes a start barrier, so the window can settle
+/// its geometry before any body output or wide input marker is written.
 /// Separate h/r commands calibrate those states without advancing the q count.
 /// Lower rows keep changing independently, including around each response.
 /// Heavy work areas follow Core's public `Tools/sgr-profile/sgr_bench.cpp`
@@ -155,8 +157,15 @@ private let floodOnInputSource = """
         rows = work_rows + 1
     else:
         bodies = {"ascii": [ascii], "sgr": [sgr], "unicode": [unicode], "mixed": [ascii, sgr, unicode]}[mode]
+    write_all(b"\\x1b[?25l\\x1b[0m\\x1b[r\\x1b[H\\x1b[2Jflood-prepared")
+    start = os.read(0, 4096)
+    if not start:
+        sys.exit(0)
+    if start != b"g":
+        sys.exit("unexpected command before geometry start")
+    if not heavy:
         rows = max(3, os.get_terminal_size(1).lines)
-    write_all(b"\\x1b[?25l\\x1b[H\\x1b[2J\\x1b[2;%dr\\x1b[H\\x1b[38;2;255;32;32m" % rows
+    write_all(b"\\x1b[r\\x1b[H\\x1b[2J\\x1b[2;%dr\\x1b[H\\x1b[38;2;255;32;32m" % rows
               + marker + b"\\x1b[0m input-0 ready\\x1b[2;1H")
     received = 0
     def receive_input():
@@ -1122,8 +1131,8 @@ enum FramePacingScenarios {
         let panelRate = window.screen.map { max(1, $0.maximumFramesPerSecond) } ?? 60
         let interval = 1.0 / Double(panelRate)
         let preparationSeconds = payload.isHeavy ? 15.0 : 5.0
-        guard t.wait(until: { surface.gridTextForTesting().hasPrefix("界 input-0 ready") }, timeout: preparationSeconds) else {
-            t.expect(false, desc: "the producer reserves its input marker row")
+        guard t.wait(until: { surface.gridTextForTesting().hasPrefix("flood-prepared") }, timeout: preparationSeconds) else {
+            t.expect(false, desc: "the producer prepares without starting its output")
             return
         }
 
@@ -1139,8 +1148,8 @@ enum FramePacingScenarios {
             let quotedProgram = "'" + program.replacingOccurrences(of: "'", with: "'\\''") + "'"
             let siblingPayload = payload.isHeavy ? FloodPayload.heavyMixed.rawValue : FloodPayload.mixed.rawValue
             other.send("exec /usr/bin/python3 \(quotedProgram) \(siblingPayload)\n")
-            guard t.wait(until: { other.gridTextForTesting().hasPrefix("界 input-0 ready") }, timeout: preparationSeconds) else {
-                t.expect(false, desc: "the sibling also runs continuous mixed output")
+            guard t.wait(until: { other.gridTextForTesting().hasPrefix("flood-prepared") }, timeout: preparationSeconds) else {
+                t.expect(false, desc: "the sibling also prepares without starting its output")
                 return
             }
             window.makeFirstResponder(surface)
@@ -1191,6 +1200,34 @@ enum FramePacingScenarios {
                 + " scale \(window.backingScaleFactor), panel \(panelRate) Hz"
                 + (payload.isHeavy ? "; public work area 202x49, CUP rows shifted +1 for marker" : "; scrolling work area below marker")
         )
+        // The prepared writers are silent while pane layout settles. Check
+        // their real model state before starting either writer, so a producer
+        // that bypassed the barrier cannot race past an instantaneous read.
+        t.pump(0.15)
+        guard !payload.isHeavy || panes.allSatisfy({ $0.drive.readSnapshot().columns == 202 && $0.drive.readSnapshot().rows == 50 }) else {
+            t.expect(false, desc: "every heavy pane keeps its prepared 202x50 geometry")
+            return
+        }
+        if let screen = window.screen {
+            notePacing(
+                "\(payload.rawValue) window \(NSStringFromRect(window.frame)), screen \(NSStringFromRect(screen.frame)),"
+                    + " visible frame \(NSStringFromRect(screen.visibleFrame)); fully inside visible frame: \(screen.visibleFrame.contains(window.frame))"
+            )
+        }
+        for (index, pane) in panes.enumerated() {
+            let rows = pane.gridTextForTesting().split(separator: "\n", omittingEmptySubsequences: false)
+            guard rows.first?.hasPrefix("flood-prepared") == true && rows.dropFirst().allSatisfy(\.isEmpty) else {
+                t.expect(false, desc: "pane \(index) stays prepared with a blank body before its start command")
+                return
+            }
+        }
+        for pane in panes { pane.send("g") }
+        for (index, pane) in panes.enumerated() {
+            guard t.wait(until: { pane.gridTextForTesting().hasPrefix("界 input-0 ready") }, timeout: preparationSeconds) else {
+                t.expect(false, desc: "pane \(index) installs its input marker after geometry settles")
+                return
+            }
+        }
         let siblingObserver = sibling?.frameEncodedObserverForTesting
         sibling?.frameEncodedObserverForTesting = { surface in
             siblingObserver?(surface)
