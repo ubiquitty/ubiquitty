@@ -27,15 +27,17 @@
 # `stages` runs `ci_batteries.py run linux --only <stage>` on the host, so the
 # command, environment and log of each stage are CI's own; they are not written
 # out a second time here. The tree is synced to a per-run directory under the
-# remote user's home, the stage logs are brought back under
-# $UBQ_LINUX_HOST_RESULTS (default $UBQ_CI_ROOT/linux-host), and the directory
-# is removed again.
+# remote user's home or the configured dedicated runs root, the stage logs are
+# brought back under $UBQ_LINUX_HOST_RESULTS (default $UBQ_CI_ROOT/linux-host),
+# and the directory is removed again.
 #
 # UBQ_LINUX_HOST_RUN names a run that several invocations share: the first one
 # syncs and builds, later ones find the build tree warm, and `release` removes
 # the directory. The pre-push hook sets it and releases on exit. Without it each
 # invocation is a run of its own and removes its directory before returning,
 # including when a stage fails or the invocation is interrupted.
+# UBQ_LINUX_HOST_RUNS_ROOT may select an absolute dedicated runs directory,
+# such as /data/ubiquitty-linux-runs, instead of the default under HOME.
 #
 # Provisioning is not here. The packages the host needs are the ones CI's
 # "Linux tools" and "GTK/Vulkan toolchain" stages check for; a host missing one
@@ -52,12 +54,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Seconds to wait for the host before the container is used instead.
 CONNECT_TIMEOUT="${UBQ_LINUX_HOST_CONNECT_TIMEOUT:-5}"
-# Free gigabytes the host's home filesystem must have. The build tree, the host
+# Free gigabytes the runs filesystem must have. The build tree, the host
 # test tree and the snapshot renders are several gigabytes together; a full disk
 # otherwise fails somewhere in the middle of a compile.
 MINIMUM_FREE_GIGABYTES="${UBQ_LINUX_HOST_MIN_FREE_GB:-10}"
-# Directory names under the remote home. Cleanup refuses any path outside the
-# first, so a mistaken run identifier cannot name something else.
+# Default directory names under the remote home. Cleanup is confined to its
+# retained runs root and an identifier carrying this runner's ownership marker.
 RUNS_DIRECTORY="ubiquitty-linux-runs"
 CACHE_DIRECTORY=".cache/ubiquitty-linux-host"
 # A run directory untouched this long belongs to an invocation that died
@@ -136,8 +138,65 @@ stateFile() { # <run identifier>
 
 validRunIdentifier() {
     case "$1" in
-        '' | *[!A-Za-z0-9._-]*) return 1 ;;
+        '' | . | .. | *[!A-Za-z0-9._-]*) return 1 ;;
     esac
+}
+
+validRunsDirectory() {
+    [ "$1" != "ubiquitty-linux-runs" ] || return 0
+    case "$1" in
+        /*/ubiquitty-linux-runs) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[!A-Za-z0-9._/-]* | *//* | */../* | */./*) return 1 ;;
+    esac
+}
+
+validScratchRelativePath() {
+    case "$1" in
+        '' | /* | *[!A-Za-z0-9._/-]* | *//* | . | .. | ../* | */.. | */../* | ./* | */. | */./*) return 1 ;;
+    esac
+}
+
+# Remote operations share root validation and an ownership marker, so cleanup
+# cannot adopt an unrelated directory merely because its name resembles a run.
+remote() { # <host> <runs directory> <argument>…
+    local host="$1" runsDirectory="$2"
+    shift 2
+    {
+        declare -f validRunIdentifier validRunsDirectory
+        cat <<'REMOTE'
+set -euo pipefail
+runsDirectory=$1
+shift
+validRunsDirectory "$runsDirectory" || exit 2
+case "$runsDirectory" in
+    /*)
+        runs="$runsDirectory"
+        python3 - "$runs" <<'CHECK'
+import os
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+if root.resolve() != root or root.is_symlink() or (root.exists() and root.stat().st_uid != os.getuid()):
+    raise SystemExit("linux-host: configured runs root must be canonical and owned by this user")
+CHECK
+        ;;
+    *)
+        runs="$HOME/$runsDirectory"
+        [ ! -L "$runs" ] && { [ ! -e "$runs" ] || [ -O "$runs" ]; } || exit 2
+        ;;
+esac
+ownedRun() {
+    validRunIdentifier "$1" && [ -d "$runs/$1" ] && [ ! -L "$runs/$1" ] && [ -O "$runs/$1" ] \
+        && [ -f "$runs/$1/.ubiquitty-linux-host-run" ] && [ ! -L "$runs/$1/.ubiquitty-linux-host-run" ] \
+        && [ -O "$runs/$1/.ubiquitty-linux-host-run" ] \
+        && cmp -s "$runs/$1/.ubiquitty-linux-host-run" <(printf '%s\n' "$1")
+}
+REMOTE
+        cat
+    } | ssh "${sshOptions[@]}" "$host" bash -s -- "$runsDirectory" "$@"
 }
 
 # The checkout's files as a NUL-separated list: tracked and untracked-unignored
@@ -189,11 +248,10 @@ sys.stdout.buffer.write(b"\0".join(entries) + b"\0")
 FILES
 }
 
-prepareRemote() { # <host> <run identifier>
-    ssh "${sshOptions[@]}" "$1" bash -s -- "$2" "$RUNS_DIRECTORY" "$MINIMUM_FREE_GIGABYTES" "$STALE_MINUTES" <<'REMOTE'
-set -eu
-runIdentifier=$1 runsDirectory=$2 minimumFree=$3 staleMinutes=$4
-runs="$HOME/$runsDirectory"
+prepareRemote() { # <host> <run identifier> <runs directory>
+    remote "$1" "$3" "$2" "$MINIMUM_FREE_GIGABYTES" "$STALE_MINUTES" <<'REMOTE'
+runIdentifier=$1 minimumFree=$2 staleMinutes=$3
+validRunIdentifier "$runIdentifier" || exit 2
 mkdir -p "$runs"
 free=$(df -Pk "$runs" | awk 'NR == 2 { print int($4 / 1048576) }')
 if [ "$free" -lt "$minimumFree" ]; then
@@ -202,15 +260,24 @@ if [ "$free" -lt "$minimumFree" ]; then
 fi
 # Directories of runs that never released, by age, and only inside the runs
 # directory: this host is shared with CI.
-find "$runs" -mindepth 1 -maxdepth 1 -type d -mmin +"$staleMinutes" -exec rm -rf -- {} +
+while IFS= read -r -d '' candidate; do
+    identifier=${candidate##*/}
+    if ownedRun "$identifier"; then rm -rf -- "$candidate"; fi
+done < <(find "$runs" -mindepth 1 -maxdepth 1 -type d -mmin +"$staleMinutes" -print0)
 scratch="$runs/$runIdentifier"
+if [ -e "$scratch" ] || [ -L "$scratch" ]; then
+    ownedRun "$runIdentifier" || { echo "linux-host: existing run is not owned scratch" >&2; exit 2; }
+else
+    mkdir "$scratch"
+    printf '%s\n' "$runIdentifier" > "$scratch/.ubiquitty-linux-host-run"
+fi
 mkdir -p "$scratch/ubiquitty" "$scratch/tmp" "$scratch/tools" "$scratch/ci" "$scratch/build-gcc"
 touch "$scratch"
 REMOTE
 }
 
-syncTree() { # <host> <run identifier>
-    local host="$1" identifier="$2"
+syncTree() { # <host> <run identifier> <runs directory>
+    local host="$1" identifier="$2" runsDirectory="$3"
     local expectedCore="$ROOT" expectedKit="$ROOT"
     [ ! -e "$ROOT/Libraries/ubiquitty-core" ] || expectedCore="$ROOT/Libraries/ubiquitty-core"
     [ ! -e "$ROOT/Libraries/ubiquitty-kit" ] || expectedKit="$ROOT/Libraries/ubiquitty-kit"
@@ -222,20 +289,20 @@ syncTree() { # <host> <run identifier>
     # Only this run's gitless source tree is replaced. Build/cache/log siblings
     # stay warm, while a deleted tracked or untracked library file cannot
     # survive into a later stage of the shared run.
-    ssh "${sshOptions[@]}" "$host" bash -s -- "$RUNS_DIRECTORY/$identifier/ubiquitty" <<'REMOTE'
-set -eu
-find "$HOME/$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    remote "$host" "$runsDirectory" "$identifier" <<'REMOTE'
+ownedRun "$1" || exit 2
+find "$runs/$1/ubiquitty" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 REMOTE
     treeFiles | rsync -a --from0 --files-from=- -e "ssh ${sshOptions[*]}" \
-        "$ROOT/" "$host:$RUNS_DIRECTORY/$identifier/ubiquitty/"
+        "$ROOT/" "$host:$runsDirectory/$identifier/ubiquitty/"
 }
 
 # One stage list on the host, in the CI environment. The scratch directory plays
 # the runner's workspace: the checkout is a child of it and the build roots its
 # siblings, which is where ci_batteries.py puts them.
-runStages() { # <host> <run identifier> <stage>…
-    local host="$1" identifier="$2"
-    shift 2
+runStages() { # <host> <run identifier> <runs directory> <stage>…
+    local host="$1" identifier="$2" runsDirectory="$3"
+    shift 3
     local onlyArguments=() stage
     for stage in "$@"; do
         onlyArguments+=(--only "$stage")
@@ -260,8 +327,8 @@ runStages() { # <host> <run identifier> <stage>…
     {
         printf '%s' "$prelude"
         cat <<'REMOTE'
-set -euo pipefail
-scratch="$HOME/$1" cacheDirectory="$HOME/$2"
+ownedRun "$1" || exit 2
+scratch="$runs/$1" cacheDirectory="$HOME/$2"
 shift 2
 touch "$scratch"
 export RUNNER_WORKSPACE="$scratch" RUNNER_TEMP="$scratch/tmp" RUNNER_TOOL_CACHE="$scratch/tools"
@@ -280,42 +347,61 @@ ln -sfn "$cacheDirectory/quic-deps-$quicKey" "$scratch/build-gcc/quic-deps"
 exec python3 "$CORE_ROOT/Scripts/ci_batteries.py" run linux \
     --source-root "$PWD" --core-source-root "$CORE_ROOT" --kit-source-root "$KIT_ROOT" "$@"
 REMOTE
-    } | ssh "${sshOptions[@]}" "$host" bash -s -- "$RUNS_DIRECTORY/$identifier" "$CACHE_DIRECTORY" \
+    } | remote "$host" "$runsDirectory" "$identifier" "$CACHE_DIRECTORY" \
         ${onlyArguments[@]+"${onlyArguments[@]}"}
 }
 
-fetchResults() { # <host> <run identifier> <scratch-relative path>=<local directory>…
-    local host="$1" identifier="$2" mapping remotePath localDirectory
-    shift 2
+fetchResults() { # <host> <run identifier> <runs directory> <scratch-relative path>=<local directory>…
+    local host="$1" identifier="$2" runsDirectory="$3" mapping remotePath localDirectory
+    shift 3
     for mapping in "$@"; do
         remotePath="${mapping%%=*}"
         localDirectory="${mapping#*=}"
+        validScratchRelativePath "$remotePath" || return 2
         mkdir -p "$localDirectory"
         # A path the stages did not create is not a failure of the fetch.
         rsync -a -e "ssh ${sshOptions[*]}" \
-            "$host:$RUNS_DIRECTORY/$identifier/$remotePath/" "$localDirectory/" 2>/dev/null || true
+            "$host:$runsDirectory/$identifier/$remotePath/" "$localDirectory/" 2>/dev/null || true
     done
 }
 
 releaseRun() { # <run identifier>
-    local identifier="$1" state host
+    local identifier="$1" state host="" runsDirectory=""
     validRunIdentifier "$identifier" || return 0
     state="$(stateFile "$identifier")"
     [ -f "$state" ] || return 0
-    host="$(cat "$state")"
-    rm -f "$state"
-    validHostName "$host" || return 0
+    { IFS= read -r host && IFS= read -r runsDirectory; } < "$state" || return 1
+    validHostName "$host" && validRunsDirectory "$runsDirectory" || return 1
+    cmp -s "$state" <(printf '%s\n%s\n' "$host" "$runsDirectory") || return 1
     # The remote path is rebuilt from the validated identifier under the runs
     # directory, so nothing else on the host can be named.
-    ssh "${sshOptions[@]}" "$host" bash -s -- "$RUNS_DIRECTORY" "$identifier" >/dev/null 2>&1 <<'REMOTE' || true
-set -eu
-rm -rf -- "$HOME/$1/$2"
+    if remote "$host" "$runsDirectory" "$identifier" >/dev/null 2>&1 <<'REMOTE'
+if [ ! -e "$runs/$1" ] && [ ! -L "$runs/$1" ]; then exit 0; fi
+ownedRun "$1" || exit 2
+rm -rf -- "$runs/$1"
 REMOTE
+    then
+        rm -f "$state"
+    else
+        echo "linux-host: cleanup failed; retained run state at $state" >&2
+        return 1
+    fi
+}
+
+releaseOwnedRun() { # <stage status>
+    local status="$1"
+    trap - EXIT
+    if ! releaseRun "$ownedIdentifier" && [ "$status" -eq 0 ]; then
+        status=1
+    fi
+    exit "$status"
 }
 
 stagesCommand() {
     local fetches=() results
     while [ "${1:-}" = "--fetch" ]; do
+        case "$2" in *=*) ;; *) echo "linux-host: --fetch needs a scratch-relative mapping" >&2; return 2 ;; esac
+        validScratchRelativePath "${2%%=*}" || { echo "linux-host: unsafe fetch path" >&2; return 2; }
         fetches+=("$2")
         shift 2
     done
@@ -323,6 +409,17 @@ stagesCommand() {
         echo "linux-host: stages needs at least one stage name (ci_batteries.py list linux)" >&2
         return 2
     fi
+    local stage
+    for stage in "$@"; do
+        case "$stage" in '' | *[!A-Za-z0-9._-]*) echo "linux-host: unsafe stage name" >&2; return 2 ;; esac
+    done
+    case "$MINIMUM_FREE_GIGABYTES" in '' | *[!0-9]*) echo "linux-host: invalid free-space floor" >&2; return 2 ;; esac
+    local runsDirectory="$RUNS_DIRECTORY"
+    if [ -n "${UBQ_LINUX_HOST_RUNS_ROOT:-}" ]; then
+        runsDirectory="$UBQ_LINUX_HOST_RUNS_ROOT"
+        case "$runsDirectory" in /*) ;; *) echo "linux-host: runs root must be absolute" >&2; return 2 ;; esac
+    fi
+    validRunsDirectory "$runsDirectory" || { echo "linux-host: unsafe runs root" >&2; return 2; }
     local host
     host="$(requiredHost)" || return 2
 
@@ -343,24 +440,28 @@ stagesCommand() {
     mkdir -p "$(dirname "$state")"
     # Recorded before the first remote command, so an interrupt between the
     # mkdir and the end of the sync still finds the directory to remove.
-    printf '%s' "$host" > "$state"
+    if [ -f "$state" ] && ! cmp -s "$state" <(printf '%s\n%s\n' "$host" "$runsDirectory"); then
+        echo "linux-host: shared run belongs to another host or runs root" >&2
+        return 2
+    fi
+    printf '%s\n%s\n' "$host" "$runsDirectory" > "$state"
     if [ "$shared" = 0 ]; then
         ownedIdentifier="$identifier"
-        trap 'releaseRun "$ownedIdentifier"' EXIT
+        trap 'releaseOwnedRun "$?"' EXIT
         trap 'exit 130' INT
         trap 'exit 143' TERM
     fi
 
     echo "linux-host: $host, run $identifier, stages: $*" >&2
-    prepareRemote "$host" "$identifier"
-    syncTree "$host" "$identifier"
+    prepareRemote "$host" "$identifier" "$runsDirectory"
+    syncTree "$host" "$identifier" "$runsDirectory"
     local status=0
-    runStages "$host" "$identifier" "$@" || status=$?
+    runStages "$host" "$identifier" "$runsDirectory" "$@" || status=$?
     # The stage logs, and the images a failed snapshot case leaves, in the
     # directory run.py writes them to on this machine and prints in its report.
     local failureDirectory
     failureDirectory="${UBIQUITTY_SNAPSHOT_FAILURE_DIR:-$(python3 -c 'import tempfile; print(tempfile.gettempdir())')/ubiquitty-regression-fail}"
-    fetchResults "$host" "$identifier" "ci/linux=$results" "tmp/ubiquitty-regression-fail=$failureDirectory" \
+    fetchResults "$host" "$identifier" "$runsDirectory" "ci/linux=$results" "tmp/ubiquitty-regression-fail=$failureDirectory" \
         ${fetches[@]+"${fetches[@]}"}
     if [ "$status" -eq 255 ]; then
         echo "linux-host: the connection to $host failed during the run." >&2
