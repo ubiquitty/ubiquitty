@@ -5,6 +5,7 @@
 
 import os
 import hashlib
+import time
 from pathlib import Path
 import shutil
 import subprocess
@@ -85,6 +86,7 @@ class LinuxHostTests(unittest.TestCase):
         self.bin = self.directory / "bin"
         self.bin.mkdir()
         for name, body in (("ssh", FAKE_SSH), ("rsync", FAKE_RSYNC),
+                           ("df", '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 209715200 0 %s 0%% /fixture\\n" "${UBQ_TEST_FREE_KIB:-104857600}"\n'),
                            ("sha256sum", '#!/bin/sh\nexec shasum -a 256 "$@"\n')):
             (self.bin / name).write_text(body)
             (self.bin / name).chmod(0o755)
@@ -256,8 +258,180 @@ class LinuxHostTests(unittest.TestCase):
 
     def test_an_unsafe_run_identifier_is_refused(self):
         self.setConfigured("fake")
-        result = self.run_script("stages", "linux-build", UBQ_LINUX_HOST_RUN="../escape")
+        for name in ("../escape", ".", ".."):
+            with self.subTest(name=name):
+                result = self.run_script("stages", "linux-build", UBQ_LINUX_HOST_RUN=name)
+                self.assertEqual(result.returncode, 2)
+
+    def prepareStage(self):
+        (self.root / "Scripts/ci_batteries.py").write_text(
+            "import os, pathlib\n"
+            "out=pathlib.Path(os.environ['UBQ_CI_ROOT'])/'linux'; out.mkdir(exist_ok=True)\n"
+            "(out/'01-stage.log').write_text(str(pathlib.Path.cwd()))\n")
+        (self.root / "Scripts/fetch-quic-deps.sh").write_text("")
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+
+    def configuredRoot(self):
+        return self.directory / "data/ubiquitty-linux-runs"
+
+    def test_absolute_root_handles_sync_stage_fetch_and_cleanup_without_changing_home(self):
+        self.prepareStage()
+        runs = self.configuredRoot()
+        result = self.run_script("stages", "linux-build", UBIQUITTY_LINUX_HOST="fake",
+                                 UBQ_LINUX_HOST_RUNS_ROOT=str(runs))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(runs.is_dir())
+        self.assertEqual(list(runs.iterdir()), [])
+        self.assertFalse(self.runsDirectory().exists())
+        self.assertIn(str(runs), (self.directory / "results/01-stage.log").read_text())
+        self.assertTrue((self.remoteHome / ".cache/ubiquitty-linux-host").is_dir())
+
+    def test_release_uses_retained_root_even_when_current_setting_changes(self):
+        self.prepareStage()
+        shared = dict(UBIQUITTY_LINUX_HOST="fake", UBQ_LINUX_HOST_RUN="retained-1",
+                      UBQ_LINUX_HOST_RUNS_ROOT=str(self.configuredRoot()))
+        self.assertEqual(self.run_script("stages", "linux-build", **shared).returncode, 0)
+        other = self.directory / "other/ubiquitty-linux-runs"
+        other.mkdir(parents=True)
+        sentinel = other / "untouched"
+        sentinel.write_text("owned elsewhere")
+        shared["UBQ_LINUX_HOST_RUNS_ROOT"] = str(other)
+        self.assertEqual(self.run_script("release", **shared).returncode, 0)
+        self.assertFalse((self.configuredRoot() / "retained-1").exists())
+        self.assertEqual(sentinel.read_text(), "owned elsewhere")
+
+    def test_shared_run_refuses_root_change_before_sync(self):
+        self.prepareStage()
+        shared = dict(UBIQUITTY_LINUX_HOST="fake", UBQ_LINUX_HOST_RUN="shared-1")
+        self.assertEqual(self.run_script("stages", "linux-build", **shared).returncode, 0)
+        changed = self.run_script("stages", "linux-build", **shared,
+                                  UBQ_LINUX_HOST_RUNS_ROOT=str(self.configuredRoot()))
+        self.assertEqual(changed.returncode, 2, changed.stderr)
+        self.assertFalse(self.configuredRoot().exists())
+        self.assertTrue((self.runsDirectory() / "shared-1").is_dir())
+        self.assertEqual(self.run_script("release", **shared).returncode, 0)
+
+    def test_unsafe_roots_refuse_without_contacting_host(self):
+        for value in ("/", "/data", "relative/ubiquitty-linux-runs", "/data/../ubiquitty-linux-runs",
+                      "/data/./ubiquitty-linux-runs", "/data/a b/ubiquitty-linux-runs",
+                      "/data/a;bad/ubiquitty-linux-runs", "/data/a:bad/ubiquitty-linux-runs",
+                      "/data/a\nbad/ubiquitty-linux-runs"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.run_script("stages", "linux-build", UBIQUITTY_LINUX_HOST="fake",
+                                         UBQ_LINUX_HOST_RUNS_ROOT=value)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(self.log.read_text(), "")
+
+    def test_symlink_root_refuses_without_touching_its_target(self):
+        self.prepareStage()
+        target = self.directory / "target"
+        target.mkdir()
+        runs = self.configuredRoot()
+        runs.parent.mkdir()
+        runs.symlink_to(target, target_is_directory=True)
+        result = self.run_script("stages", "linux-build", UBIQUITTY_LINUX_HOST="fake",
+                                 UBQ_LINUX_HOST_RUNS_ROOT=str(runs))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_default_root_cannot_redirect_cleanup_through_a_symlink(self):
+        self.prepareStage()
+        target = self.directory / "target"
+        target.mkdir()
+        self.runsDirectory().symlink_to(target, target_is_directory=True)
+        result = self.run_script("stages", "linux-build", UBIQUITTY_LINUX_HOST="fake")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_stale_cleanup_removes_only_marked_runs_inside_selected_root(self):
+        self.prepareStage()
+        runs = self.configuredRoot()
+        for name in ("old-owned", "old-unowned"):
+            path = runs / name
+            path.mkdir(parents=True)
+            if name == "old-owned":
+                (path / ".ubiquitty-linux-host-run").write_text(name + "\n")
+            old = time.time() - 2 * 86400
+            os.utime(path, (old, old))
+        outside = self.directory / "outside"
+        outside.mkdir()
+        (outside / "keep").write_text("keep")
+        (runs / "old-link").symlink_to(outside, target_is_directory=True)
+        result = self.run_script("stages", "linux-build", UBIQUITTY_LINUX_HOST="fake",
+                                 UBQ_LINUX_HOST_RUNS_ROOT=str(runs))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((runs / "old-owned").exists())
+        self.assertTrue((runs / "old-unowned").is_dir())
+        self.assertTrue((runs / "old-link").is_symlink())
+        self.assertEqual((outside / "keep").read_text(), "keep")
+
+    def test_existing_unmarked_run_is_never_adopted_or_deleted(self):
+        self.prepareStage()
+        run = self.configuredRoot() / "collision-1"
+        run.mkdir(parents=True)
+        sentinel = run / "keep"
+        sentinel.write_text("unrelated")
+        result = self.run_script("stages", "linux-build", UBIQUITTY_LINUX_HOST="fake",
+                                 UBQ_LINUX_HOST_RUNS_ROOT=str(self.configuredRoot()),
+                                 UBQ_LINUX_HOST_RUN="collision-1")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(sentinel.read_text(), "unrelated")
+
+    def test_fetch_cannot_name_a_path_outside_scratch(self):
+        for value in ("../escape", "/absolute", "a;bad", "a:b"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.run_script("stages", "--fetch", value + "=" + str(self.directory / "out"),
+                                         "linux-build", UBIQUITTY_LINUX_HOST="fake")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(self.log.read_text(), "")
+
+    def test_remote_stage_and_floor_arguments_cannot_be_shell_expressions(self):
+        for stage in ("linux-build;bad", "linux build", "$(bad)"):
+            self.log.write_text("")
+            result = self.run_script("stages", stage, UBIQUITTY_LINUX_HOST="fake")
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(self.log.read_text(), "")
+        result = self.run_script("stages", "linux-build", UBIQUITTY_LINUX_HOST="fake",
+                                 UBQ_LINUX_HOST_MIN_FREE_GB="10;bad")
         self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.log.read_text(), "")
+
+    def test_tampered_state_cannot_redirect_release(self):
+        state = self.directory / "ci/linux-host-state-1.state"
+        state.parent.mkdir()
+        for value in ("/", "/data/../ubiquitty-linux-runs", "/data/ubiquitty-linux-runs\nextra"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                state.write_text("fake\n" + value + "\n")
+                result = self.run_script("release", UBQ_LINUX_HOST_RUN="state-1")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(state.is_file())
+                self.assertEqual(self.log.read_text(), "")
+
+    def test_selected_filesystem_keeps_the_default_ten_gibibyte_floor(self):
+        self.prepareStage()
+        shared = dict(UBIQUITTY_LINUX_HOST="fake", UBQ_LINUX_HOST_RUNS_ROOT=str(self.configuredRoot()))
+        low = self.run_script("stages", "linux-build", **shared, UBQ_TEST_FREE_KIB=str(9 * 1048576))
+        self.assertEqual(low.returncode, 3, low.stderr)
+        enough = self.run_script("stages", "linux-build", **shared, UBQ_TEST_FREE_KIB=str(10 * 1048576))
+        self.assertEqual(enough.returncode, 0, enough.stderr)
+
+    def test_failed_cleanup_retains_its_state_for_a_later_release(self):
+        self.prepareStage()
+        shared = dict(UBIQUITTY_LINUX_HOST="fake", UBQ_LINUX_HOST_RUN="retry-cleanup",
+                      UBQ_LINUX_HOST_RUNS_ROOT=str(self.configuredRoot()))
+        self.assertEqual(self.run_script("stages", "linux-build", **shared).returncode, 0)
+        ssh = self.bin / "ssh"
+        ssh.write_text("#!/bin/sh\nexit 255\n")
+        failed = self.run_script("release", **shared)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertTrue((self.configuredRoot() / "retry-cleanup").is_dir())
+        self.assertTrue((self.directory / "ci/linux-host-retry-cleanup.state").is_file())
+        ssh.write_text(FAKE_SSH)
+        self.assertEqual(self.run_script("release", **shared).returncode, 0)
+        self.assertFalse((self.configuredRoot() / "retry-cleanup").exists())
 
 
 if __name__ == "__main__":
