@@ -4324,13 +4324,19 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
     ///
     /// - Parameters:
     ///   - trigger: The pane whose event asked for this, whose bar alone is
-    ///     restyled; nil restyles every bar, for an edge every pane shares.
+    ///     restyled; nil also re-derives every pane's presentation, for a
+    ///     window, layout, or focus edge every pane shares.
     ///   - writesStripBack: Whether the tab's label is written back into the
     ///     strip even where the bake did not move — an edge that made AppKit
     ///     re-derive the pill's colour rather than one that moved the title.
     package func refreshTitles(trigger: TerminalSurface? = nil, writesStripBack: Bool = false) {
-        for surface in projectedSurfaces {
-            surface.recomputePresentation()
+        // Content and metadata do not move pane visibility. Content delivery
+        // already owes the affected frame; re-deriving presentation would
+        // owe every settled sibling another one and re-ask its metadata needs.
+        if trigger == nil {
+            for surface in projectedSurfaces {
+                surface.recomputePresentation()
+            }
         }
         refreshWindowTagLocation()
         let facts = titleSurface.map { titleWeaveInputs(for: $0) }

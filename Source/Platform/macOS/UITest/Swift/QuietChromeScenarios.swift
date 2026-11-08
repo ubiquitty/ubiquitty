@@ -188,6 +188,174 @@ private enum QuietWindowShape: CaseIterable {
 enum QuietChromeScenarios {
     /// Registers every scenario in this file.
     static func register() {
+        UBUITestRegister("swift_shell_pane_data_updates_leave_settled_siblings_unowed") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                let saved = t.configureAppending(
+                    "[title]\nwindow_app_title = true\nwindow_directory = true\nwindow_directory_path = true\n"
+                        + "window_process = false\nwindow_dimensions = false\n"
+                )
+                defer { t.restoreConfiguration(saved) }
+                guard let shell = TerminalWindowController.spawn(), let window = shell.window else {
+                    t.expect(false, desc: "a Swift-shell window opens")
+                    return
+                }
+                defer { window.close() }
+                window.makeKeyAndOrderFront(nil)
+                shell.splitRight(nil)
+                t.pump(1.2)
+                stopIngest(of: shell)
+                t.pump(0.4)
+                let surfaces = shell.paneSurfacesForTesting
+                guard surfaces.count == 2, let active = shell.focusedSurfaceForTesting,
+                    let sibling = surfaces.first(where: { $0 !== active })
+                else {
+                    t.expect(false, desc: "two panes are visible")
+                    return
+                }
+                for surface in surfaces {
+                    // No blinking cells or cursor can owe a later frame. Prime
+                    // both responder edges before measuring a focus change.
+                    window.makeFirstResponder(surface)
+                    surface.feed(Data("\u{1b}[0m\u{1b}[?25l\u{1b}[2J\u{1b}[HSETTLED".utf8))
+                    surface.isFullyOccludedForTesting = false
+                    surface.deliver([.screenDirty])
+                }
+                window.makeFirstResponder(active)
+                NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+                let isSettled = {
+                    surfaces.allSatisfy {
+                        $0.framesEncodedForTesting > 0 && !$0.isFrameOwedForTesting && !$0.drive.isFrameHeld
+                    }
+                }
+                t.expect(t.wait(until: isSettled, timeout: 5), desc: "both visible panes draw and settle")
+                t.pump(0.3)
+
+                let siblingAttempts = sibling.encodeAttemptCount
+                let activeFrames = active.framesEncodedForTesting
+                active.feed(Data("\r\nPACE-SOURCE".utf8))
+                active.deliver([.screenDirty])
+                // Read before pumping: the sibling must never be owed a
+                // frame, even if its renderer could cheaply reuse the grid.
+                t.expect(active.isFrameOwedForTesting, desc: "output owes the pane that received it a frame")
+                t.expect(!sibling.isFrameOwedForTesting, desc: "one pane's output leaves its settled sibling unowed")
+                t.expect(
+                    t.wait(until: { isSettled() && active.framesEncodedForTesting > activeFrames }, timeout: 5),
+                    desc: "the output pane draws its new content"
+                )
+                t.expect(active.gridTextForTesting().contains("PACE-SOURCE"), desc: "the new content remains in its pane")
+                t.expect(sibling.encodeAttemptCount == siblingAttempts, desc: "the settled sibling makes no encode attempt")
+
+                active.feed(Data("\u{1b}]2;PACE-TITLE\u{07}".utf8))
+                active.deliver([.titleChanged])
+                t.expect(active.title == "PACE-TITLE", desc: "title delivery updates its own surface")
+                t.expect(window.title.contains("PACE-TITLE"), desc: "title delivery updates the active window title")
+                t.expect(!sibling.isFrameOwedForTesting, desc: "a title change leaves the sibling unowed")
+                t.pump(0.3)
+                t.expect(t.wait(until: isSettled, timeout: 5), desc: "the title change settles")
+
+                active.feed(Data("\u{1b}]7;file://localhost/tmp/pace-directory\u{07}".utf8))
+                active.deliver([.directoryChanged])
+                t.expect(active.currentDirectory == "/tmp/pace-directory", desc: "directory delivery updates its own surface")
+                t.expect(window.title.contains("pace-directory"), desc: "directory delivery updates the active window title")
+                t.expect(!sibling.isFrameOwedForTesting, desc: "a directory change leaves the sibling unowed")
+                t.pump(0.3)
+                t.expect(t.wait(until: isSettled, timeout: 5), desc: "the directory change settles")
+
+                let titleWeaves = shell.windowTitleWeavesForTesting
+                active.deliver(RuntimeEvents(.processStateChanged))
+                t.expect(!sibling.isFrameOwedForTesting, desc: "an unchanged process sample leaves the sibling unowed")
+                t.expect(
+                    shell.windowTitleWeavesForTesting == titleWeaves,
+                    desc: "an unchanged process sample does not re-weave the title"
+                )
+                t.pump(0.3)
+                t.expect(sibling.encodeAttemptCount == siblingAttempts, desc: "pane metadata causes no sibling encode")
+
+                sibling.needsDisplay = true
+                active.deliver([.screenDirty])
+                t.expect(sibling.isFrameOwedForTesting, desc: "delivery preserves a frame the sibling already owed")
+                t.expect(t.wait(until: isSettled, timeout: 5), desc: "both independently owed frames draw")
+
+                // A real palette change still updates the affected capture and
+                // its native chrome. Shared chrome may owe other panes here.
+                let chromeBefore = shell.chromeRepaintsForTesting
+                let paletteFrames = active.framesEncodedForTesting
+                active.feed(Data("\u{1b}]10;#80a0c0\u{07}\u{1b}]11;#204060\u{07}".utf8))
+                active.deliver([.screenDirty])
+                let colors = active.drive.readCoherentColors().colors
+                t.expect(
+                    colors.foreground.red == 128 && colors.foreground.green == 160 && colors.foreground.blue == 192
+                        && colors.background.red == 32 && colors.background.green == 64 && colors.background.blue == 96,
+                    desc: "screen delivery publishes its new default foreground and background"
+                )
+                t.expect(shell.chromeRepaintsForTesting > chromeBefore, desc: "the native chrome follows the palette change")
+                t.expect(
+                    t.wait(until: { isSettled() && active.framesEncodedForTesting > paletteFrames }, timeout: 5),
+                    desc: "the changed palette is drawn"
+                )
+
+                // These window edges still re-derive presentation. They carry
+                // no output whose delivery could accidentally repair them.
+                window.makeFirstResponder(active)
+                t.expect(
+                    t.wait(until: { shell.focusedSurfaceForTesting === active && isSettled() }, timeout: 5),
+                    desc: "the original pane has focus before measuring the edge"
+                )
+                let focusAttempts = sibling.encodeAttemptCount
+                let focusFrames = sibling.framesEncodedForTesting
+                let focusEdges = shell.paneFocusEdgesForTesting
+                let didAcceptResponder = window.makeFirstResponder(sibling)
+                t.expect(
+                    didAcceptResponder && window.firstResponder === sibling && shell.focusedSurfaceForTesting === sibling
+                        && sibling.isFrameOwedForTesting,
+                    desc: "focus selects the new pane and owes its presentation a frame without output"
+                )
+                t.expect(
+                    t.wait(
+                        until: { sibling.encodeAttemptCount > focusAttempts },
+                        timeout: 5
+                    ),
+                    desc: "focus still attempts its owed frame without output"
+                )
+                let focusDiagnostic =
+                    "[quiet-focus] edges=\(shell.paneFocusEdgesForTesting - focusEdges) "
+                    + "attempts=\(sibling.encodeAttemptCount - focusAttempts) commits=\(sibling.framesEncodedForTesting - focusFrames)\n"
+                FileHandle.standardError.write(Data(focusDiagnostic.utf8))
+                t.expect(t.wait(until: isSettled, timeout: 5), desc: "the focus change settles")
+                let columnsBefore = sibling.drive.readSnapshot().columns
+                let resizeFrames = sibling.framesEncodedForTesting
+                let size = window.contentView?.bounds.size ?? .zero
+                window.setContentSize(NSSize(width: size.width + 120, height: size.height))
+                t.expect(
+                    t.wait(
+                        until: {
+                            sibling.drive.readSnapshot().columns != columnsBefore && sibling.framesEncodedForTesting > resizeFrames
+                        },
+                        timeout: 5
+                    ),
+                    desc: "a resize still draws the new grid without output"
+                )
+                for surface in surfaces {
+                    surface.isFullyOccludedForTesting = true
+                }
+                NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+                sibling.feed(Data("\r\nPACE-REVEAL".utf8))
+                sibling.deliver([.screenDirty])
+                t.pump(0.3)
+                let revealFrames = sibling.framesEncodedForTesting
+                for surface in surfaces {
+                    surface.isFullyOccludedForTesting = false
+                }
+                NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+                t.expect(
+                    t.wait(until: { isSettled() && sibling.framesEncodedForTesting > revealFrames }, timeout: 5),
+                    desc: "reveal still draws the covered pane's pending content"
+                )
+                t.expect(sibling.gridTextForTesting().contains("PACE-REVEAL"), desc: "revealed content remains current")
+            }
+        }
+
         UBUITestRegister("swift_shell_quiet_screen_updates_touch_no_chrome_or_titles") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
