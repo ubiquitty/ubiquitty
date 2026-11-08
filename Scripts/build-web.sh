@@ -242,6 +242,7 @@ fi
 # shellcheck source=Scripts/build-provenance.sh
 source "$CORE_ROOT/Scripts/build-provenance.sh"
 build_provenance_stamp "$ROOT" "$BUILD"
+build_provenance_stamp "$ROOT" "$STAGE"
 echo "build-web: staged $STAGE" >&2
 
 if [ "${1:-}" = "--serve" ]; then

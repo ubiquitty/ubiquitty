@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Stanislav Yaglo
 # SPDX-License-Identifier: Apache-2.0
-"""Checks the GTK gate's actual App/Core/Kit inputs and verdict cache."""
+"""Checks App tool routing, source ownership, snapshots, and verdict caching."""
 
+import ast
 import importlib.util
 import json
 import os
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -476,6 +478,156 @@ printf 'RESULT:%s|%s|%s\\n' "${FAILED[*]-}" "${SKIPPED[*]-}" "${ELSEWHERE[*]-}"
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
         self.assertEqual(self.backends(calls), ["portable", "web"])
         self.assertEqual(result, ["", "", ""])
+
+
+class WebSnapshotOwnership(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="ubiquitty-web-snapshot-")
+        self.addCleanup(self.scratch.cleanup)
+        self.base = Path(self.scratch.name).resolve()
+        self.app = self.base / "app with spaces '$ literal"
+        self.core = self.app / "Libraries/ubiquitty-core"
+        self.kit = self.app / "Libraries/ubiquitty-kit"
+        self.output = self.base / "output with spaces '$ literal"
+        for directory in (self.app / "Scripts", self.core / "Scripts", self.kit,
+                          self.output / "web", self.output / "web-dist"):
+            directory.mkdir(parents=True)
+        for relative in ("Scripts/web-snapshot-shim.mjs", "Scripts/library-scripts.sh"):
+            shutil.copy2(ROOT / relative, self.app / relative)
+        for relative in ("Scripts/build_root.py", "Scripts/build-provenance.sh"):
+            shutil.copy2(CORE_ROOT / relative, self.core / relative)
+        self.shim = self.app / "Scripts/web-snapshot-shim.mjs"
+        self.wasm = self.output / "web-dist/ubiquitty.wasm"
+        self.wasm.write_bytes(b"snapshot fixture")
+        self.environment = {name: value for name, value in os.environ.items()
+                            if not name.startswith("GIT_") and name not in (
+                                "UBQ_BUILD_ROOT", "UBIQUITTY_DERIVED_DATA", "UBQ_CORE_ROOT", "UBQ_KIT_ROOT",
+                                "UBIQUITTY_CORE_SOURCE_DIR", "UBIQUITTY_KIT_SOURCE_DIR")}
+        self.environment.update(UBQ_BUILD_ROOT=str(self.output), GIT_CONFIG_NOSYSTEM="1",
+                                GIT_CONFIG_GLOBAL=os.devnull, GIT_AUTHOR_NAME="Fixture",
+                                GIT_AUTHOR_EMAIL="fixture@example.invalid", GIT_COMMITTER_NAME="Fixture",
+                                GIT_COMMITTER_EMAIL="fixture@example.invalid")
+        self.source = self.core / "Source/Core/Fixture.cpp"
+        self.source.parent.mkdir(parents=True)
+        self.source.write_text("fixture\n")
+        (self.core / "Scripts/portable-core-sources.txt").write_text("Source/Core/Fixture.cpp\n")
+
+    def probe(self, environment=None):
+        return subprocess.run([str(self.shim), "--print-render-binary"], cwd=self.base,
+                              env=environment or self.environment, text=True, capture_output=True, timeout=15)
+
+    def guards(self):
+        runner = CORE_ROOT / "Tests/Snapshots/run.py"
+        names = {"_rendering_binary", "_refuse_if_stale", "_refuse_if_foreign",
+                 "_renders_the_same_sources", "_portable_core_paths"}
+        functions = [node for node in ast.parse(runner.read_text()).body
+                     if isinstance(node, ast.FunctionDef) and node.name in names]
+        self.assertEqual({node.name for node in functions}, names)
+        spec = importlib.util.spec_from_file_location("web_snapshot_roots", CORE_ROOT / "Scripts/ubq_roots.py")
+        roots = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = roots
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(roots)
+        namespace = dict(Path=Path, os=os, subprocess=subprocess, sys=sys, ROOT=self.core,
+                         SUBJECT_ROOT=self.app, SOURCE_FILES=SimpleNamespace(roots=(self.core, self.kit, self.app)),
+                         _roots=roots)
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(runner), "exec"), namespace)
+        return namespace
+
+    def test_probe_uses_canonical_core_for_gitless_app_with_spaces(self):
+        environment = self.environment.copy()
+        environment.pop("UBQ_BUILD_ROOT")
+        environment["UBIQUITTY_DERIVED_DATA"] = str(self.output)
+        expected = subprocess.run([sys.executable, str(self.core / "Scripts/build_root.py"), str(self.app)],
+                                  env=environment, capture_output=True, text=True, check=True).stdout.strip()
+        result = self.probe(environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(Path(expected) / "web-dist/ubiquitty.wasm"))
+        self.assertFalse((self.app / "Scripts/build_root.py").exists())
+
+    def test_probe_preserves_external_root_aliases_and_precedence(self):
+        external = self.base / "external Core with spaces '$ literal"
+        (external / "Scripts").mkdir(parents=True)
+        shutil.copy2(self.core / "Scripts/build_root.py", external / "Scripts/build_root.py")
+        (self.core / "Scripts/build_root.py").write_text("raise SystemExit('wrong canonical owner')\n")
+        for mode in ("UBQ_CORE_ROOT", "UBIQUITTY_CORE_SOURCE_DIR", "precedence"):
+            with self.subTest(mode=mode):
+                environment = self.environment.copy()
+                if mode == "precedence":
+                    environment.update(UBQ_CORE_ROOT=str(external),
+                                       UBIQUITTY_CORE_SOURCE_DIR=str(self.base / "wrong owner"))
+                else:
+                    environment[mode] = str(external)
+                result = self.probe(environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(self.wasm))
+
+    def test_probe_refuses_an_uninitialized_or_missing_core_owner(self):
+        (self.core / "Scripts/build_root.py").unlink()
+        for mode in ("uninitialized", "missing explicit owner"):
+            with self.subTest(mode=mode):
+                environment = self.environment.copy()
+                if mode == "missing explicit owner":
+                    environment["UBQ_CORE_ROOT"] = str(self.base / "missing Core")
+                result = self.probe(environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("build_root.py", result.stderr)
+
+    def test_real_launcher_guard_measures_wasm_and_rejects_stale_wasm(self):
+        guards = self.guards()
+        # Only this fixture's files are aged: the launcher is older than Core,
+        # while the built module is newer, then independently becomes stale.
+        os.utime(self.shim, (100, 100))
+        os.utime(self.source, (200, 200))
+        os.utime(self.wasm, (300, 300))
+        previous = os.environ.copy()
+        try:
+            os.environ.clear()
+            os.environ.update(self.environment)
+            rendering = guards["_rendering_binary"](self.shim)
+        finally:
+            os.environ.clear()
+            os.environ.update(previous)
+        self.assertEqual(rendering, self.wasm)
+        guards["_refuse_if_stale"](rendering, "web")
+        os.utime(self.wasm, (150, 150))
+        os.utime(self.shim, (400, 400))
+        with self.assertRaisesRegex(RuntimeError, "older than the portable Core"):
+            guards["_refuse_if_stale"](rendering, "web")
+
+    def test_real_stage_stamp_and_foreign_guard_bind_the_distribution(self):
+        def git(*arguments):
+            return subprocess.run(["git", "-C", str(self.app), *arguments], env=self.environment,
+                                  capture_output=True, text=True, check=True).stdout.strip()
+
+        (self.app / "Source").mkdir()
+        source = self.app / "Source/Web.cpp"
+        source.write_text("original\n")
+        git("init", "-q")
+        git("add", "Source/Web.cpp")
+        git("commit", "-qm", "Fixture original")
+        original = git("rev-parse", "HEAD")
+        source.write_text("foreign\n")
+        git("commit", "-qam", "Fixture different renderer")
+        foreign = git("rev-parse", "HEAD")
+        builder = (ROOT / "Scripts/build-web.sh").read_text()
+        stamp = 'source "$CORE_ROOT/Scripts/build-provenance.sh"'
+        commands = builder[builder.index(stamp):].split('echo "build-web: staged', 1)[0]
+        environment = dict(self.environment, ROOT=str(self.app), CORE_ROOT=str(self.core),
+                           BUILD=str(self.output / "web"), STAGE=str(self.output / "web-dist"))
+        checked = subprocess.run(["bash", "-euc", commands], env=environment,
+                                 capture_output=True, text=True, timeout=15)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        for directory in (self.output / "web", self.output / "web-dist"):
+            stamp_file = directory / ".ubiquitty-build-provenance"
+            self.assertTrue(stamp_file.is_file(), directory)
+            self.assertEqual(stamp_file.read_text().split()[0], foreign)
+        guards = self.guards()
+        guards["_refuse_if_foreign"](self.wasm, "web")
+        git("checkout", "-q", original)
+        with self.assertRaisesRegex(RuntimeError, "built from"):
+            guards["_refuse_if_foreign"](self.wasm, "web")
 
 
 if __name__ == "__main__":
