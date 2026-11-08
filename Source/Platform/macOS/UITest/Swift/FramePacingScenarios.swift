@@ -3,6 +3,7 @@
 
 import AppKit
 import Metal
+import UbiquittyCore
 import UbiquittyKit
 
 // FramePacingScenarios.swift — what a Kit-hosted surface puts on the glass
@@ -35,6 +36,15 @@ import UbiquittyKit
 //   echo below is told apart from everything else by that alone.
 // - One key, from the call that delivers it to the presented frame carrying
 //   its echo.
+//
+// The under-load probes additionally type while ASCII, SGR, Unicode and mixed
+// output keep arriving. Their input marker occupies a protected row: its
+// captured cell instance identifies the commit carrying the response, so an
+// unrelated fresh flood frame cannot stand in for the key's echo.
+// Those probes record own-surface net-change commits only: both boundary and
+// live captures report that fact, and a callback that reused the glass cannot
+// consume a sibling's serial. They measure fresh-content pacing, not a census
+// of repeated or overlay-only commits.
 //
 // Only a window on a display reaches the glass. The harness parks its windows
 // off every display unless `--ui-test-visible` is given, so a parked run reads
@@ -91,6 +101,147 @@ private let repaintOnInputSource = """
         tick += 1
         os.write(1, b"\\x1b[999;1Htick %d" % tick)
     """
+
+/// A real-PTY producer that answers input without stopping its output.
+///
+/// The first row is outside the scroll region. Each q toggles a wide marker's
+/// SGR hidden bit there; wide cells retain a cell instance even when hidden.
+/// The response overwrites without erasing: a capture between control bytes
+/// still sees the previous marker's opposite hidden state.
+/// Separate h/r commands calibrate those states without advancing the q count.
+/// Lower rows keep changing independently, including around each response.
+/// Heavy work areas follow Core's public `Tools/sgr-profile/sgr_bench.cpp`
+/// and `Tests/Core/bench_ingest.cpp` recipes, translated down one marker row.
+private let floodOnInputSource = """
+    import os, select, sys, termios
+    attributes = termios.tcgetattr(0)
+    attributes[3] &= ~(termios.ECHO | termios.ICANON)
+    attributes[6][termios.VMIN] = 1
+    attributes[6][termios.VTIME] = 0
+    termios.tcsetattr(0, termios.TCSANOW, attributes)
+    def write_all(data):
+        while data:
+            data = data[os.write(1, data):]
+    marker = "界".encode("utf-8")
+    mode = sys.argv[1]
+    heavy = mode.startswith("heavy_")
+    ascii = b"abcdefghijklmnopqrstuvwxyz0123456789" * 2
+    sgr = b"".join(b"\\x1b[38;5;%d;48;5;%dmX" % (16 + n, 231 - n) for n in range(48)) + b"\\x1b[0m"
+    unicode = ("界é🙂e\\u0301" * 10).encode("utf-8")
+    if heavy:
+        columns, work_rows = 202, 49
+        attributes = (0, 1, 4, 7)
+        sequences = ["👨‍👩‍👧‍👦", "👩‍👩‍👦‍👦", "🧑🏻‍🤝‍🧑🏽", "👨🏿‍💻", "👩🏼‍❤️‍👨🏾", "🏳️‍🌈", "🏴‍☠️", "🧑‍🦲"]
+        sgr_frames = []
+        unicode_frames = []
+        if mode != "heavy_unicode":
+            for frame in range(216):
+                sgr_frames.append([
+                    b"\\x1b[%d;1H" % (y + 2) + b"".join(
+                        b"\\x1b[%d;38;5;%d;48;5;%dm%c" % (
+                            attributes[(x + y + frame) & 3],
+                            16 + (x * 3 + frame) % 216, 16 + (y * 5 + frame) % 216,
+                            65 + (x + y) % 26)
+                        for x in range(columns))
+                    for y in range(work_rows)])
+        if mode != "heavy_sgr":
+            for frame in range(8):
+                unicode_frames.append([
+                    b"\\x1b[%d;1H" % (y + 2) + "".join(
+                        sequences[(x + y + frame) % 8] for x in range(columns // 2)).encode("utf-8")
+                    for y in range(work_rows)])
+        cached_bytes = sum(len(row) for family in (sgr_frames, unicode_frames) for frame in family for row in frame)
+        assert cached_bytes <= 64 * 1024 * 1024
+        rows = work_rows + 1
+    else:
+        bodies = {"ascii": [ascii], "sgr": [sgr], "unicode": [unicode], "mixed": [ascii, sgr, unicode]}[mode]
+        rows = max(3, os.get_terminal_size(1).lines)
+    write_all(b"\\x1b[?25l\\x1b[H\\x1b[2J\\x1b[2;%dr\\x1b[H\\x1b[38;2;255;32;32m" % rows
+              + marker + b"\\x1b[0m input-0 ready\\x1b[2;1H")
+    received = 0
+    def receive_input():
+        global received
+        if select.select([0], [], [], 0)[0]:
+            for byte in os.read(0, 4096):
+                if byte in (ord("h"), ord("r")):
+                    visibility = b"8" if byte == ord("h") else b"28"
+                    write_all(b"\\x1b7\\x1b[H\\x1b[0;38;2;32;255;32;" + visibility + b"m"
+                              + marker + b"\\x1b[0m input-0 calibrated\\x1b8")
+                elif byte == ord("q"):
+                    received += 1
+                    visibility = b"8" if received % 2 else b"28"
+                    write_all(b"\\x1b7\\x1b[H\\x1b[0;38;2;255;32;32;" + visibility + b"m"
+                              + marker + b"\\x1b[0m input-%d\\x1b8" % received)
+    frame = 0
+    while True:
+        if heavy:
+            write_all(b"\\x1b[2;1H")
+            if mode == "heavy_sgr" or (mode == "heavy_mixed" and frame % 2 == 0):
+                data = sgr_frames[(frame if mode == "heavy_sgr" else frame // 2) % 216]
+            else:
+                data = unicode_frames[(frame if mode == "heavy_unicode" else frame // 2) % 8]
+            for row in data:
+                receive_input()
+                write_all(row)
+            write_all(b"\\x1b[0m")
+        else:
+            receive_input()
+            tick = frame + 1
+            write_all(b"load-%d " % tick + bodies[tick % len(bodies)] + b"\\x1b[0m\\r\\n")
+        frame += 1
+    """
+
+/// The parser and renderer work each continuous-output probe exercises.
+private enum FloodPayload: String {
+    case ascii
+    case sgr
+    case unicode
+    case mixed
+    case heavySGR = "heavy_sgr"
+    case heavyUnicode = "heavy_unicode"
+    case heavyMixed = "heavy_mixed"
+
+    var isHeavy: Bool { self == .heavySGR || self == .heavyUnicode || self == .heavyMixed }
+}
+
+/// The probe and encode observer's marker state, confined to their main actor.
+@MainActor
+private final class FloodMarkerCapture {
+    var shouldBeHidden: Bool?
+    var frameIndex: Int?
+    var lastAlpha: Float?
+    var freshCommits = 0
+}
+
+/// Copies the body values these producers change, excluding the marker row.
+///
+/// Indexed SGR changes colors while keeping its glyphs fixed. Copy scalar
+/// values under the model lock; no borrowed cells or cluster-pool IDs escape.
+///
+/// - Parameter surface: The producer's pane.
+/// - Returns: Its bounded body glyphs and indexed colors, or nil without a model.
+@MainActor
+private func floodBodyState(of surface: TerminalSurface) -> [UInt32]? {
+    surface.drive.withTerminal { terminal -> [UInt32] in
+        let columns = min(Int(terminal.columns), 202)
+        let rows = min(Int(terminal.rows), 50)
+        guard columns > 0, rows > 1 else { return [] }
+        var row = [Ubiquitty.Cell](repeating: Ubiquitty.Cell(), count: columns)
+        var state: [UInt32] = []
+        state.reserveCapacity((rows - 1) * columns * 3)
+        row.withUnsafeMutableBufferPointer { cells in
+            for index in 1..<rows {
+                Ubiquitty.Screen.getDisplayRow(terminal, 0, Int32(index), cells.baseAddress, Int32(columns))
+                for cell in cells {
+                    state.append(cell.codePoint)
+                    state.append(UInt32(cell.pen.foregroundIndex))
+                    state.append(UInt32(cell.pen.backgroundIndex))
+                }
+            }
+        }
+        return state
+    }
+}
 
 /// Expects a full-screen program's repaints, sent through a real PTY during a
 /// live resize, to present as soon as the drain has caught up with each one.
@@ -270,6 +421,22 @@ private struct PacingReading {
             longestStillSeconds * 1000
         )
     }
+
+    /// Describes a recording containing only fresh-content commits.
+    func freshContentSummary(interval: Double) -> String {
+        String(
+            format: "%.1f fresh/s (%d fresh frames, %.2fs, %d gaps); "
+                + "fresh gap p50 %.1f p99 %.1f max %.1f intervals; content still at most %.1f ms",
+            freshPerSecond,
+            fresh,
+            seconds,
+            gaps.count,
+            percentile(gaps, 0.5) / interval,
+            percentile(gaps, 0.99) / interval,
+            (gaps.max() ?? 0) / interval,
+            longestStillSeconds * 1000
+        )
+    }
 }
 
 /// How busy the machine is with work other than the scenario's.
@@ -403,6 +570,43 @@ enum FramePacingScenarios {
             MainActor.assumeIsolated {
                 measureFloodAndEcho(t)
             }
+        }
+
+        UBUITestRegister("swift_shell_echo_is_attributable_during_ascii_flood") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .ascii) }
+        }
+        UBUITestRegister("swift_shell_echo_is_attributable_during_sgr_flood") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .sgr) }
+        }
+        UBUITestRegister("swift_shell_echo_is_attributable_during_unicode_flood") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .unicode) }
+        }
+        UBUITestRegister("swift_shell_echo_is_attributable_during_mixed_flood") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .mixed) }
+        }
+        UBUITestRegister("swift_shell_echo_is_attributable_during_mixed_pane_floods") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .sgr, alongsideMixedPane: true) }
+        }
+        UBUITestRegister("swift_shell_input_during_heavy_sgr_churn_202x49") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .heavySGR) }
+        }
+        UBUITestRegister("swift_shell_input_during_heavy_unicode_202x49") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .heavyUnicode) }
+        }
+        UBUITestRegister("swift_shell_input_during_heavy_mixed_202x49") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .heavyMixed) }
+        }
+        UBUITestRegister("swift_shell_input_during_two_heavy_panes_202x49") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .heavySGR, alongsideMixedPane: true) }
         }
 
         UBUITestRegister("swift_shell_live_resize_does_not_wait_for_output_to_settle") { context in
@@ -863,6 +1067,338 @@ enum FramePacingScenarios {
                         "the deliver flush repainted the Swift-hosted pane (\(TerminalWindowController.tmuxRepaintsForTesting - before) times)"
                 )
             }
+        }
+    }
+
+    /// Times input responses carried by identified frames while output flows.
+    ///
+    /// - Parameters:
+    ///   - t: The run's context.
+    ///   - payload: The output the producer keeps sending between inputs.
+    ///   - alongsideMixedPane: Whether a second visible pane also floods.
+    @MainActor
+    private static func measureInputDuringFlood(_ t: UBUITestContext, payload: FloodPayload, alongsideMixedPane: Bool = false) {
+        let configuration: String? =
+            payload.isHeavy
+            ? t.configureAppending(
+                "[window]\ninitial_columns = \(alongsideMixedPane ? 406 : 202)\ninitial_rows = \(alongsideMixedPane ? 52 : 50)\n"
+            ) : nil
+        defer {
+            if let configuration { t.restoreConfiguration(configuration) }
+        }
+        let program = NSTemporaryDirectory() + "ubq-input-during-\(payload.rawValue)-\(ProcessInfo.processInfo.processIdentifier).py"
+        guard (try? floodOnInputSource.write(toFile: program, atomically: true, encoding: .utf8)) != nil else {
+            t.expect(false, desc: "the input-responsive flood program is written")
+            return
+        }
+        defer { try? FileManager.default.removeItem(atPath: program) }
+        let loadBefore = MachineLoad()
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical],
+            reason: "timing input during output"
+        )
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+        guard
+            let shell = TerminalWindowController.spawn(
+                arguments: ["/usr/bin/python3", program, payload.rawValue],
+                localePolicy: .auto,
+                sessionLifetime: .outlivesChild
+            ),
+            let window = shell.window,
+            let content = window.contentView,
+            let surface = terminalSurface(under: content)
+        else {
+            t.expect(false, desc: "a Swift-shell window opens on the input-responsive flood")
+            return
+        }
+        defer { window.close() }
+        window.orderFrontRegardless()
+        surface.setSurfaceFocused(true)
+        guard WindowContainment.isOffscreen || window.screen != nil else {
+            t.refuse("the visible under-load probe has no display for its window")
+            return
+        }
+        let isOnDisplay = !WindowContainment.isOffscreen && window.screen != nil
+        let panelRate = window.screen.map { max(1, $0.maximumFramesPerSecond) } ?? 60
+        let interval = 1.0 / Double(panelRate)
+        let preparationSeconds = payload.isHeavy ? 15.0 : 5.0
+        guard t.wait(until: { surface.gridTextForTesting().hasPrefix("界 input-0 ready") }, timeout: preparationSeconds) else {
+            t.expect(false, desc: "the producer reserves its input marker row")
+            return
+        }
+
+        var sibling: TerminalSurface?
+        var siblingCommitTimes: [Double] = []
+        if alongsideMixedPane {
+            shell.splitRight(nil)
+            guard let other = shell.paneSurfacesForTesting.first(where: { $0 !== surface }) else {
+                t.expect(false, desc: "the continuous-output probe has a second pane")
+                return
+            }
+            sibling = other
+            let quotedProgram = "'" + program.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            let siblingPayload = payload.isHeavy ? FloodPayload.heavyMixed.rawValue : FloodPayload.mixed.rawValue
+            other.send("exec /usr/bin/python3 \(quotedProgram) \(siblingPayload)\n")
+            guard t.wait(until: { other.gridTextForTesting().hasPrefix("界 input-0 ready") }, timeout: preparationSeconds) else {
+                t.expect(false, desc: "the sibling also runs continuous mixed output")
+                return
+            }
+            window.makeFirstResponder(surface)
+        }
+        if !isOnDisplay {
+            // A parked window is reported covered. Permit CPU-side commits
+            // there while leaving visible runs subject to real occlusion.
+            surface.isFullyOccludedForTesting = false
+            sibling?.isFullyOccludedForTesting = false
+            NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        }
+        let panes = sibling.map { [surface, $0] } ?? [surface]
+        if payload.isHeavy {
+            let grid = surface.drive.readSnapshot()
+            if panes.contains(where: { $0.drive.readSnapshot().columns != 202 || $0.drive.readSnapshot().rows != 50 }),
+                let renderer = surface.renderer, let content = window.contentView
+            {
+                // Pane headers and divider insets consume a few cells. Adjust
+                // only the fixture's window, using the layout's own cell size.
+                let cell = renderer.cellSize(for: surface)
+                let missingColumns = panes.reduce(0) { $0 + 202 - Int($1.drive.readSnapshot().columns) }
+                window.setContentSize(
+                    NSSize(
+                        width: content.bounds.width + CGFloat(missingColumns) * cell.width,
+                        height: content.bounds.height + CGFloat(50 - Int(grid.rows)) * cell.height
+                    )
+                )
+            }
+            guard
+                t.wait(
+                    until: { panes.allSatisfy { $0.drive.readSnapshot().columns == 202 && $0.drive.readSnapshot().rows == 50 } },
+                    timeout: 5
+                )
+            else {
+                t.expect(false, desc: "every heavy pane has a 202x49 work area below its protected marker row")
+                return
+            }
+        }
+        let grids =
+            panes.map {
+                let grid = $0.drive.readSnapshot()
+                return "\(grid.columns)x\(grid.rows)"
+            }
+            .joined(separator: ",")
+        let contentSize = window.contentView?.bounds.size ?? .zero
+        notePacing(
+            "\(payload.rawValue) geometry: panes \(grids), content \(Int(contentSize.width))x\(Int(contentSize.height)) points,"
+                + " scale \(window.backingScaleFactor), panel \(panelRate) Hz"
+                + (payload.isHeavy ? "; public work area 202x49, CUP rows shifted +1 for marker" : "; scrolling work area below marker")
+        )
+        let siblingObserver = sibling?.frameEncodedObserverForTesting
+        sibling?.frameEncodedObserverForTesting = { surface in
+            siblingObserver?(surface)
+            if surface.renderer?.lastFrameHadNetChange(for: surface) == true {
+                siblingCommitTimes.append(CACurrentMediaTime())
+            }
+        }
+        defer { sibling?.frameEncodedObserverForTesting = siblingObserver }
+
+        let marker = FloodMarkerCapture()
+        surface.beginRecordingPresentsForTesting()
+        defer { surface.endRecordingPresentsForTesting() }
+        let recordFrame = surface.frameEncodedObserverForTesting
+        surface.frameEncodedObserverForTesting = { surface in
+            // A boundary and a live capture both publish this own-surface
+            // verdict. Reproducing the glass requires a clean mask, so that
+            // callback cannot consume a sibling's serial from the shared ring.
+            guard surface.renderer?.lastFrameHadNetChange(for: surface) == true else { return }
+            marker.freshCommits += 1
+            let needsMarker = marker.shouldBeHidden != nil && marker.frameIndex == nil
+            let countBefore = needsMarker ? surface.recordedPresentsForTesting.count : 0
+            recordFrame?(surface)
+            guard needsMarker else { return }
+            let countAfter = surface.recordedPresentsForTesting.count
+            guard let alpha = surface.drawnForegroundAlphaForTesting(row: 0, column: 0) else { return }
+            marker.lastAlpha = alpha
+            guard countAfter > countBefore else { return }
+            // This reads the instance stream left by this encode, not the
+            // concurrently changing model. Native text can carry negative
+            // alpha for its secondary plane; either sign still draws ink.
+            let isHidden = abs(alpha) < 0.001
+            if let shouldBeHidden = marker.shouldBeHidden, marker.frameIndex == nil, isHidden == shouldBeHidden {
+                marker.frameIndex = countAfter - 1
+            }
+        }
+        // A clean protected row can be absent from an incremental instance
+        // stream. Calibrate with real producer writes after installing the
+        // observer: visible → hidden → visible, without starting a timer or
+        // incrementing the measured input counter. Nil never certifies either.
+        for (command, hidden) in [("h", true), ("r", false)] {
+            marker.shouldBeHidden = hidden
+            marker.frameIndex = nil
+            marker.lastAlpha = nil
+            let commitsBefore = marker.freshCommits
+            surface.send(command)
+            guard t.wait(until: { marker.frameIndex != nil }, timeout: 2) else {
+                t.expect(
+                    false,
+                    desc: "the calibration marker reaches its captured \(hidden ? "hidden" : "visible") state"
+                        + " (fresh commits \(marker.freshCommits - commitsBefore),"
+                        + " recorded \(surface.recordedPresentsForTesting.count), alpha \(String(describing: marker.lastAlpha)))"
+                )
+                return
+            }
+            notePacing(
+                "\(payload.rawValue) untimed calibration \(hidden ? "hidden" : "visible"):"
+                    + " commit \(marker.frameIndex ?? -1), alpha \(String(describing: marker.lastAlpha))"
+            )
+        }
+        marker.shouldBeHidden = nil
+        marker.frameIndex = nil
+
+        func expectOutputProgress(_ phase: String, input: Int) {
+            let panes = sibling.map { [surface, $0] } ?? [surface]
+            let beforeBodies = panes.map { floodBodyState(of: $0) }
+            let beforeCommits = [marker.freshCommits, siblingCommitTimes.count]
+            let beforeCount = surface.recordedPresentsForTesting.count
+            let end = CACurrentMediaTime() + 0.15
+            var changed = panes.map { _ in false }
+            _ = t.wait(
+                until: {
+                    for (index, pane) in panes.enumerated() where !changed[index] {
+                        let commits = index == 0 ? marker.freshCommits : siblingCommitTimes.count
+                        if commits > beforeCommits[index], let before = beforeBodies[index], let after = floodBodyState(of: pane) {
+                            changed[index] = before != after
+                        }
+                    }
+                    return changed.allSatisfy { $0 }
+                },
+                timeout: 0.15
+            )
+            // Keep the full observation stretch even when the first changed
+            // body lands early; sampling also avoids a cyclic recipe aliasing
+            // back to exactly its starting colors at the final instant.
+            t.pump(max(0, end - CACurrentMediaTime()))
+            for index in panes.indices {
+                let commits = index == 0 ? marker.freshCommits : siblingCommitTimes.count
+                t.expect(
+                    changed[index] && commits > beforeCommits[index],
+                    desc: "pane \(index) changes output and commits fresh content \(phase) input \(input) during \(payload.rawValue) flood"
+                )
+            }
+            let fresh = surface.recordedPresentsForTesting.dropFirst(beforeCount).filter(\.showsNewContent).count
+            t.expect(
+                fresh > 0,
+                desc: "the input pane commits fresh output frames \(phase) input \(input) during \(payload.rawValue) flood"
+            )
+        }
+
+        let floodStart = CACurrentMediaTime()
+        var missed: [String] = []
+        for input in 1...3 {
+            expectOutputProgress("before", input: input)
+            guard let press = keyPress("q", keyCode: 12, in: window) else {
+                t.expect(false, desc: "AppKit makes the under-load key press")
+                return
+            }
+            marker.frameIndex = nil
+            marker.shouldBeHidden = input % 2 == 1
+            let keyAt = CACurrentMediaTime()
+            surface.keyDown(with: press)
+            var response: TerminalSurface.PresentedFrameForTesting?
+            var responsePresentedAt: Double?
+            _ = t.wait(
+                until: {
+                    guard let index = marker.frameIndex else { return false }
+                    let frames = surface.recordedPresentsForTesting
+                    guard index < frames.count else { return false }
+                    response = frames[index]
+                    // The protected marker persists until the next input.
+                    // Subsequent retained frames carry it too, so a dropped
+                    // first drawable need not hide the response's real arrival.
+                    responsePresentedAt = frames.dropFirst(index).map(\.presentedSeconds).filter { $0 > 0 }.min()
+                    return !isOnDisplay || responsePresentedAt != nil
+                },
+                timeout: 2
+            )
+            marker.shouldBeHidden = nil
+            t.expect(
+                surface.gridTextForTesting().hasPrefix("界 input-\(input)"),
+                desc: "input \(input) reaches the \(payload.rawValue) producer while it writes"
+            )
+            if let response {
+                let commitDelay = response.committedSeconds - keyAt
+                let presentDelay = responsePresentedAt.map { $0 - keyAt }
+                notePacing(
+                    String(format: "%@ input %d during flood: commit %.1f ms", payload.rawValue, input, commitDelay * 1000)
+                        + (presentDelay.map { String(format: ", present %.1f ms (%.1f intervals)", $0 * 1000, $0 / interval) }
+                            ?? ", present unmeasured")
+                )
+                t.expect(response.showsNewContent && commitDelay >= 0, desc: "the marker identifies a fresh commit after input \(input)")
+                if commitDelay > maxStillSeconds {
+                    missed.append(String(format: "%@ input %d committed after %.1f ms", payload.rawValue, input, commitDelay * 1000))
+                }
+                if isOnDisplay, presentDelay.map({ $0 / interval > maxEchoIntervals }) ?? true {
+                    missed.append("\(payload.rawValue) input \(input) did not reach the glass within \(maxEchoIntervals) intervals")
+                }
+            } else {
+                missed.append("\(payload.rawValue) input \(input) had no attributable commit within 2 s")
+            }
+            expectOutputProgress("after", input: input)
+        }
+        let floodEnd = CACurrentMediaTime()
+        t.pump(0.2)
+        let record = surface.recordedPresentsForTesting
+        let loadAfter = MachineLoad()
+        let label = payload.rawValue + (alongsideMixedPane ? " with mixed sibling" : "")
+        let committed = PacingReading(record, from: floodStart, to: floodEnd, byPresent: false)
+        let presented = PacingReading(record, from: floodStart, to: floodEnd, byPresent: true)
+        notePacing("\(label) during-input fresh content, by commit: " + committed.freshContentSummary(interval: interval))
+        if sibling != nil {
+            let times = [floodStart] + siblingCommitTimes.filter { $0 >= floodStart && $0 < floodEnd } + [floodEnd]
+            let longestGap = zip(times.dropFirst(), times).map { $0 - $1 }.max() ?? 0
+            notePacing(
+                String(
+                    format: "mixed sibling fresh content: %d commits, longest fresh gap %.1f ms",
+                    times.count - 2,
+                    longestGap * 1000
+                )
+            )
+            if longestGap > maxStillSeconds {
+                missed.append(String(format: "mixed sibling commits stood still for %.1f ms", longestGap * 1000))
+            }
+        }
+        if isOnDisplay {
+            notePacing("\(label) during-input fresh content, on glass: " + presented.freshContentSummary(interval: interval))
+            guard record.contains(where: { $0.presentedSeconds > 0 }) else {
+                t.refuse("the under-load commits never reached the glass: the display or visible window is unavailable")
+                return
+            }
+            if presented.freshPerSecond < minFreshFractionOfPanelRate * Double(panelRate) {
+                missed.append("\(payload.rawValue) fresh presentations fell below \(minFreshFractionOfPanelRate * 100)% of \(panelRate) Hz")
+            }
+            if percentile(presented.gaps, 0.99) / interval > maxPresentedGapIntervals {
+                missed.append("\(payload.rawValue) p99 presented gap exceeded \(maxPresentedGapIntervals) intervals")
+            }
+            if presented.longestStillSeconds > maxStillSeconds {
+                missed.append(
+                    String(format: "%@ presented content stood still for %.1f ms", payload.rawValue, presented.longestStillSeconds * 1000)
+                )
+            }
+        } else {
+            notePacing("\(payload.rawValue) presented pacing and input-to-glass latency unmeasured: window parked")
+        }
+        if committed.longestStillSeconds > maxStillSeconds {
+            missed.append(
+                String(format: "%@ committed content stood still for %.1f ms", payload.rawValue, committed.longestStillSeconds * 1000)
+            )
+        }
+        notePacing("\(payload.rawValue) machine before: \(loadBefore.description); after: \(loadAfter.description)")
+        guard !missed.isEmpty else { return }
+        let processorsNeeded = processorsTheFloodKeepsBusy + (alongsideMixedPane ? 2 : 0)
+        if let busy = [loadBefore, loadAfter].first(where: { $0.isBusy(leaving: processorsNeeded) }) {
+            t.refuse("the machine is too busy to time input during output (\(busy.description)): " + missed.joined(separator: "; "))
+            return
+        }
+        for miss in missed {
+            t.expect(false, desc: miss)
         }
     }
 
