@@ -29,8 +29,10 @@ import { execFileSync } from 'child_process';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // The distribution lives in the external build root, outside the checkout,
-// where build-web.sh stages it; the root is what Scripts/build_root.py names.
-const buildRoot = execFileSync('python3', [path.join(root, 'Scripts', 'build_root.py'), root],
+// where build-web.sh stages it. The app's loader selects the owning Core helper.
+const buildRoot = execFileSync('bash', ['-c',
+  'set -e; . "$1/Scripts/library-scripts.sh"; exec python3 "$CORE_ROOT/Scripts/build_root.py" "$APP_ROOT"',
+  'web-snapshot-build-root', root],
   { encoding: 'utf8' }).trim();
 const distribution = path.join(buildRoot, 'web-dist');
 const moduleFile = path.join(distribution, 'ubiquitty.js');
