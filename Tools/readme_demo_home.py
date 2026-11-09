@@ -12,6 +12,10 @@ the person or machine that wrote it.
 
 import json
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "Scripts"))
+import library_scripts  # noqa: E402
 
 
 # Folders the recipe's tabs open in, created even when they hold nothing:
@@ -27,16 +31,13 @@ COPIES = {
     "Docs/sync.md": "Docs/sync.md",
 }
 
-def repository_file(root, source):
-    """A repository file, from the checkout that holds it.
+def repository_file(source):
+    """A repository file, from the checkout that holds it: the app's, the Kit's or Core's.
 
-    The libraries the app carries are checkouts of their own under Libraries/;
-    in a checkout that holds every repository the file is in `root`.
+    Scripts/library_scripts.py names those checkouts; in a checkout that holds
+    every repository they are one tree.
     """
-    for checkout in (Path(root), Path(root) / "Libraries" / "ubiquitty-core", Path(root) / "Libraries" / "ubiquitty-kit"):
-        if (checkout / source).is_file():
-            return checkout / source
-    return Path(root) / source
+    return Path(library_scripts.locate(source))
 
 
 EXECUTABLES = ("bin/status-run", "bin/pst-hook", "bin/bench-sync")
@@ -724,5 +725,5 @@ def files(root, typography_feed):
     }
     result = {path: text.encode("utf-8") for path, text in result.items()}
     for path, source in COPIES.items():
-        result[path] = repository_file(root, source).read_bytes()
+        result[path] = repository_file(source).read_bytes()
     return result

@@ -1,0 +1,19 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+
+# The Kit pin: once a day Dependabot proposes moving Libraries/ubiquitty-kit to
+# the Kit's default branch. Core comes with it, as the Kit's own pinned
+# submodule, so a Core change reaches the app as a Kit bump; Dependabot reads
+# only this repository's .gitmodules and never proposes the nested pin. A pull
+# request is titled the way this repository's commits are, an imperative
+# sentence with no prefix ("Bump Libraries/... from <commit> to <commit>"), and
+# carries no labels, which this repository does not use.
+version: 2
+updates:
+  - package-ecosystem: gitsubmodule
+    directory: "/"
+    schedule:
+      interval: daily
+    allow:
+      - dependency-name: Libraries/ubiquitty-kit
+    labels: []

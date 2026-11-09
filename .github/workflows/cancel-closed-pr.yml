@@ -17,9 +17,10 @@ name: Cancel a closed PR's runs
 # has already started holds a runner until it is told to stop.
 #
 # This is the backstop, not the mechanism. It needs a runner of its own, so it
-# starts only once one is free; `Libraries/ubiquitty-core/Tools/merge-pr.py` cancels from the client at
-# merge time. This covers a merge made in the web interface, where there is no
-# client to do it, and a pull request closed without merging.
+# starts only once one is free;
+# `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tools/merge-pr.py` cancels from the
+# client at merge time. This covers a merge made in the web interface, where
+# there is no client to do it, and a pull request closed without merging.
 
 on:
   pull_request:

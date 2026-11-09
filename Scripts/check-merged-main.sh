@@ -42,7 +42,7 @@
 # beside NDEBUG, because CellGrid.h declares members under #ifndef NDEBUG and
 # the two halves would disagree about sizeof(CellGrid). RelWithDebInfo carries
 # NDEBUG, so reaching the test tree takes a second configure at Debug —
-# Libraries/ubiquitty-core/Scripts/build-tests.sh — which is a different build rather than a flag on this
+# Core's Scripts/build-tests.sh — which is a different build rather than a flag on this
 # one.
 #
 # So the combination class this script exists for is closed for what ships and
@@ -65,8 +65,9 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# The checkouts holding the scripts this one runs; see CMakeLists.txt.
-CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+# The checkouts holding the scripts this one runs, CORE_ROOT and KIT_ROOT.
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 
 # How many compilers this machine can run at once; see Scripts/build-jobs.sh.
 # shellcheck source=Scripts/build-jobs.sh

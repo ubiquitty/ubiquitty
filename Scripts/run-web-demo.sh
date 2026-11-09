@@ -16,7 +16,7 @@
 #   The build type is named and then VERIFIED. An unset CMAKE_BUILD_TYPE means
 #   no optimisation flags, not a default, and a -O0 daemon is indistinguishable
 #   from a slow one across the wire — it has cost an hour twice. The daemon is
-#   also built in a directory of its own, because Libraries/ubiquitty-core/Scripts/run-tests.sh
+#   also built in a directory of its own, because Core's Scripts/run-tests.sh
 #   configures build/host as Debug for its own (correct) reasons and whichever
 #   ran last decides what build/host/ubiquitty-host is.
 #
@@ -38,8 +38,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# The checkouts holding the scripts this one runs; see CMakeLists.txt.
-CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+# The checkouts holding the scripts this one runs, CORE_ROOT and KIT_ROOT.
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
 . "$CORE_ROOT/Scripts/build-root.sh"

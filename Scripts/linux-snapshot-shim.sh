@@ -14,8 +14,9 @@
 set -eu
 
 ROOT=$(unset CDPATH; cd -- "$(dirname -- "$0")/.." && pwd)
-# The checkouts holding the scripts this one runs; see CMakeLists.txt.
-CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+# The checkouts holding the scripts this one runs, CORE_ROOT and KIT_ROOT.
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 # One binary, two spellings. run-linux.sh mounts build/linux-container over
 # /src/build, so a path is not the same file inside the container and out: the
 # two below name one artefact. Spelled once, the shim checks a file the host can

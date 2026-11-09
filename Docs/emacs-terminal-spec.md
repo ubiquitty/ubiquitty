@@ -87,7 +87,7 @@ uncompressed checkpoint and full-row forms.
 
 ## Decoder and interoperability checks
 
-`Libraries/ubiquitty-core/Scripts/run-tests.sh emacs_sync_decode` requires Emacs and feeds a
+`Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh emacs_sync_decode` requires Emacs and feeds a
 C++-encoded host stream to the actual client. The checks cover screen contents,
 cursor and modes, acknowledgement and resync, whole-record title adoption,
 image encoding, and outgoing input, paste, focus, viewport, and theme messages.

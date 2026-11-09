@@ -23,7 +23,9 @@ Ubiquitty is three repositories. Each depends only on the ones below it:
 [`ubiquitty`](https://github.com/ubiquitty/ubiquitty) →
 [`ubiquitty-kit`](https://github.com/ubiquitty/kit) →
 [`ubiquitty-core`](https://github.com/ubiquitty/core). This is the top one: the apps.
-It carries the other two as submodules under `Libraries/`.
+It carries the Kit as the submodule `Libraries/ubiquitty-kit`, and Core comes with
+the Kit, as the Kit's own submodule: the one Core this checkout builds is
+`Libraries/ubiquitty-kit/Libraries/ubiquitty-core`.
 
 ![A translucent Ubiquitty window over the desktop wallpaper, attached to a host session on a Linux machine and split in two panes: OpenCode answering in rich text, in proportional type with commands in monospace, beside a deployment monitor drawing a canary rollout's latency and error-rate graphs; the title bar names the host, hub, with its homelab tag, its badge counts one agent attached to the session, and the tabs show OpenCode, an idle Codex and a Claude Code waiting for a sign-in](Docs/images/opencode-proportional.png)
 
@@ -128,13 +130,15 @@ list each frontend's prerequisites and command. For the macOS app:
 ```sh
 git clone --recurse-submodules https://github.com/ubiquitty/ubiquitty.git
 cd ubiquitty
-git submodule update --init Libraries/ubiquitty-core Libraries/ubiquitty-kit
 ./Scripts/build-macos.sh          # the app, under the build root
 ./Scripts/install-macos.sh        # a release build, installed into /Applications
 ```
 
+`--recurse-submodules` checks out the Kit and, inside it, Core. A clone made
+without it fetches both with `git submodule update --init --recursive`.
+
 A local macOS build also builds the static Linux hosts it bundles, with
-`./Libraries/ubiquitty-core/Scripts/build-host-linux.sh`, which needs Docker (OrbStack or Docker
+`./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host-linux.sh`, which needs Docker (OrbStack or Docker
 Desktop). On a Mac without Docker, `./Scripts/build-macos.sh --no-linux-hosts`
 or `UBIQUITTY_LINUX_HOSTS=0 ./Scripts/install-macos.sh` builds the app without
 them, and Connect then gives manual install instructions for a Linux server.
@@ -220,7 +224,7 @@ DEC and ECMA-48 SGR surface.
 **Host effects have named capabilities.** Anything that can print
 bytes can set your title, read your clipboard, move your window, reprogram a
 key, or ask the terminal to open a file. Each of those side effects has an entry
-in one `Capability` vocabulary (`Libraries/ubiquitty-core/Source/PAL/Capability.h`). Policies are checked
+in one `Capability` vocabulary (`Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Source/PAL/Capability.h`). Policies are checked
 where the effect happens, not where the sequence parses. The verdict keys on **who
 drove it** — `Local`, `Agent`, or `Remote` — so a local program's OSC 52 read
 follows `[security] clipboard_read` (a prompt by default), an attached agent's
@@ -711,8 +715,28 @@ Install the repository's git hooks once per clone, so naming, formatting and
 module-boundary violations are caught at the commit rather than in CI:
 
 ```sh
-./Libraries/ubiquitty-core/Scripts/install-hooks.sh
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/install-hooks.sh
 ```
+
+### Core and the Kit in this checkout
+
+The app pins the Kit, and the Kit pins Core, so this checkout holds one Core, at
+`Libraries/ubiquitty-kit/Libraries/ubiquitty-core`, and it is the Core the Kit
+was built and tested against. The build, every script and CI read Core there.
+To use other checkouts, a script takes `UBQ_CORE_ROOT` or
+`UBIQUITTY_CORE_SOURCE_DIR` and `UBQ_KIT_ROOT` or `UBIQUITTY_KIT_SOURCE_DIR` from
+the environment, and a CMake configure takes `-DUBIQUITTY_CORE_SOURCE_DIR=` and
+`-DUBIQUITTY_KIT_SOURCE_DIR=`.
+
+To change Core while working in the app, work in that nested checkout: it is a
+clone of [`ubiquitty/core`](https://github.com/ubiquitty/core), so branch there,
+build and test the app against your edits from this root, and open the pull
+request against Core. A Core change then reaches the app in three steps: it
+merges into Core; the Kit moves its `Libraries/ubiquitty-core` pin to it; the
+app moves its `Libraries/ubiquitty-kit` pin to that Kit commit, which brings the
+new Core with it. Dependabot proposes each of the two pin moves daily, in the
+Kit and here. [Contributing](.github/contributing.md#core-and-the-kit) has the
+commands.
 
 ## Building
 
@@ -725,9 +749,9 @@ the repository root.
 | [macOS](Docs/platform-builds.md#macos) | `./Scripts/build-macos.sh` |
 | [iOS / iPadOS](Docs/platform-builds.md#ios-and-ipados) | `./Scripts/build-ios.sh` |
 | [Linux GTK4 / Vulkan](Docs/platform-builds.md#linux-gtk4-and-vulkan) | `./Scripts/build-linux-gtk.sh` |
-| [Headless host](Docs/platform-builds.md#headless-host-and-ubq) | `./Libraries/ubiquitty-core/Scripts/build-host.sh` |
-| [ubq CLI / MCP](Docs/platform-builds.md#headless-host-and-ubq) | `./Libraries/ubiquitty-core/Scripts/build-agent.sh` |
-| [Static Linux host assets](Docs/platform-builds.md#static-linux-host-binaries) | `./Libraries/ubiquitty-core/Scripts/build-host-linux.sh` |
+| [Headless host](Docs/platform-builds.md#headless-host-and-ubq) | `./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host.sh` |
+| [ubq CLI / MCP](Docs/platform-builds.md#headless-host-and-ubq) | `./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-agent.sh` |
+| [Static Linux host assets](Docs/platform-builds.md#static-linux-host-binaries) | `./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host-linux.sh` |
 | [Web / Wasm](Docs/platform-builds.md#web-and-webassembly) | `./Scripts/build-web.sh` |
 | [OpenBSD / NetBSD wscons](Docs/platform-builds.md#openbsd-and-netbsd-wscons) | CMake: `-DUBIQUITTY_FRONTEND=Wscons` |
 | [Emacs](Docs/platform-builds.md#emacs) | Build the host, then load or byte-compile the Elisp client |
@@ -753,13 +777,13 @@ explicit, freshly built binary; it does not discover an older installed app.
 ## Testing
 
 ```sh
-./Libraries/ubiquitty-core/Scripts/run-tests.sh                # App CTest cases, then its shell stanzas
-./Libraries/ubiquitty-core/Scripts/run-tests.sh --list-stanzas # the stanza names the filter accepts
-./Libraries/ubiquitty-core/Scripts/run-tests.sh test_app_tools # one named stanza, without CTest
-./Libraries/ubiquitty-core/Scripts/run-coverage.sh   # Core tests with line coverage
-python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --check-catalog # catalog/baseline integrity
-./Libraries/ubiquitty-core/Scripts/check-style.py        # every content gate on this branch's changes; --full for the whole tree
-./Libraries/ubiquitty-core/Scripts/check-acronyms.py     # WebKit/Cocoa naming lint (acronyms + abbreviations)
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh                # App CTest cases, then its shell stanzas
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh --list-stanzas # the stanza names the filter accepts
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh test_app_tools # one named stanza, without CTest
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-coverage.sh   # Core tests with line coverage
+python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --check-catalog # catalog/baseline integrity
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-style.py        # every content gate on this branch's changes; --full for the whole tree
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-acronyms.py     # WebKit/Cocoa naming lint (acronyms + abbreviations)
 ```
 
 Run the shared driver from the App checkout root. With external libraries or a
@@ -767,10 +791,10 @@ gitless export, invoke the chosen Core checkout's `Scripts/run-tests.sh`, set
 `UBQ_TESTS_ROOT` to the App root and `UBQ_KIT_ROOT` to its chosen Kit. The driver
 uses the Core checkout that owns it.
 
-The hooks `./Libraries/ubiquitty-core/Scripts/install-hooks.sh` installs need Bash, Git and Python 3.
+The hooks `./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/install-hooks.sh` installs need Bash, Git and Python 3.
 `pre-commit` also checks staged C and C++ with clang-format 23 and staged shell
 scripts with shellcheck, and prints that a check was skipped when its tool is
-missing. `commit-msg` checks the message with `Libraries/ubiquitty-core/Scripts/check-slop.py`.
+missing. `commit-msg` checks the message with `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-slop.py`.
 `pre-push` runs `Scripts/pre-push-gates.sh` at its default `quick` tier, which
 builds the host and the other targets whose sources the push changes, so it
 needs the build toolchain from the [platform build guide](Docs/platform-builds.md);
@@ -792,7 +816,7 @@ configures it without running the suite. The test's build fixture builds the
 binaries a case needs:
 
 ```sh
-CTEST_BUILD_DIR="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)/BuildHostTests/ctest"
+CTEST_BUILD_DIR="$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)/BuildHostTests/ctest"
 cmake -S . -B "$CTEST_BUILD_DIR" -G Ninja -DUBIQUITTY_FRONTEND=Core -DUBIQUITTY_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
 ctest --test-dir "$CTEST_BUILD_DIR" -N                                   # list the cases
 ctest --test-dir "$CTEST_BUILD_DIR" -R '^test_web_font_inventory$' --output-on-failure # run one case
@@ -806,15 +830,15 @@ below any run that left stanzas out, naming how many. A stanza that declined for
 want of a dependency reports as Skipped rather than as a pass.
 
 Build outputs live outside the checkout. Resolve their root with
-`export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)"`. macOS uses Xcode's
+`export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)"`. macOS uses Xcode's
 DerivedData; Linux uses `$XDG_CACHE_HOME/ubiquitty/build` (default
 `~/.cache/ubiquitty/build`), with a separate hashed directory per checkout.
 `UBQ_BUILD_ROOT` overrides the location on either platform.
 
 Host tests go under `$UBQ_BUILD_ROOT/BuildHostTests/`. Core’s
-`./Libraries/ubiquitty-core/Scripts/run-coverage.sh` writes its per-file summary to
+`./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-coverage.sh` writes its per-file summary to
 `$UBQ_BUILD_ROOT/BuildHostTests/coverage/summary.txt`.
-`./Libraries/ubiquitty-core/Scripts/check-coverage-floor.sh` reads that summary without running tests:
+`./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-coverage-floor.sh` reads that summary without running tests:
 it fails when a file it lists, or the weighted total, is below its line-coverage
 floor or has no row, and refuses a summary older than any `Source/` `.cpp` file.
 
@@ -822,17 +846,17 @@ A Linux machine renders the portable catalog from the core snapshot binary,
 which it builds first:
 
 ```sh
-export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)"
-./Libraries/ubiquitty-core/Scripts/build-core-snapshot.sh &&
-python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend portable
+export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)"
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-core-snapshot.sh &&
+python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend portable
 ```
 
 On macOS, also build the app and run both native catalogs against that build:
 
 ```sh
 ./Scripts/build-macos.sh --no-linux-hosts &&
-python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend macos &&
-python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend swift
+python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend macos &&
+python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend swift
 ```
 
 ## Repository layout

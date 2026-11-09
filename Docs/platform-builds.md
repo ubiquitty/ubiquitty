@@ -8,7 +8,7 @@ the scripts resolve a separate directory for each checkout. Set it explicitly
 when following the output paths below:
 
 ```sh
-export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)"
+export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)"
 export UBQ_BUILD_JOBS=4
 export CMAKE_BUILD_PARALLEL_LEVEL="$UBQ_BUILD_JOBS"
 ```
@@ -23,8 +23,8 @@ Do not run timing-sensitive tests alongside another build.
   the native headless and Linux scripts can also use Make.
 - C++23 and a standard library with `std::expected`: GCC 14+ or Clang 19+
   for non-Apple native builds. Apple builds use Xcode's toolchain. The compiler
-  and library feature checks live in `Libraries/ubiquitty-core/Scripts/cmake/ToolchainFloor.cmake` and
-  `Libraries/ubiquitty-core/Source/Base/ToolchainFloor.h`.
+  and library feature checks live in `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/cmake/ToolchainFloor.cmake` and
+  `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Source/Base/ToolchainFloor.h`.
 - Set `CC` and `CXX` before configuring if the system default is older. For
   example, after installing GCC 14, use `CC=gcc-14 CXX=g++-14`. Choose a fresh
   build directory when switching compilers; CMake caches the compiler.
@@ -140,8 +140,8 @@ and network access for its dependency build. The `ubq` build does not build
 that QUIC dependency stack.
 
 ```sh
-./Libraries/ubiquitty-core/Scripts/build-host.sh
-./Libraries/ubiquitty-core/Scripts/build-agent.sh
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host.sh
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-agent.sh
 ```
 
 Both default to Release; each accepts `--debug`. The executables are
@@ -167,8 +167,8 @@ its configured emulation; the script builds dependencies inside its pinned
 Linux container.
 
 ```sh
-./Libraries/ubiquitty-core/Scripts/build-host-linux.sh          # x86_64 and arm64
-./Libraries/ubiquitty-core/Scripts/build-host-linux.sh arm64    # one architecture
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host-linux.sh          # x86_64 and arm64
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host-linux.sh arm64    # one architecture
 ```
 
 Outputs are `$UBQ_BUILD_ROOT/host-cross/ubiquitty-host-linux-x86_64` and
@@ -194,7 +194,7 @@ The browser files, fonts, `ubiquitty.js`, and `ubiquitty.wasm` are staged in
 and builds the `ubiquitty-web` target. It does not require a native GUI SDK.
 
 For the standalone Core's Wasm consumer under Node, run
-`./Libraries/ubiquitty-core/Scripts/wasm-smoke.sh`; it builds in `$UBQ_BUILD_ROOT/wasm`.
+`./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/wasm-smoke.sh`; it builds in `$UBQ_BUILD_ROOT/wasm`.
 These scripts report a skip when required tools are missing. A successful
 shell exit after a skip is not evidence that the Wasm artifact was built.
 
@@ -283,5 +283,5 @@ behavior, and backend dependencies. See the
 and [UbiquittyKit API](https://github.com/ubiquitty/kit/blob/main/Docs/ubiquittykit-api.md).
 
 The separate `ubiquitty-snapshot` target is the portable render tool;
-`./Libraries/ubiquitty-core/Scripts/build-core-snapshot.sh` builds it for the
+`./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-core-snapshot.sh` builds it for the
 [snapshot test catalog](https://github.com/ubiquitty/core/blob/main/Tests/Snapshots/README.md).

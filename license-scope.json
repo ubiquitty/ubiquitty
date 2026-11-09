@@ -17,7 +17,6 @@
         "Tools/",
         "Ubiquitty.xcworkspace/",
         "UbiquittyIOS.xcworkspace/",
-        "Libraries/ubiquitty-core",
         "Libraries/ubiquitty-kit"
       ],
       "reason": "Every original file in the repository: the terminal engine, the platform backends, the renderers, the application shells, the host daemon, the agent, the editor clients, the documentation, the tests and the tooling. The product's commercial side is an operated service that is not in this repository, so nothing here needs a narrower license."

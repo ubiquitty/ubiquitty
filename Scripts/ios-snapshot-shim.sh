@@ -9,9 +9,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# The checkouts holding the scripts this one runs; see CMakeLists.txt.
-CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
-KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
+# The checkouts holding the scripts this one runs, CORE_ROOT and KIT_ROOT.
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 # shellcheck source=Scripts/build-root.sh
 . "$CORE_ROOT/Scripts/build-root.sh"
 APP="$UBQ_BUILD_ROOT/ios-iphonesimulator/Ubiquitty.app"

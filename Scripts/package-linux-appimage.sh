@@ -27,9 +27,11 @@
 set -euo pipefail
 
 TOOLS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=Scripts/library-scripts.sh
+. "$TOOLS_ROOT/Scripts/library-scripts.sh"
 # The toolchain launcher belongs to the tools checkout, even when the package
 # below is built from a different tagged source tree.
-TOOLS_CORE_ROOT="$TOOLS_ROOT/Libraries/ubiquitty-core"
+TOOLS_CORE_ROOT="$(library_core_root "$TOOLS_ROOT")"
 export UBIQUITTY_PGO=REQUIRE
 if [ -z "${UBQ_CI_LINUX_IMAGE_ID:-}" ]; then
     exec python3 "$TOOLS_CORE_ROOT/Scripts/pgo_toolchain.py" run "$TOOLS_ROOT/Scripts/package-linux-appimage.sh" "$@"
@@ -37,9 +39,9 @@ fi
 export PATH="$UBQ_PGO_LLVM:$PATH"
 export CC=clang CXX=clang++
 ROOT="${UBIQUITTY_PACKAGE_SOURCE:-$TOOLS_ROOT}"
-# The checkouts holding the scripts this one runs; see CMakeLists.txt.
-CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
-KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-kit}"
+# The libraries the package source carries, unless the caller names others.
+CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$(library_core_root "$ROOT")}"
+KIT_ROOT="${UBIQUITTY_KIT_SOURCE_DIR:-$(library_kit_root "$ROOT")}"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
 . "$CORE_ROOT/Scripts/build-root.sh"

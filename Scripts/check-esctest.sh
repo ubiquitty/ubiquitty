@@ -46,8 +46,9 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# The checkouts holding the scripts this one runs; see CMakeLists.txt.
-CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+# The checkouts holding the scripts this one runs, CORE_ROOT and KIT_ROOT.
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 PROFILE="macos-local"
 UPDATE=0
 NATIVE=0

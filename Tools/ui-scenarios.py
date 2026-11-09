@@ -48,7 +48,10 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CORE_ROOT = Path(os.environ.get("UBIQUITTY_CORE_SOURCE_DIR") or ROOT / "Libraries" / "ubiquitty-core")
+sys.path.insert(0, str(ROOT / "Scripts"))
+import library_scripts  # noqa: E402
+
+CORE_ROOT = Path(os.environ.get("UBIQUITTY_CORE_SOURCE_DIR") or library_scripts.CORE_ROOT)
 RUNNER = ROOT / "Scripts" / "run-ui-tests.sh"
 
 # The scenario runner prints one of these three verdicts per scenario, then

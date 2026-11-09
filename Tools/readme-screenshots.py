@@ -33,9 +33,11 @@ import readme_demo_home
 
 
 ROOT = Path(__file__).resolve().parent.parent
-# Core's checkout: the submodule where the app carries it, this checkout otherwise.
-CORE_ROOT = Path(os.environ.get("UBQ_CORE_ROOT") or (ROOT / "Libraries" / "ubiquitty-core"
-                                                       if (ROOT / "Libraries" / "ubiquitty-core").exists() else ROOT))
+sys.path.insert(0, str(ROOT / "Scripts"))
+import library_scripts  # noqa: E402
+
+# Core's checkout, as Scripts/library_scripts.py resolves it.
+CORE_ROOT = Path(library_scripts.CORE_ROOT)
 with (CORE_ROOT / "Source/Core/Themes/builtin-themes.toml").open("rb") as source:
     NOIR = next(theme for theme in tomllib.load(source)["themes"] if theme["name"] == "Noir")
 

@@ -12,23 +12,37 @@
 #
 # Sets APP_ROOT, CORE_ROOT and KIT_ROOT. A root is the one a caller named
 # (UBQ_CORE_ROOT, or UBIQUITTY_CORE_SOURCE_DIR as the build passes it, and the Kit's
-# equivalents), otherwise Libraries/ubiquitty-core or Libraries/ubiquitty-kit under
-# this checkout when that path exists, otherwise this checkout itself, so in a
-# checkout holding every repository the three are one tree. The submodule is chosen
-# by existing and not by being populated, so an uninitialised one fails on the
-# missing files instead of judging the app's tree as the library's.
+# equivalents), otherwise the library this checkout carries, as library_kit_root
+# and library_core_root name it. The app carries one Core: the one its Kit pins.
+
+# library_kit_root <checkout> — the Kit a checkout of the app carries: its
+# Libraries/ubiquitty-kit when that path exists, else the checkout itself, which
+# then holds every repository. The submodule is chosen by existing and not by
+# being populated, so an uninitialised one fails on the missing files instead of
+# judging the app's tree as the library's.
+library_kit_root() {
+    if [ -e "$1/Libraries/ubiquitty-kit" ]; then
+        printf '%s' "$1/Libraries/ubiquitty-kit"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# library_core_root <checkout> — the Core a checkout of the app carries: the Kit
+# submodule's own Libraries/ubiquitty-core when the checkout has that submodule,
+# else the checkout itself. Chosen by the Kit submodule existing, for the reason
+# library_kit_root gives.
+library_core_root() {
+    if [ -e "$1/Libraries/ubiquitty-kit" ]; then
+        printf '%s' "$1/Libraries/ubiquitty-kit/Libraries/ubiquitty-core"
+    else
+        printf '%s' "$1"
+    fi
+}
 
 APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CORE_ROOT="${UBQ_CORE_ROOT:-${UBIQUITTY_CORE_SOURCE_DIR:-}}"
-if [ -z "$CORE_ROOT" ]; then
-    CORE_ROOT="$APP_ROOT"
-    [ -e "$APP_ROOT/Libraries/ubiquitty-core" ] && CORE_ROOT="$APP_ROOT/Libraries/ubiquitty-core"
-fi
-KIT_ROOT="${UBQ_KIT_ROOT:-${UBIQUITTY_KIT_SOURCE_DIR:-}}"
-if [ -z "$KIT_ROOT" ]; then
-    KIT_ROOT="$APP_ROOT"
-    [ -e "$APP_ROOT/Libraries/ubiquitty-kit" ] && KIT_ROOT="$APP_ROOT/Libraries/ubiquitty-kit"
-fi
+CORE_ROOT="${UBQ_CORE_ROOT:-${UBIQUITTY_CORE_SOURCE_DIR:-$(library_core_root "$APP_ROOT")}}"
+KIT_ROOT="${UBQ_KIT_ROOT:-${UBIQUITTY_KIT_SOURCE_DIR:-$(library_kit_root "$APP_ROOT")}}"
 
 # locate_file <repository-relative path> — the path in the checkout that holds it:
 # this one, then the Kit's, then Core's; this one's spelling when none does, so a

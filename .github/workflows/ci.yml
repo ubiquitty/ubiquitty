@@ -64,7 +64,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 Libraries/ubiquitty-core/Scripts/ci_reach.py --source-root "$GITHUB_WORKSPACE"
+        run: python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_reach.py --source-root "$GITHUB_WORKSPACE"
       # A sweep that stands down runs no gate, so it concludes as the run that
       # judged this tip did: a failed tip stays red, and the next sweep reads
       # this run's failure as the same verdict rather than its skips as a pass.
@@ -80,7 +80,7 @@ jobs:
       - name: Name the CI image
         id: image
         if: runner.environment == 'github-hosted' && steps.reach.outputs.preflight != 'false'
-        run: echo "digest=$(./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --recipe-digest)" >> "$GITHUB_OUTPUT"
+        run: echo "digest=$(./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --recipe-digest)" >> "$GITHUB_OUTPUT"
       - name: Restore the CI image
         id: restore-image
         if: steps.image.outputs.digest != ''
@@ -93,7 +93,7 @@ jobs:
         env:
           UBQ_CI_IMAGE_ARCHIVE: ${{ runner.temp }}/ubq-ci-linux-image.tar
           UBQ_CI_LINUX_IMAGE: ${{ runner.environment == 'github-hosted' }}
-        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py run preflight --source-root "$GITHUB_WORKSPACE"
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py run preflight --source-root "$GITHUB_WORKSPACE"
       # Saved whether or not a gate failed: the image was built either way. A
       # run that stopped before building it has no archive, and the save
       # reports that without failing the job.
@@ -106,7 +106,7 @@ jobs:
           key: ci-linux-image-${{ steps.image.outputs.digest }}
       - name: Report completed, failed, and unexecuted preflight stages
         if: always() && steps.reach.outputs.preflight != 'false'
-        run: python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py report preflight --source-root "$GITHUB_WORKSPACE"
+        run: python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py report preflight --source-root "$GITHUB_WORKSPACE"
       # A failed stage's log, in full, in the job log. CI uploads no artifacts: the
       # job log is where a failure is read.
       - name: Print the failed stage logs
@@ -124,7 +124,8 @@ jobs:
     # Not run on hosted runners. Their slower, shared machines miss timing bounds
     # the suite holds to on the maintainers' machines, and a test is not loosened
     # to fit them. The maintainers run this battery before every landing;
-    # `python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py run linux` runs it locally.
+    # `python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py run linux`
+    # runs it locally.
     if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -154,11 +155,13 @@ jobs:
           path: |
             ${{ runner.workspace }}/build-gcc/quic-deps/lib
             ${{ runner.workspace }}/build-gcc/quic-deps/include
-          key: quic-deps-${{ runner.os }}-${{ hashFiles('Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh') }}
+          key: quic-deps-${{ runner.os }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh') }}
       # A hosted runner starts with an empty compiler cache, and the host test
       # build then runs close to ubq_build's 900 s budget. The cache sits beside
-      # the checkout, where Libraries/ubiquitty-core/Scripts/ci-linux-image.sh points CCACHE_DIR, and is
-      # saved even when the battery fails, so the next run starts warm.
+      # the checkout, where
+      # Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh points
+      # CCACHE_DIR, and is saved even when the battery fails, so the next run
+      # starts warm.
       - name: Restore the compiler cache
         if: runner.environment == 'github-hosted'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
@@ -170,7 +173,7 @@ jobs:
       - name: Name the CI image
         id: image
         if: runner.environment == 'github-hosted'
-        run: echo "digest=$(./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --recipe-digest)" >> "$GITHUB_OUTPUT"
+        run: echo "digest=$(./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --recipe-digest)" >> "$GITHUB_OUTPUT"
       - name: Restore the CI image
         id: restore-image
         if: steps.image.outputs.digest != ''
@@ -183,7 +186,7 @@ jobs:
         env:
           UBQ_CI_IMAGE_ARCHIVE: ${{ runner.temp }}/ubq-ci-linux-image.tar
           UBQ_CI_LINUX_IMAGE: ${{ runner.environment == 'github-hosted' }}
-        run: ./Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py run linux --source-root "$GITHUB_WORKSPACE"
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py run linux --source-root "$GITHUB_WORKSPACE"
       - name: Save the CI image
         if: always() && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -198,7 +201,7 @@ jobs:
         run: echo "Every enabled Linux code stage reached its verdict"
       - name: Report completed, failed, and unexecuted Linux stages
         if: always()
-        run: python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py report linux --source-root "$GITHUB_WORKSPACE"
+        run: python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py report linux --source-root "$GITHUB_WORKSPACE"
       # A failed stage's log, in full, in the job log. CI uploads no artifacts: the
       # job log is where a failure is read.
       - name: Print the failed stage logs
@@ -223,7 +226,8 @@ jobs:
     # Not run on hosted runners. Their slower, shared machines miss timing bounds
     # the suite holds to on the maintainers' machines, and a test is not loosened
     # to fit them. The maintainers run this battery before every landing;
-    # `python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py run apple` runs it locally.
+    # `python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py run apple`
+    # runs it locally.
     if: ${{ false }}
     runs-on: xcode-27
     timeout-minutes: 180
@@ -248,13 +252,13 @@ jobs:
           xcrun --sdk iphonesimulator --show-sdk-version
       - name: Run the fail-fast Apple battery
         id: battery
-        run: python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py run apple --source-root "$GITHUB_WORKSPACE"
+        run: python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py run apple --source-root "$GITHUB_WORKSPACE"
       - name: Full Apple battery completed
         if: steps.battery.outputs.full_code == 'true'
         run: echo "Every enabled Apple code stage reached its verdict"
       - name: Report completed, failed, and unexecuted Apple stages
         if: always()
-        run: python3 Libraries/ubiquitty-core/Scripts/ci_batteries.py report apple --source-root "$GITHUB_WORKSPACE"
+        run: python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py report apple --source-root "$GITHUB_WORKSPACE"
       # A failed stage's log, in full, in the job log. CI uploads no artifacts: the
       # job log is where a failure is read.
       - name: Print the failed stage logs
@@ -289,13 +293,13 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Build (glibc)
-        # This image's `g++` is GCC 13, below the floor
-        # Libraries/ubiquitty-core/Scripts/cmake/UbiquittyToolchain.cmake refuses, so GCC 14 is installed
+        # This image's `g++` is GCC 13, below the floor Core's
+        # Scripts/cmake/UbiquittyToolchain.cmake refuses, so GCC 14 is installed
         # and named.
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++-14 pkg-config
-          CC=gcc-14 CXX=g++-14 ./Libraries/ubiquitty-core/Scripts/build-host.sh --release
+          CC=gcc-14 CXX=g++-14 ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host.sh --release
 
   coverage:
     name: Coverage floor
@@ -318,7 +322,8 @@ jobs:
     # reader of one log knows what the cache did for that job.
     timeout-minutes: 90
     # Blocking. Runs the instrumented suite and enforces the per-file floors on
-    # every PR; the floors themselves live in Libraries/ubiquitty-core/Scripts/check-coverage-floor.sh,
+    # every PR; the floors themselves live in
+    # Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-coverage-floor.sh,
     # which is the only place they are worth reading. A job of its own:
     # coverage instrumentation perturbs timing far beyond the noise floor, so
     # it must never share a runner with benchmark measurements.
@@ -341,7 +346,7 @@ jobs:
       # runs anything, so without this the suite opens with a failed verdict
       # about the clone rather than about the change.
       - name: Install hooks
-        run: ./Libraries/ubiquitty-core/Scripts/install-hooks.sh
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/install-hooks.sh
       - name: Install clang + llvm
         # ci-toolchain.sh skips the install when the resolved version of each
         # tool and the digest of every workflow file match the stamp the last
@@ -351,11 +356,11 @@ jobs:
         # package list edited here, reach the install either way.
         #
         # On ubuntu-24.04 the distribution's clang and llvm are 18, below the
-        # floor in Libraries/ubiquitty-core/Scripts/cmake/ToolchainFloor.cmake, so that image needs
+        # floor in Core's Scripts/cmake/ToolchainFloor.cmake, so that image needs
         # clang-19 and llvm-19, with /usr/lib/llvm-19/bin first on PATH so the
         # llvm-profdata and llvm-cov run-coverage.sh calls match the compiler.
         run: |
-          if ./Libraries/ubiquitty-core/Scripts/ci-toolchain.sh check clang-llvm clang llvm-profdata llvm-cov; then
+          if ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-toolchain.sh check clang-llvm clang llvm-profdata llvm-cov; then
             exit 0
           fi
           if command -v apt-get >/dev/null 2>&1; then
@@ -366,37 +371,37 @@ jobs:
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm clang llvm
           fi
-          ./Libraries/ubiquitty-core/Scripts/ci-toolchain.sh record clang-llvm clang llvm-profdata llvm-cov
+          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-toolchain.sh record clang-llvm clang llvm-profdata llvm-cov
       # The instrumented suite runs the shell stanzas, and each configures a host
       # build that wants the QUIC stack. Without it every one of them reports
       # BUILD-BROKEN at the fetch-quic-deps guard, ubiquitty_ensure_quic_deps in
-      # Libraries/ubiquitty-core/Scripts/cmake/UbiquittyToolchain.cmake — the tests job builds these and
-      # this one did not.
+      # Core's Scripts/cmake/UbiquittyToolchain.cmake — the tests job builds
+      # these and this one did not.
       - name: Cache QUIC deps (ngtcp2 + AWS-LC)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: |
             ${{ env.UBQ_BUILD_ROOT }}/quic-deps/lib
             ${{ env.UBQ_BUILD_ROOT }}/quic-deps/include
-          key: quic-deps-${{ runner.os }}-${{ hashFiles('Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh') }}
+          key: quic-deps-${{ runner.os }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh') }}
       - name: Build QUIC deps (cache miss builds ngtcp2 + AWS-LC; cache hit skips)
-        run: ./Libraries/ubiquitty-core/Scripts/ensure-quic-deps.sh
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ensure-quic-deps.sh
       - name: Coverage-gate tool self-test
-        run: bash ./Libraries/ubiquitty-core/Scripts/test-coverage-changed-lines.sh
+        run: bash ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/test-coverage-changed-lines.sh
       - name: Instrumented suite + coverage floor
         env:
           CC: clang
           CXX: clang++
         run: |
-          HTML=1 ./Libraries/ubiquitty-core/Scripts/run-coverage.sh --source-root "$GITHUB_WORKSPACE"
-          ./Libraries/ubiquitty-core/Scripts/check-coverage-floor.sh --source-root "$GITHUB_WORKSPACE"
+          HTML=1 ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-coverage.sh --source-root "$GITHUB_WORKSPACE"
+          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-coverage-floor.sh --source-root "$GITHUB_WORKSPACE"
       - name: Changed-line coverage gate
         # Needs a base to diff against, so pull-request only. The lcov lives
         # under the build root, outside the checkout, where run-coverage.sh
         # writes it.
         if: github.event_name == 'pull_request'
         run: |
-          python3 ./Libraries/ubiquitty-core/Scripts/coverage-changed-lines.py \
+          python3 ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/coverage-changed-lines.py \
             --lcov "$UBQ_BUILD_ROOT/BuildHostTests/coverage/coverage.lcov" \
             --root "$GITHUB_WORKSPACE" \
             --base ${{ github.event.pull_request.base.sha }} \

@@ -7,13 +7,15 @@ cmake_minimum_required(VERSION 3.13)
 # (libubiquitty and the multiplexer) and ubiquitty-kit (the renderers and the
 # drop-in terminal views). Every path below names the checkout of the
 # repository that owns the file; a file every repository carries is read from
-# this tree. Both default to the submodules under Libraries/, and both are ABSOLUTE
-# rather than REALPATH, so a compile line spells a root the way its caller did.
+# this tree. The Kit defaults to the submodule Libraries/ubiquitty-kit and Core
+# to the Kit's own submodule, the Core that Kit pins, as Scripts/library-scripts.sh
+# resolves them. Both are ABSOLUTE rather than REALPATH, so a compile line spells
+# a root the way its caller did.
 #
 # Core's build modules are read from Core's checkout, at this top directory:
 # Scripts/cmake/UbiquittyCoreRoot.cmake says why and in which order.
 if(NOT DEFINED UBIQUITTY_CORE_SOURCE_DIR)
-    set(UBIQUITTY_CORE_SOURCE_DIR "${CMAKE_SOURCE_DIR}/Libraries/ubiquitty-core")
+    set(UBIQUITTY_CORE_SOURCE_DIR "${CMAKE_SOURCE_DIR}/Libraries/ubiquitty-kit/Libraries/ubiquitty-core")
 endif()
 include("${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyCoreRoot.cmake")
 if(NOT DEFINED UBIQUITTY_KIT_SOURCE_DIR)
@@ -1078,7 +1080,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
 # POSIX PTY (Source/Platform/Host/PTY) + the host PAL down-functions
 # (HostPAL) + the host main. Builds with clang on macOS (local testing)
 # and gcc on Linux. The Core source list mirrors the test_sync
-# link set in Libraries/ubiquitty-core/Scripts/run-tests.sh — a live Terminal pulls in the full OSC /
+# link set in Core's Scripts/run-tests.sh — a live Terminal pulls in the full OSC /
 # SGR / Tek / Kitty / Unicode dispatch surface.
 # ----------------------------------------------------------------------
 elseif(UBIQUITTY_FRONTEND STREQUAL "Host")
@@ -1704,7 +1706,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     if(NOT APPLE)
         # Portable <MacTypes.h> stand-in for this non-Apple build (Selection.h and
         # the other shared headers that include <MacTypes.h> directly), mirroring
-        # Libraries/ubiquitty-core/Scripts/run-tests.sh's HOST_COMPAT include. Base/Types.h self-provides the
+        # Core's Scripts/run-tests.sh's HOST_COMPAT include. Base/Types.h self-provides the
         # same typedefs off-Apple; the shim's identical typedefs coexist with it.
     endif()
     target_compile_definitions(ubiquitty-linux PRIVATE ${UBIQUITTY_LINUX_POINTER_LOCK_DEFS})

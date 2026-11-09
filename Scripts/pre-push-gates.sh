@@ -157,7 +157,7 @@ gate_linux_compile() {
         # SwiftInteropStamp are Kit's. The cache also keys both libraries' full
         # commits and dirty diffs, including external source-root overrides.
         run_scoped "GTK frontend compiles on Linux ($UBQ_LINUX_HOST)" \
-            "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/library-scripts.sh cmake/LicenseNotices.cmake cmake/BundleLicenseNotices.cmake cmake/BundleResources.cmake cmake/SwiftInteropStamp.cmake Libraries/ubiquitty-core Libraries/ubiquitty-kit Tests/dependent-tests.cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/linux-host.sh Scripts/ci_batteries.py Scripts/gate_framework.py Scripts/fetch-quic-deps.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/check-linux-build-prerequisites.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
+            "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/library-scripts.sh cmake/LicenseNotices.cmake cmake/BundleLicenseNotices.cmake cmake/BundleResources.cmake cmake/SwiftInteropStamp.cmake Libraries/ubiquitty-kit Tests/dependent-tests.cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/linux-host.sh Scripts/ci_batteries.py Scripts/gate_framework.py Scripts/fetch-quic-deps.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/check-linux-build-prerequisites.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
             ./Scripts/linux-host.sh stages linux-build
         return
     fi
@@ -175,7 +175,7 @@ gate_linux_compile() {
         return
     fi
     run_scoped "GTK frontend compiles on Linux" \
-        "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/library-scripts.sh cmake Libraries/ubiquitty-core Libraries/ubiquitty-kit Tests/dependent-tests.cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/run-linux.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
+        "Source/Platform/Linux Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake Scripts/library-scripts.sh cmake Libraries/ubiquitty-kit Tests/dependent-tests.cmake Scripts/portable-core-sources.txt Scripts/check-core-layer-partition.sh Scripts/run-linux.sh Scripts/build-version.sh Scripts/build-linux-gtk.sh Scripts/linux-images.txt Scripts/run-tests.sh Scripts/build-jobs.sh Scripts/build_jobs.py Scripts/build-root.sh Scripts/build_root.py" \
         ./Scripts/run-linux.sh bash -c 'cd build/linux && ninja'
 }
 
@@ -413,7 +413,7 @@ gate_ios() {
         return 0
     fi
     run_scoped "iOS arm builds" \
-        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit Source/Platform/Apple Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/build-provenance.sh Scripts/portable-core-sources.txt" \
+        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit Source/Platform/Apple Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/library-scripts.sh Scripts/build-root.sh Scripts/build-provenance.sh Scripts/portable-core-sources.txt" \
         ./Scripts/build-ios.sh --sdk iphonesimulator
     # Building is not the subject. A view the toolkit never asks to draw and a
     # PAL seam with nothing installed in it both compile clean and need a
@@ -424,13 +424,13 @@ gate_ios() {
         return 0
     fi
     run_scoped "iOS smokes" \
-        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit Source/Platform/Apple Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/build-provenance.sh Scripts/portable-core-sources.txt Scripts/run-ios-smokes.sh Scripts/ios-simulator.sh" \
+        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit Source/Platform/Apple Source/Core Source/Base Source/PAL CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/library-scripts.sh Scripts/build-root.sh Scripts/build-provenance.sh Scripts/portable-core-sources.txt Scripts/run-ios-smokes.sh Scripts/ios-simulator.sh" \
         ./Scripts/run-ios-smokes.sh
     # The phone's own build of the Sync wire tests, linked against the archive
     # the app carries: the same source compiled for another ABI is not the same
     # bytes until a run of that build says so.
     run_scoped "iOS Sync conformance" \
-        "Source/Core/Protocol/Sync Source/Core Source/Base Source/PAL Tests/Core/Protocol/Sync Tests/Harness.h CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/build-root.sh Scripts/run-ios-sync-conformance.sh Scripts/ios-simulator.sh" \
+        "Source/Core/Protocol/Sync Source/Core Source/Base Source/PAL Tests/Core/Protocol/Sync Tests/Harness.h CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/library-scripts.sh Scripts/build-root.sh Scripts/run-ios-sync-conformance.sh Scripts/ios-simulator.sh" \
         ./Scripts/run-ios-sync-conformance.sh
     # The real Data Protection backend, which only a simulator process exercises.
     # The Kit's own suite: a repository that carries the Kit does not run it.
@@ -447,7 +447,7 @@ gate_ios() {
     # installed app from outside with synthesised touches, and needs its own
     # build because the XCUITest bundle is off by default.
     run_scoped "iOS UI tests build" \
-        "Source/Platform/iOS CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/run-ios-ui-tests.sh Scripts/build-provenance.sh Scripts/build-root.sh" \
+        "Source/Platform/iOS CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/library-scripts.sh Scripts/run-ios-ui-tests.sh Scripts/build-provenance.sh Scripts/build-root.sh" \
         ./Scripts/build-ios.sh --sdk iphonesimulator --ui-tests
     # The Xcode generator, because ninja is not the only consumer of these
     # CMakeLists and is the more forgiving one. A custom command attached to two
@@ -464,10 +464,10 @@ gate_ios() {
     # The script ends by running Scripts/check-xcode-workspace.py over what it
     # wrote, which is why that file is in this gate's scope.
     run_scoped "Xcode workspace generates" \
-        "CMakeLists.txt Source/Platform/macOS/CMakeLists.txt cmake Scripts/cmake Scripts/generate-xcode-workspace.sh Scripts/check-xcode-workspace.py Scripts/apple-development-teams.py Scripts/macos-deployment-target.txt" \
+        "CMakeLists.txt Source/Platform/macOS/CMakeLists.txt cmake Scripts/cmake Scripts/generate-xcode-workspace.sh Scripts/library-scripts.sh Scripts/check-xcode-workspace.py Scripts/apple-development-teams.py Scripts/macos-deployment-target.txt" \
         ./Scripts/generate-xcode-workspace.sh
     run_scoped "iOS UI tests" \
-        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/run-ios-ui-tests.sh Scripts/build-root.sh Scripts/ios-simulator.sh" \
+        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/library-scripts.sh Scripts/run-ios-ui-tests.sh Scripts/build-root.sh Scripts/ios-simulator.sh" \
         ./Scripts/run-ios-ui-tests.sh
 }
 
@@ -594,9 +594,10 @@ gate_esctest() {
 gate_core_builder_frames() {
     local changed
     changed="$(git diff --name-only origin/main...HEAD 2>/dev/null)" || return 0
-    # The Kit's build modules hold the renderer's flags and source lists; a
-    # dependency pin may also change those sources outside the App checkout.
-    if ! printf '%s\n' "$changed" | grep -E '^Source/Core/Rendering/|^Source/Platform/macOS/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$|^Libraries/ubiquitty-(core|kit)$' >/dev/null; then
+    # The Kit's build modules hold the renderer's flags and source lists; the
+    # Kit pin, which carries Core's, may also change those sources outside the
+    # App checkout.
+    if ! printf '%s\n' "$changed" | grep -E '^Source/Core/Rendering/|^Source/Platform/macOS/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$|^Libraries/ubiquitty-kit$' >/dev/null; then
         printf '  %-34s %s\n' "core builder frames" "none — this branch changes no frame path"
         return 0
     fi
