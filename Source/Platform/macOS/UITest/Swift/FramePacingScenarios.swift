@@ -531,6 +531,39 @@ private func keyPress(_ character: String, keyCode: UInt16, in window: NSWindow)
     )
 }
 
+/// Drags a selection across the start of the surface's top row, the protected
+/// marker row the flood's scrolling region never touches, so output cannot
+/// shear it away.
+///
+/// - Parameters:
+///   - surface: The surface to select on.
+///   - window: Its window.
+///   - lastColumn: The column the drag ends on.
+@MainActor
+private func selectTopRowStart(on surface: TerminalSurface, in window: NSWindow, throughColumn lastColumn: Int) {
+    guard let start = surface.viewPoint(forRow: 0, column: 0),
+        let end = surface.viewPoint(forRow: 0, column: lastColumn)
+    else {
+        return
+    }
+    func event(_ type: NSEvent.EventType, at point: CGPoint) -> NSEvent? {
+        NSEvent.mouseEvent(
+            with: type,
+            location: surface.convert(point, to: nil),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: type == .leftMouseUp ? 0 : 1
+        )
+    }
+    if let press = event(.leftMouseDown, at: start) { surface.mouseDown(with: press) }
+    if let drag = event(.leftMouseDragged, at: end) { surface.mouseDragged(with: drag) }
+    if let release = event(.leftMouseUp, at: end) { surface.mouseUp(with: release) }
+}
+
 /// Registers the frame-pacing scenarios with the UI-test runner.
 enum FramePacingScenarios {
     /// Fresh frames a second the focused flood must show, as a fraction of the
@@ -616,6 +649,15 @@ enum FramePacingScenarios {
         UBUITestRegister("swift_shell_input_during_two_heavy_panes_202x49") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .heavySGR, alongsideMixedPane: true) }
+        }
+
+        UBUITestRegister("swift_shell_selection_during_ascii_flood_keeps_presenting_and_echoing") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .ascii, holdsSelection: true) }
+        }
+        UBUITestRegister("swift_shell_selection_during_heavy_sgr_churn_202x49_keeps_presenting_and_echoing") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { measureInputDuringFlood(t, payload: .heavySGR, holdsSelection: true) }
         }
 
         UBUITestRegister("swift_shell_live_resize_does_not_wait_for_output_to_settle") { context in
@@ -1085,8 +1127,22 @@ enum FramePacingScenarios {
     ///   - t: The run's context.
     ///   - payload: The output the producer keeps sending between inputs.
     ///   - alongsideMixedPane: Whether a second visible pane also floods.
+    ///   - holdsSelection: Whether the pane selects the start of its protected
+    ///     marker row before each input, and the stretch before that input must
+    ///     end with the selection standing. The row lies outside the scrolling
+    ///     region, so only the frame path can lose the selection. A keystroke
+    ///     drops it, as it does for a person, and the next stretch selects
+    ///     again. The drain resolves the selection at each capture, on a row
+    ///     output never scrolls as anywhere else, so each frame that draws it
+    ///     is a boundary frame like any other: this is the reading that a
+    ///     selection never decides whether a frame draws.
     @MainActor
-    private static func measureInputDuringFlood(_ t: UBUITestContext, payload: FloodPayload, alongsideMixedPane: Bool = false) {
+    private static func measureInputDuringFlood(
+        _ t: UBUITestContext,
+        payload: FloodPayload,
+        alongsideMixedPane: Bool = false,
+        holdsSelection: Bool = false
+    ) {
         let configuration: String? =
             payload.isHeavy
             ? t.configureAppending(
@@ -1291,6 +1347,7 @@ enum FramePacingScenarios {
         marker.frameIndex = nil
 
         func expectOutputProgress(_ phase: String, input: Int) {
+            let selectionNote = holdsSelection && phase == "before" ? " with a selection" : ""
             let panes = sibling.map { [surface, $0] } ?? [surface]
             let beforeBodies = panes.map { floodBodyState(of: $0) }
             let beforeCommits = [marker.freshCommits, siblingCommitTimes.count]
@@ -1317,20 +1374,33 @@ enum FramePacingScenarios {
                 let commits = index == 0 ? marker.freshCommits : siblingCommitTimes.count
                 t.expect(
                     changed[index] && commits > beforeCommits[index],
-                    desc: "pane \(index) changes output and commits fresh content \(phase) input \(input) during \(payload.rawValue) flood"
+                    desc: "pane \(index) changes output and commits fresh content \(phase) input \(input) during \(payload.rawValue) flood\(selectionNote)"
                 )
             }
             let fresh = surface.recordedPresentsForTesting.dropFirst(beforeCount).filter(\.showsNewContent).count
             t.expect(
                 fresh > 0,
-                desc: "the input pane commits fresh output frames \(phase) input \(input) during \(payload.rawValue) flood"
+                desc: "the input pane commits fresh output frames \(phase) input \(input) during \(payload.rawValue) flood\(selectionNote)"
             )
         }
 
         let floodStart = CACurrentMediaTime()
         var missed: [String] = []
         for input in 1...3 {
+            if holdsSelection {
+                selectTopRowStart(on: surface, in: window, throughColumn: 9)
+                t.expect(
+                    surface.hasSelection,
+                    desc: "a drag selects the marker row's start before input \(input) of the \(payload.rawValue) flood"
+                )
+            }
             expectOutputProgress("before", input: input)
+            if holdsSelection {
+                t.expect(
+                    surface.hasSelection,
+                    desc: "the marker row's selection still stands after input \(input)'s \(payload.rawValue) flood stretch"
+                )
+            }
             guard let press = keyPress("q", keyCode: 12, in: window) else {
                 t.expect(false, desc: "AppKit makes the under-load key press")
                 return
