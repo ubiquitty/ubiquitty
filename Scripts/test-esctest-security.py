@@ -23,7 +23,7 @@ class EsctestSecurityTests(unittest.TestCase):
         self.repository = Path(__file__).resolve().parent.parent
         self.scripts = self.root / "Scripts"
         self.scripts.mkdir()
-        for name in ("run-esctest.sh", "run-esctest-linux.sh"):
+        for name in ("run-esctest.sh", "run-esctest-linux.sh", "library-scripts.sh"):
             shutil.copyfile(self.repository / "Scripts" / name, self.scripts / name)
         config = self.root / "Tests" / "Esctest" / "clipboard-read.toml"
         config.parent.mkdir(parents=True)
@@ -40,7 +40,10 @@ class EsctestSecurityTests(unittest.TestCase):
         self.commands.mkdir()
         for name in ("defaults", "sysctl", "sw_vers"):
             self.executable(self.commands / name, "#!/bin/sh\nprintf 'fixture\\n'\n")
-        self.environment = dict(os.environ)
+        # A root the caller exported would point the planted scripts at a real
+        # library instead of the planted tree.
+        self.environment = {name: value for name, value in os.environ.items()
+                            if name not in ("UBQ_CORE_ROOT", "UBQ_KIT_ROOT")}
         self.environment.update(
             PATH=str(self.commands) + os.pathsep + os.environ["PATH"],
             XDG_CONFIG_HOME=str(self.user_config),

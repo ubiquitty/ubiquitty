@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -32,6 +33,7 @@ class FetchSparkleTests(unittest.TestCase):
         self.source = (ROOT / "Scripts/fetch-sparkle.sh").read_text()
         self.version = re.search(r'^SPARKLE_VERSION="([^"]+)"$', self.source, re.MULTILINE)[1]
         (self.script.parent / "build-root.sh").write_text(': "${UBQ_BUILD_ROOT:?}"\n')
+        shutil.copyfile(ROOT / "Scripts/library-scripts.sh", self.script.parent / "library-scripts.sh")
         self.make_archive()
         self.pin_fixture_archive()
         binary = self.root / "bin"
@@ -48,7 +50,11 @@ with open(os.environ["FETCH_SPARKLE_EVENTS"], "a") as output:
 shutil.copyfile(os.environ["FETCH_SPARKLE_ARCHIVE"], arguments[arguments.index("-o") + 1])
 ''')
         curl.chmod(0o755)
-        self.environment = os.environ | {
+        # A root the caller exported would point the planted script at a real
+        # library instead of the planted tree.
+        inherited = {name: value for name, value in os.environ.items()
+                     if name not in ("UBQ_CORE_ROOT", "UBQ_KIT_ROOT")}
+        self.environment = inherited | {
             "UBQ_BUILD_ROOT": str(self.root / "build"),
             # The planted tree stands for the checkout and for the library whose
             # build-root.sh it plants.
