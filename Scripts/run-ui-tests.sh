@@ -41,8 +41,9 @@ set -euo pipefail
 unset SSH_CONNECTION SSH_CLIENT SSH_TTY
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# The checkouts holding the scripts this one runs; see CMakeLists.txt.
-CORE_ROOT="${UBIQUITTY_CORE_SOURCE_DIR:-$ROOT/Libraries/ubiquitty-core}"
+# The checkouts holding the scripts this one runs, CORE_ROOT and KIT_ROOT.
+# shellcheck source=Scripts/library-scripts.sh
+. "$ROOT/Scripts/library-scripts.sh"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
 . "$CORE_ROOT/Scripts/build-root.sh"

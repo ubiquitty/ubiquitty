@@ -5,11 +5,13 @@
 
 Ubiquitty is a terminal emulator and persistent multiplexer. This repository is
 the app and its frontends; the terminal engine and the multiplexer are
-`ubiquitty-core` and the renderers and terminal views are `ubiquitty-kit`,
-carried as the submodules `Libraries/ubiquitty-core` and
-`Libraries/ubiquitty-kit`. Read
-[the architecture](Libraries/ubiquitty-core/Docs/architecture.md) and
-[the coding conventions](Libraries/ubiquitty-core/Docs/coding-conventions.md)
+`ubiquitty-core` and the renderers and terminal views are `ubiquitty-kit`.
+This repository carries the Kit as the submodule `Libraries/ubiquitty-kit`, and
+Core as the Kit's own submodule, `Libraries/ubiquitty-kit/Libraries/ubiquitty-core`:
+the one Core the app builds is the one the Kit pins, and a Core change reaches
+the app as a Kit bump. Read
+[the architecture](Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Docs/architecture.md) and
+[the coding conventions](Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Docs/coding-conventions.md)
 before changing behavior. The conventions document is authoritative for detailed
 style and ownership rules, and this file adds the app's.
 
@@ -20,14 +22,16 @@ preserve unrelated changes, and describe the behavior and validation in the PR.
 No private tracker, account, or commit trailer is required. Build and release
 commands are documented in [the release guide](Docs/building-and-releasing.md).
 
-A change that needs a library change lands in that library first; this
-repository then moves the submodule to that commit. Never edit a file under
-`Libraries/` from here.
+A change that needs a library change lands in that library first. A Kit change
+reaches this repository when it moves its Kit pin; a Core change reaches it
+through the Kit: the Kit moves its Core pin, then this repository moves its Kit
+pin. A file under `Libraries/` belongs to that library's own repository, whose
+checkout the nested directory is; commit it there, never from here.
 
 Every original file is Apache-2.0 and carries
 `SPDX-License-Identifier: Apache-2.0`; `license-scope.json` assigns the files
 that cannot carry a header, and
-`Libraries/ubiquitty-core/Scripts/check-licenses.py` fails a header that
+`Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-licenses.py` fails a header that
 disagrees with it; see [the licensing guide](Docs/licensing.md). Preserve the
 Emacs client's MIT license and third-party licenses. Nothing in this repository
 is licensed more narrowly: the product's commercial side is an operated service
@@ -88,7 +92,7 @@ adding compatibility paths for versions that have not shipped.
   warnings as errors, as C++ builds do.
 - Swift 6 uses direct C++ interop and native ownership features supported by the
   configured toolchain. Keep Objective-C adapters at required platform seams.
-- Semantic C++ renames use `Libraries/ubiquitty-core/Scripts/refactor.py`; do not rename symbols with text
+- Semantic C++ renames use `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/refactor.py`; do not rename symbols with text
   replacement. Keep compile databases and build products out of source control.
 - Keep hot paths batched, allocation-conscious, and measurable. Performance claims
   require a reproducible harness and recorded environment.
@@ -96,12 +100,12 @@ adding compatibility paths for versions that have not shipped.
 ## Validation
 
 See [Contributing](.github/contributing.md) for build commands and
-[Tests](Libraries/ubiquitty-core/Tests/README.md) for focused suites. The shared
-machinery lives in `Libraries/ubiquitty-core/Scripts`: install the repository
-hooks with `Libraries/ubiquitty-core/Scripts/install-hooks.sh`, check style with
-`python3 Libraries/ubiquitty-core/Scripts/check-style.py`, run the push gates with
+[Tests](Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/README.md) for focused suites. The shared
+machinery lives in `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts`: install the repository
+hooks with `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/install-hooks.sh`, check style with
+`python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-style.py`, run the push gates with
 `Scripts/pre-push-gates.sh` and the app's stanzas with
-`Libraries/ubiquitty-core/Scripts/run-tests.sh` from this repository's root.
+`Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh` from this repository's root.
 Run the applicable formatting, naming, boundary,
 security, protocol, and snapshot checks. Do not replace snapshot baselines merely
 to silence failures. State unavailable platform checks explicitly.

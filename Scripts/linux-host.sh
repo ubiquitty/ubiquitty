@@ -278,9 +278,9 @@ REMOTE
 
 syncTree() { # <host> <run identifier> <runs directory>
     local host="$1" identifier="$2" runsDirectory="$3"
-    local expectedCore="$ROOT" expectedKit="$ROOT"
-    [ ! -e "$ROOT/Libraries/ubiquitty-core" ] || expectedCore="$ROOT/Libraries/ubiquitty-core"
-    [ ! -e "$ROOT/Libraries/ubiquitty-kit" ] || expectedKit="$ROOT/Libraries/ubiquitty-kit"
+    local expectedCore expectedKit
+    expectedCore="$(library_core_root "$ROOT")"
+    expectedKit="$(library_kit_root "$ROOT")"
     if [ "$(cd "$CORE_ROOT" && pwd -P)" != "$(cd "$expectedCore" && pwd -P)" ] \
         || [ "$(cd "$KIT_ROOT" && pwd -P)" != "$(cd "$expectedKit" && pwd -P)" ]; then
         echo "linux-host: remote checks require the checkout's pinned library mounts; external source overrides are not synchronized" >&2

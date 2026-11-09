@@ -4,8 +4,9 @@
 
 """library_scripts — how a script of the app reaches the scripts of the libraries it builds on.
 
-The app carries ubiquitty-core and ubiquitty-kit as submodules under Libraries/,
-and the machinery its gates share (gate_report, gate_corpus, gate_framework,
+The app carries ubiquitty-kit as a submodule under Libraries/, and ubiquitty-core
+as the Kit's own submodule, so the Core the app builds is the one its Kit pins.
+The machinery its gates share (gate_report, gate_corpus, gate_framework,
 ubq_roots, wire_tables) lives in ubiquitty-core's Scripts/. Python puts only a
 script's own directory on the import path, so a gate of the app imports this
 module first and everything the libraries provide after it:
@@ -14,30 +15,39 @@ module first and everything the libraries provide after it:
     import gate_report  # noqa: E402
 
 The roots are ubq_roots's: UBQ_CORE_ROOT and UBQ_KIT_ROOT when set, otherwise
-Libraries/ubiquitty-core and Libraries/ubiquitty-kit under the checkout holding
-this file when those paths exist, otherwise the checkout itself, so that in a
-checkout holding every repository the modules are found beside this one. The
-rule is written out here once, because ubq_roots is the module this makes
-importable.
+Libraries/ubiquitty-kit and Libraries/ubiquitty-kit/Libraries/ubiquitty-core
+under the checkout holding this file when Libraries/ubiquitty-kit exists,
+otherwise the checkout itself, so that in a checkout holding every repository
+the modules are found beside this one. The rule is written out here once,
+because ubq_roots is the module this makes importable; Scripts/library-scripts.sh
+states the same rule for shell callers.
 """
 
 import os
 import sys
 
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+KIT_SUBMODULE = os.path.join("Libraries", "ubiquitty-kit")
+CORE_THROUGH_KIT = os.path.join(KIT_SUBMODULE, "Libraries", "ubiquitty-core")
 
 
-def _root(variable, submodule):
-    """A library's root as ubq_roots.py derives it from this file's checkout."""
+def _root(variable, mounted):
+    """A library's root as ubq_roots.py derives it from this file's checkout.
+
+    The Kit submodule is chosen by existing, not by being populated, so a
+    checkout that has not initialised it fails on the missing files rather than
+    judging its own tree as the library's.
+    """
     configured = os.environ.get(variable)
     if configured:
         return os.path.abspath(os.path.expanduser(configured))
-    nested = os.path.join(APP_ROOT, "Libraries", submodule)
-    return nested if os.path.lexists(nested) else APP_ROOT
+    if os.path.lexists(os.path.join(APP_ROOT, KIT_SUBMODULE)):
+        return os.path.join(APP_ROOT, mounted)
+    return APP_ROOT
 
 
-CORE_ROOT = _root("UBQ_CORE_ROOT", "ubiquitty-core")
-KIT_ROOT = _root("UBQ_KIT_ROOT", "ubiquitty-kit")
+CORE_ROOT = _root("UBQ_CORE_ROOT", CORE_THROUGH_KIT)
+KIT_ROOT = _root("UBQ_KIT_ROOT", KIT_SUBMODULE)
 
 # The app's own Scripts directory stays first, so a module the app carries is
 # never shadowed by a library's of the same name.

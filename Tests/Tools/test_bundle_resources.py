@@ -13,12 +13,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-# Core's checkout: the submodule where the app carries it, this checkout otherwise.
-CORE_ROOT = Path(os.environ.get("UBQ_CORE_ROOT") or (ROOT / "Libraries" / "ubiquitty-core"
-                                                       if (ROOT / "Libraries" / "ubiquitty-core").exists() else ROOT))
+sys.path.insert(0, str(ROOT / "Scripts"))
+import library_scripts  # noqa: E402
 
-KIT_ROOT = Path(os.environ.get("UBQ_KIT_ROOT") or (ROOT / "Libraries" / "ubiquitty-kit"
-                                                     if (ROOT / "Libraries" / "ubiquitty-kit").exists() else ROOT))
+# The library checkouts, as Scripts/library_scripts.py resolves them.
+CORE_ROOT = Path(library_scripts.CORE_ROOT)
+KIT_ROOT = Path(library_scripts.KIT_ROOT)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Apple bundle builds require macOS")

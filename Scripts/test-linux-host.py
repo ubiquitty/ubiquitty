@@ -179,10 +179,9 @@ class LinuxHostTests(unittest.TestCase):
     def make_split_sources(self):
         (self.root / "CMakeLists.txt").write_text("# App fixture\n")
         (self.root / "Scripts/repository.txt").write_text("app\n")
-        core = self.root / "Libraries/ubiquitty-core"
         kit = self.root / "Libraries/ubiquitty-kit"
-        nested = kit / "Libraries/ubiquitty-core"
-        for path, role in ((core, "core"), (nested, "core"), (kit, "kit")):
+        core = kit / "Libraries/ubiquitty-core"
+        for path, role in ((core, "core"), (kit, "kit")):
             (path / "Scripts").mkdir(parents=True, exist_ok=True)
             (path / "CMakeLists.txt").write_text("# library fixture\n")
             (path / "Scripts/repository.txt").write_text(role + "\n")
@@ -197,10 +196,11 @@ class LinuxHostTests(unittest.TestCase):
                     'root=pathlib.Path.cwd()\n'
                     'assert sys.argv[1:3] == ["run", "linux"]\n'
                     'assert sys.argv[sys.argv.index("--source-root")+1] == str(root)\n'
-                    'assert pathlib.Path(sys.argv[sys.argv.index("--core-source-root")+1]) == root/"Libraries/ubiquitty-core"\n'
+                    'assert pathlib.Path(sys.argv[sys.argv.index("--core-source-root")+1]) == '
+                    'root/"Libraries/ubiquitty-kit/Libraries/ubiquitty-core"\n'
                     'assert pathlib.Path(sys.argv[sys.argv.index("--kit-source-root")+1]) == root/"Libraries/ubiquitty-kit"\n'
                     'assert not list(root.rglob(".git"))\n'
-                    'assert (root/"Libraries/ubiquitty-kit/Libraries/ubiquitty-core/owned.txt").is_file()\n'
+                    'assert not (root/"Libraries/ubiquitty-core").exists()\n'
                     'with open(os.environ["UBQ_CI_ROOT"]+"/calls", "a") as out: out.write("called\\n")\n')
             subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(path), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -209,36 +209,35 @@ class LinuxHostTests(unittest.TestCase):
         (self.root / "Scripts/ci_batteries.py").write_text('raise SystemExit(91)\n')
         (self.root / "Scripts/fetch-quic-deps.sh").write_text("# wrong App recipe\n")
         subprocess.run(["git", "-C", str(self.root), "add", "."], check=True, capture_output=True)
-        return core, kit, nested
+        return core, kit
 
     def test_split_sync_carries_pinned_nested_libraries_without_git_and_removes_deleted_files(self):
-        core, kit, nested = self.make_split_sources()
+        core, kit = self.make_split_sources()
         transient = core / "untracked.txt"
         transient.write_text("uncommitted library edit")
         shared = dict(UBIQUITTY_LINUX_HOST="fake", UBQ_LINUX_HOST_RUN="split-1")
         first = self.run_script("stages", "linux-build", **shared)
         self.assertEqual(first.returncode, 0, first.stderr)
         remote = self.runsDirectory() / "split-1/ubiquitty"
-        for source in (core / "owned.txt", kit / "owned.txt", nested / "owned.txt", transient):
+        for source in (core / "owned.txt", kit / "owned.txt", transient):
             self.assertEqual((remote / source.relative_to(self.root)).read_bytes(), source.read_bytes())
         self.assertEqual(list(remote.rglob(".git")), [])
         digest = hashlib.sha256((core / "Scripts/fetch-quic-deps.sh").read_bytes()).hexdigest()[:12]
         self.assertTrue((self.remoteHome / f".cache/ubiquitty-linux-host/quic-deps-{digest}").is_dir())
         (core / "owned.txt").unlink()
         transient.unlink()
-        (nested / "CMakeLists.txt").unlink()
+        (kit / "owned.txt").unlink()
         second = self.run_script("stages", "linux-snapshots", **shared)
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertFalse((remote / "Libraries/ubiquitty-core/owned.txt").exists())
-        self.assertFalse((remote / "Libraries/ubiquitty-core/untracked.txt").exists())
-        self.assertFalse((remote / "Libraries/ubiquitty-kit/Libraries/ubiquitty-core/CMakeLists.txt").exists())
+        for removed in (core / "owned.txt", transient, kit / "owned.txt"):
+            self.assertFalse((remote / removed.relative_to(self.root)).exists(), removed)
         calls = self.runsDirectory() / "split-1/ci/calls"
         self.assertEqual(calls.read_text().splitlines(), ["called", "called"])
         self.assertEqual(self.run_script("release", **shared).returncode, 0)
 
     def test_uninitialized_nested_library_refuses_before_any_remote_stage(self):
-        _, _, nested = self.make_split_sources()
-        shutil.rmtree(nested)
+        core, _ = self.make_split_sources()
+        shutil.rmtree(core)
         result = self.run_script("stages", "host-tests", UBIQUITTY_LINUX_HOST="fake")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("required submodule is not initialized", result.stderr)

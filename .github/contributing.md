@@ -9,19 +9,26 @@ and a Linux/GTK frontend.
 
 ## Getting started
 
-Start with [`Core architecture`](../Libraries/ubiquitty-core/Docs/architecture.md) for the layer map
+Start with [`Core architecture`](../Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Docs/architecture.md) for the layer map
 and end-to-end pipeline, then read
-[`coding conventions`](../Libraries/ubiquitty-core/Docs/coding-conventions.md) for how the code
+[`coding conventions`](../Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Docs/coding-conventions.md) for how the code
 is written. The one rule everything hangs on: **no
 platform-specific API (Cocoa/Metal/AppKit/GTK/Vulkan) in Core or any shared,
 host-tested translation unit** — platform code lives behind the PAL seam.
+
+Clone with the submodules, which bring the Kit and, inside it, Core (see
+[Core and the Kit](#core-and-the-kit)):
+
+```sh
+git clone --recurse-submodules https://github.com/ubiquitty/ubiquitty.git
+```
 
 The hooks run the naming, formatting and boundary checks at commit time, so a
 violation is caught before it reaches a pull request. Install them once per
 clone:
 
 ```sh
-Libraries/ubiquitty-core/Scripts/install-hooks.sh
+Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/install-hooks.sh
 ```
 
 ### Choose work
@@ -38,7 +45,7 @@ unless you have push access.
 Repository hooks run the checks shipped here. A clone can add checks of its
 own: the pre-commit and pre-push hooks also run every executable file in the
 clone's `.git/hooks.d/pre-commit/` and `.git/hooks.d/pre-push/`
-([`run-local-hooks.sh`](../Libraries/ubiquitty-core/Scripts/run-local-hooks.sh)), and a clone with none
+([`run-local-hooks.sh`](../Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-local-hooks.sh)), and a clone with none
 runs none. A maintainer can protect a shared checkout with
 `UBIQUITTY_SHARED_CHECKOUT`; ordinary clones are writable.
 
@@ -52,13 +59,13 @@ with it).
 
 ```sh
 ./Scripts/build-macos.sh      # the macOS app
-./Libraries/ubiquitty-core/Scripts/build-host.sh # the headless daemon
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host.sh # the headless daemon
 ./Scripts/build-linux-gtk.sh  # the Linux GTK4 + Vulkan frontend (on Linux)
-./Libraries/ubiquitty-core/Scripts/run-tests.sh        # the App host test suite (must pass)
-./Libraries/ubiquitty-core/Scripts/run-tests.sh --list-stanzas # the shell stanza names run-tests.sh accepts
-./Libraries/ubiquitty-core/Scripts/run-tests.sh test_app_tools # one stanza while iterating
-python3 Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --check-catalog
-./Libraries/ubiquitty-core/Scripts/check-style.py      # every content gate on this branch's changes; --full for the whole tree
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh        # the App host test suite (must pass)
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh --list-stanzas # the shell stanza names run-tests.sh accepts
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh test_app_tools # one stanza while iterating
+python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --check-catalog
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-style.py      # every content gate on this branch's changes; --full for the whole tree
 ```
 
 A C++ unit test such as `Tests/Platform/test_web_font_inventory.cpp` is a CTest case,
@@ -66,38 +73,79 @@ not a stanza, so `run-tests.sh` does not select it by name. Configure the test
 tree once, list its cases, and run one by exact name:
 
 ```sh
-CTEST_BUILD_DIR="$(python3 Libraries/ubiquitty-core/Scripts/build_root.py .)/BuildHostTests/ctest"
+CTEST_BUILD_DIR="$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)/BuildHostTests/ctest"
 cmake -S . -B "$CTEST_BUILD_DIR" -G Ninja -DUBIQUITTY_FRONTEND=Core -DUBIQUITTY_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
 ctest --test-dir "$CTEST_BUILD_DIR" -N
 ctest --test-dir "$CTEST_BUILD_DIR" -R '^test_web_font_inventory$' --output-on-failure
 ```
 
 Build outputs live outside the checkout. Resolve their root with
-`python3 Libraries/ubiquitty-core/Scripts/build_root.py .`, or set `UBQ_BUILD_ROOT` explicitly.
+`python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .`, or set `UBQ_BUILD_ROOT` explicitly.
 See the [platform build guide](../Docs/platform-builds.md) for per-platform
 prerequisites and output paths, and [building and
 releasing](../Docs/building-and-releasing.md) for signing and packaging.
 
 A change is ready when `run-tests.sh` and `check-style.py` both pass, relevant
 snapshot catalogs are green, and the affected frontends build clean. Follow the
-[snapshot workflow](../Libraries/ubiquitty-core/Tests/Snapshots/README.md) when fixing rendering bugs,
+[snapshot workflow](../Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/README.md) when fixing rendering bugs,
 adding visual cases, or introducing renderer features; baseline replacement is
 a reviewed part of the code change, never a way to silence a mismatch. Hosted
 CI runs the preflight checks and the secret scan. The maintainers run the test
 batteries, snapshot catalogs included, on their own Linux and macOS machines
 before every landing.
 
+### Core and the Kit
+
+This repository pins the Kit at `Libraries/ubiquitty-kit`, and the Kit pins Core
+at its own `Libraries/ubiquitty-core`. A checkout therefore holds one Core,
+`Libraries/ubiquitty-kit/Libraries/ubiquitty-core`, the one the pinned Kit was
+tested against, and the app's build, scripts and CI all read it there. A clone
+made without `--recurse-submodules`, and a checkout whose Kit pin moved, catch
+up with:
+
+```sh
+git submodule update --init --recursive
+```
+
+To change Core while working on the app, edit Core in that nested checkout. It
+is a clone of [`ubiquitty/core`](https://github.com/ubiquitty/core) at the
+commit the Kit pins:
+
+```sh
+cd Libraries/ubiquitty-kit/Libraries/ubiquitty-core
+git switch -c my-core-change         # from the pinned commit the app builds
+# edit, then build and test the app against the edit from the app's root:
+cd ../../../..
+./Scripts/build-macos.sh
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-tests.sh
+```
+
+Core's own checks judge whichever checkout they run in, so run them inside the
+nested checkout before opening the Core pull request, rebased onto Core's
+`main`. While the edit is unmerged, the Kit's checkout shows its Core pin as
+modified and this one shows the Kit's; neither pin is committed for it.
+
+A Core change reaches the app in three merges:
+
+1. The pull request merges into Core's `main`.
+2. The Kit moves its `Libraries/ubiquitty-core` pin to that commit.
+3. The app moves its `Libraries/ubiquitty-kit` pin to the Kit commit that
+   carries it, and the new Core comes with it.
+
+Dependabot proposes steps 2 and 3 once a day, in the Kit and here. An app
+change that needs the Core change lands with, or after, step 3.
+
 ## Coding standards
 
 New code meets all three simultaneously: **WebKit C++ guidelines**, **Safe C++
 (`CheckedPtr`/`CheckedRef`)**, and **Cocoa/Swift Foundation naming**. See
-[`coding conventions`](../Libraries/ubiquitty-core/Docs/coding-conventions.md), the reference
+[`coding conventions`](../Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Docs/coding-conventions.md), the reference
 every pull request is reviewed against. The codebase is
 `-fno-exceptions -fno-rtti`. Names spell words out
 (`inputEncoding`, not `inputEnc`); acronyms are ALL-CAPS (`UTF8`). Comments
 state present-tense invariants, not history.
 
-`Libraries/ubiquitty-core/Scripts/check-style.py` enforces formatting (clang-format), the module-boundary
+`Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-style.py` enforces formatting (clang-format), the module-boundary
 invariants (`check-boundaries.py`), and the naming lints — run it before opening
 a PR.
 
@@ -115,8 +163,8 @@ a PR.
   what landed on `main` meanwhile.
 - A commit that removes a line landed in the last two weeks by someone else's
   commit names that commit (hash or subject) and says why. The commit-msg hook
-  and `Libraries/ubiquitty-core/Scripts/check-stale-landing.py` enforce it.
-- Maintainers merge with `Libraries/ubiquitty-core/Scripts/merge-pr.sh <number>`: it refuses a PR not
+  and `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-stale-landing.py` enforce it.
+- Maintainers merge with `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/merge-pr.sh <number>`: it refuses a PR not
   rebased onto the current tip, runs the stale-landing check, records it as the
   `stale-landing` commit status, and rebase-merges.
 
@@ -175,7 +223,7 @@ trailer, if you add one out of habit, is neither needed nor a substitute.
 
 Follow the destination file's distribution license. Original files use
 `SPDX-License-Identifier: Apache-2.0`; [the licensing guide](../Docs/licensing.md)
-names the two exceptions, and `Libraries/ubiquitty-core/Scripts/check-licenses.py` fails a header that
+names the two exceptions, and `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-licenses.py` fails a header that
 disagrees with `license-scope.json`.
 Third-party material and the Emacs client keep their own identifiers and
 notices. Do not change a file's identifier merely because your contribution

@@ -16,8 +16,11 @@ from types import SimpleNamespace
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-CORE_ROOT = Path(os.environ.get("UBQ_CORE_ROOT") or ROOT / "Libraries/ubiquitty-core")
-KIT_ROOT = Path(os.environ.get("UBQ_KIT_ROOT") or ROOT / "Libraries/ubiquitty-kit")
+sys.path.insert(0, str(ROOT / "Scripts"))
+import library_scripts  # noqa: E402
+
+CORE_ROOT = Path(library_scripts.CORE_ROOT)
+KIT_ROOT = Path(library_scripts.KIT_ROOT)
 INPUTS = {
     "Scripts/library-scripts.sh": "app",
     "cmake/LicenseNotices.cmake": "core",
@@ -60,7 +63,8 @@ class GTKGateInputs(unittest.TestCase):
 
     def test_app_bootstrap_binds_the_actual_external_cache_owners(self):
         app = self.roots["app"]
-        canonical = {role: app / "Libraries" / f"ubiquitty-{role}" for role in ("core", "kit")}
+        canonical = {"kit": app / "Libraries/ubiquitty-kit",
+                     "core": app / "Libraries/ubiquitty-kit/Libraries/ubiquitty-core"}
         for root in canonical.values():
             (root / "Scripts").mkdir(parents=True)
         shutil.copyfile(ROOT / "Scripts/pre-push-gates.sh", app / "Scripts/pre-push-gates.sh")
@@ -214,22 +218,22 @@ SKIPPED=()
         self.assertIn("RUN:<core builder frames><./Scripts/check-core-builder-frames.sh>", output)
         self.assertNotIn("none", output)
 
-    def test_frame_gate_selects_each_dependency_pin_and_existing_path(self):
-        for path in ("Libraries/ubiquitty-core", "Libraries/ubiquitty-kit", "Source/Core/Rendering/CellInstance.h",
+    def test_frame_gate_selects_the_dependency_pin_and_each_existing_path(self):
+        for path in ("Libraries/ubiquitty-kit", "Source/Core/Rendering/CellInstance.h",
                      "Source/Platform/macOS/main.swift", "Scripts/cmake/UbiquittyKit.cmake",
                      "Scripts/cmake/AppleSharedSwift.cmake"):
             with self.subTest(path=path):
                 self.assertIn("RUN:<core builder frames>", self.select("gate_core_builder_frames", path))
 
     def test_frame_gate_preserves_unrelated_and_unread_diff_behavior(self):
-        for path in ("", "Docs/guide.md", "Libraries/ubiquitty-core-other", "Libraries/ubiquitty-kit-other"):
+        for path in ("", "Docs/guide.md", "Libraries/ubiquitty-core", "Libraries/ubiquitty-kit-other"):
             with self.subTest(path=path):
                 output = self.select("gate_core_builder_frames", path)
                 self.assertNotIn("RUN:", output)
                 self.assertIn("none — this branch changes no frame path", output)
         for status in (1, 128):
             with self.subTest(status=status):
-                output = self.select("gate_core_builder_frames", "Libraries/ubiquitty-core", status=status)
+                output = self.select("gate_core_builder_frames", "Libraries/ubiquitty-kit", status=status)
                 self.assertNotIn("RUN:", output)
                 self.assertNotIn("none", output)
 
@@ -268,7 +272,7 @@ SKIPPED=()
                 self.assertEqual(self.renderer_arms("Libraries/ubiquitty-kit", expanded=path), expected)
         for tier in ("linux", "full"):
             with self.subTest(tier=tier):
-                self.assertEqual(self.renderer_arms("Libraries/ubiquitty-core", expanded=self.large_diff(
+                self.assertEqual(self.renderer_arms("Libraries/ubiquitty-kit", expanded=self.large_diff(
                     "Source/Core/Terminal.cpp"), tier=tier), ["portable", "linux"])
 
     def test_renderer_selection_preserves_unrelated_excluded_and_unread_diffs(self):
@@ -278,7 +282,7 @@ SKIPPED=()
                 self.assertEqual(self.renderer_arms(path), [])
         for status in (1, 128):
             with self.subTest(status=status):
-                self.assertEqual(self.renderer_arms("Libraries/ubiquitty-core", status=status), [])
+                self.assertEqual(self.renderer_arms("Libraries/ubiquitty-kit", status=status), [])
 
 
 class ComposedSnapshotRouting(unittest.TestCase):
@@ -413,10 +417,10 @@ printf 'RESULT:%s|%s|%s\\n' "${FAILED[*]-}" "${SKIPPED[*]-}" "${ELSEWHERE[*]-}"
                                  [["--clean"]] if status == 2 else [])
 
     def test_normal_gate_uses_canonical_library_mounts_too(self):
-        canonical_core = self.app / "Libraries/ubiquitty-core"
         canonical_kit = self.app / "Libraries/ubiquitty-kit"
-        shutil.copytree(self.core, canonical_core)
+        canonical_core = canonical_kit / "Libraries/ubiquitty-core"
         shutil.copytree(self.kit, canonical_kit)
+        shutil.copytree(self.core, canonical_core)
         self.core, self.kit = canonical_core, canonical_kit
         self.environment.update(UBQ_CORE_ROOT=str(self.core), UBQ_KIT_ROOT=str(self.kit))
         checked, calls, result = self.execute("gate_renderer_snapshots", arms="portable swift")
@@ -486,10 +490,10 @@ class WebSnapshotOwnership(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.base = Path(self.scratch.name).resolve()
         self.app = self.base / "app with spaces '$ literal"
-        self.core = self.app / "Libraries/ubiquitty-core"
         self.kit = self.app / "Libraries/ubiquitty-kit"
+        self.core = self.kit / "Libraries/ubiquitty-core"
         self.output = self.base / "output with spaces '$ literal"
-        for directory in (self.app / "Scripts", self.core / "Scripts", self.kit,
+        for directory in (self.app / "Scripts", self.core / "Scripts",
                           self.output / "web", self.output / "web-dist"):
             directory.mkdir(parents=True)
         for relative in ("Scripts/web-snapshot-shim.mjs", "Scripts/library-scripts.sh"):

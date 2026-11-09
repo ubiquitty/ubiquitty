@@ -15,8 +15,11 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "Scripts"))
+import library_scripts  # noqa: E402
+
 CORE_ROOT = Path(os.environ.get("UBQ_CORE_ROOT") or os.environ.get("UBIQUITTY_CORE_SOURCE_DIR")
-                 or ROOT / "Libraries/ubiquitty-core")
+                 or library_scripts.CORE_ROOT)
 PACKAGERS = ("build-web.sh", "package-macos.sh", "package-linux-appimage.sh")
 
 
@@ -39,8 +42,8 @@ class PackageNotices(unittest.TestCase):
 
     def make_checkout(self, label):
         app = self.directory / label
-        core = app / "Libraries/ubiquitty-core"
         kit = app / "Libraries/ubiquitty-kit"
+        core = kit / "Libraries/ubiquitty-core"
         dependencies = (
             {"name": f"{label} Core fixture", "noticeRequired": True,
              "noticePath": "Source/ThirdParty/fixture/LICENSE"},
@@ -62,6 +65,7 @@ class PackageNotices(unittest.TestCase):
         self.write(app / dependencies[2]["noticePath"], f"{label} App dependency\n")
         for relative in ("Scripts/license_notices.py", "Scripts/build-root.sh", "Scripts/ccache-env.sh"):
             shutil.copyfile(CORE_ROOT / relative, core / relative)
+        shutil.copyfile(ROOT / "Scripts/library-scripts.sh", app / "Scripts/library-scripts.sh")
         return app, core, kit
 
     def caller_prefix(self, name):
