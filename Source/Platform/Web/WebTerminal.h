@@ -24,6 +24,7 @@
 #include "Core/Input/PointerLadder.h"
 #include "Core/Input/PointerShape.h"
 #include "Core/Keys/KeyEvent.h"
+#include "Core/ModelLock.h"
 #include "Core/OSC/Notification.h"
 #include "Core/Preferences/FontRoutePreferences.h"
 #include "Core/Preferences/PreferencesDefaults.h"
@@ -2077,7 +2078,10 @@ private:
     std::string m_takenProgressReports;
     bool m_hasProgressReportOverflow { false };
     Terminal m_terminal;
-    std::mutex m_searchLock;
+    // The page is single-threaded and the search executor is pumped on it, so
+    // this lock is never contended; Core's search and selection take the
+    // terminal's ModelLock, and the page supplies the one it holds.
+    ModelLock m_modelLock;
     Search::SearchExecutor m_searchExecutor { Search::SearchExecutor::ExecutionMode::Pumped };
     std::shared_ptr<Search::SearchController> m_searchController;
     Search::Status m_searchStatus { .isComplete = true };
