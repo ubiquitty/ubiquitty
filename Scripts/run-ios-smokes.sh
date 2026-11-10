@@ -19,6 +19,13 @@
 #   ./Scripts/run-ios-smokes.sh [APP_BUNDLE]
 #   SMOKE_TIMEOUT=120 ./Scripts/run-ios-smokes.sh
 #
+# The first launch after an install on a freshly booted device pays the
+# simulator's first-launch work, which on a hosted runner took longer than a
+# smoke's whole budget, and whichever smoke ran first failed for it. One warm-up
+# launch takes that cost before the timed smokes; it is reported on its own
+# line, bounded by SMOKE_WARMUP_TIMEOUT rather than the smoke budget, and a
+# warm-up that never comes back fails the run.
+#
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,6 +38,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="${1:-$UBQ_BUILD_ROOT/ios-iphonesimulator/Ubiquitty.app}"
 SRC="$ROOT/Source/Platform/iOS/App/SmokeLaunch.swift"
 TIMEOUT="${SMOKE_TIMEOUT:-120}"
+WARMUP_TIMEOUT="${SMOKE_WARMUP_TIMEOUT:-600}"
 # The device this checkout owns, booted for this run and shut down when it
 # ends; see Scripts/ios-simulator.sh.
 # shellcheck source=Scripts/ios-simulator.sh
@@ -106,6 +114,17 @@ xcrun simctl install "$DEVICE" "$APP" >/dev/null 2>&1 \
     || { echo "run-ios-smokes: could not install $APP on $DEVICE_NAME" >&2; exit 2; }
 
 echo "run-ios-smokes: $BUNDLE_ID on $DEVICE_NAME — ${#FLAGS[@]} tests, ${TIMEOUT}s each"
+warmupStart=$SECONDS
+warmup="$(runWithTimeout "$WARMUP_TIMEOUT" xcrun simctl launch --terminate-running-process "$DEVICE" "$BUNDLE_ID")"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    printf '  FAIL  warm-up launch (rc=%d, %ds)\n' "$rc" $((SECONDS - warmupStart))
+    sed 's/^/        /' <<<"$warmup"
+    echo "run-ios-smokes: FAILED — the warm-up launch never came back, so no smoke ran" >&2
+    exit 1
+fi
+xcrun simctl terminate "$DEVICE" "$BUNDLE_ID" >/dev/null 2>&1 || true
+printf '  warm-up launch: ok (%ds)\n' $((SECONDS - warmupStart))
 pass=0
 fail=0
 failed_flags=()
