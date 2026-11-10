@@ -10005,6 +10005,14 @@ int smokeDmabufImportFailure()
         int width = 0;
         int height = 0;
         check(renderer.renderGrid(app().rasterContext, term, frame, width, height), "the refused frame did not draw");
+        // A device can offer the export extensions and still refuse to build
+        // the exportable image (Mesa's lavapipe does). Export is then off before
+        // any import, so the refusal this smoke drives never happens.
+        if (probe.calls == 0 && !renderer.canExportFrames()) {
+            renderer.shutdown();
+            g_print("smoke-dmabuf-import-failure: SKIP (the exporter could not build its image, so no import was offered)\n");
+            return smokeSkippedExitCode;
+        }
         check(probe.calls == refusalIndex && probe.hasValidBuffer, "the requested import refusal was not exercised");
         check(!renderer.canExportFrames(), "export was not disabled after refusal");
         check(width == referenceWidth && height == referenceHeight && frame == reference, "the refused frame lost its pixels instead of reading back");
