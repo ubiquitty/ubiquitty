@@ -23,7 +23,8 @@
 # own line and counted in the summary. Lavapipe offers the dma-buf export
 # extensions but cannot build an exportable image, so those modes run where
 # UBQ_CI_LINUX_VULKAN=native. Any other status from a listed mode, and a 77
-# from any unlisted mode, still fails.
+# from any unlisted mode, still fails, so a mode renamed away from the list
+# fails rather than skips.
 #
 #   ./Scripts/run-linux-smokes.sh [BINARY]   default: build/linux/ubiquitty-linux
 #   SMOKE_TIMEOUT=90 ./Scripts/run-linux-smokes.sh
@@ -57,12 +58,6 @@ done < <(grep -oE 'mode == "(--smoke[a-z0-9-]*)"' "$SRC" | grep -oE -- '--smoke[
 # The modes that need a Vulkan dma-buf exporter, named one by one so that a
 # mode added later is never excused by a pattern.
 LAVAPIPE_SKIPS=(--smoke-dmabuf-import-failure)
-for skippable in "${LAVAPIPE_SKIPS[@]}"; do
-    case " ${FLAGS[*]} " in
-    *" $skippable "*) ;;
-    *) echo "run-linux-smokes: LAVAPIPE_SKIPS names $skippable, which $SRC no longer dispatches" >&2; exit 2 ;;
-    esac
-done
 isLavapipe=0
 case "${VK_ICD_FILENAMES:-}" in */lvp_icd*.json) isLavapipe=1 ;; esac
 isLavapipeSkip() { # <flag>
@@ -99,7 +94,7 @@ for flag in "${FLAGS[@]}"; do
 done
 
 unexecuted=$((${#FLAGS[@]} - pass - fail - skipped))
-echo "run-linux-smokes: $pass passed, $fail failed, $skipped skipped on lavapipe, $unexecuted unexecuted"
+echo "run-linux-smokes: $pass passed, $fail failed, $unexecuted unexecuted, $skipped skipped on lavapipe"
 if [ "$fail" -ne 0 ]; then
     echo "run-linux-smokes: failed: ${failed_flags[*]}" >&2
     for failed_flag in ${failed_flags[@]+"${failed_flags[@]}"}; do
