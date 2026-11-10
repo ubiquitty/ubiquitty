@@ -1917,6 +1917,16 @@ void followTailOrHoldViewport(LinuxPane& pane, const Ubiquitty::Screen::HistoryF
     pane.viewOffset = static_cast<int>(output.viewport.viewOffset);
 }
 
+// The offset a frame of the pane shows it at, read under the hold the frame is
+// read under. The ingest thread appends history before the delivery that
+// hands it to followTailOrHoldViewport, so a pane held back over its history
+// stands over the appended rows (Selection::frameViewOffset), where its own
+// offset would show its rows moved by them.
+int paneFrameViewOffset(const LinuxPane& pane, const Ubiquitty::Terminal& term)
+{
+    return Ubiquitty::Selection::frameViewOffset(pane.selection, term, pane.viewOffset);
+}
+
 void scheduleHeldFrame(LinuxPane& pane);
 
 // The held-frame timer: the program went quiet, so no byte will ask the
@@ -2901,6 +2911,7 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     if (!outerHold && pane.session)
         ownHold.emplace(*pane.session);
     auto* const hold = outerHold ? outerHold : &ownHold;
+    const int frameViewOffset = paneFrameViewOffset(pane, *term);
     std::unique_ptr<std::vector<uint8_t>> frameBuffer = app().framePool.take();
     std::vector<uint8_t>& rgba = *frameBuffer;
     int width = 0, height = 0;
@@ -2927,7 +2938,7 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     }
     app().rasterContext.setBeamChrome(&chrome);
     app().rasterContext.setHintChrome(&hint);
-    const bool hasRichFrame = capturePaneRichText(pane, &cursor, pane.viewOffset);
+    const bool hasRichFrame = capturePaneRichText(pane, &cursor, frameViewOffset);
     // A caret inside a block is the block's: Pango owns its insertion offset.
     const bool drawsRichCaret = hasRichFrame && pane.richTextFrame.hasRichTextCaret();
     if (drawsRichCaret) {
@@ -2941,7 +2952,7 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     const Ubiquitty::GridSize gridSize { term->columns, term->rows };
     const Ubiquitty::CellPosition cursorPosition { term->screens.active->cursorY, term->screens.active->cursorX };
     const bool isProgramViewport = term->isTekModeActive || term->modes.fullscreenContent;
-    const bool shouldFollowCursor = pane.viewOffset == 0 && term->modes.isCursorVisible != 0;
+    const bool shouldFollowCursor = frameViewOffset == 0 && term->modes.isCursorVisible != 0;
     const Ubiquitty::Linux::ModelCaptureHandoff handoff {
         .onCaptured = [](void* context) {
             auto* capturedHold = static_cast<std::optional<Ubiquitty::Runtime::TerminalSession::ModelReadScope>*>(context);
@@ -2960,7 +2971,7 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     const bool shouldRenderOnGPU = app().isVulkanReady && !term->isTekModeActive;
     if (shouldRenderOnGPU && !hasRichFrame && app().vulkan.canExportFrames())
         app().vulkan.requestFrameExport();
-    bool ok = shouldRenderOnGPU ? app().vulkan.renderGrid(app().rasterContext, term, rgba, width, height, pane.viewOffset, &pane.selection, &cursor, blinkTicks, handoff) : app().rasterContext.rasterizeTerm(term, rgba, width, height, pane.viewOffset, &pane.selection, &cursor, blinkTicks);
+    bool ok = shouldRenderOnGPU ? app().vulkan.renderGrid(app().rasterContext, term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks, handoff) : app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks);
     const bool didDrawOnGPU = ok && shouldRenderOnGPU;
     const std::optional<Ubiquitty::Linux::VulkanRenderer::ExportedFrame> exportedFrame = didDrawOnGPU ? app().vulkan.takeExportedFrame() : std::nullopt;
     if (exportedFrame)
@@ -2980,14 +2991,14 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
             g_warning("Vulkan render failed; demoting to the CPU raster for this run");
             app().isVulkanReady = false;
         }
-        ok = app().rasterContext.rasterizeTerm(term, rgba, width, height, pane.viewOffset, &pane.selection, &cursor, blinkTicks);
+        ok = app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks);
     }
     if (!ok)
         return;
     if (hasRichFrame) {
         const auto overlayHold = holdPaneModel(pane);
         pane.richText.composite(pane.richTextFrame, rgba, width, height,
-            app().rasterContext.snapshotOverlayRegions(*term, pane.viewOffset), drawsRichCaret);
+            app().rasterContext.snapshotOverlayRegions(*term, frameViewOffset), drawsRichCaret);
     }
     const Ubiquitty::FloatSize viewport {
         static_cast<float>(std::max(gtk_widget_get_width(picture) * app().scale, 1)),
@@ -12180,7 +12191,9 @@ std::string visibleRowText(const Ubiquitty::Terminal& term, int viewOffset, int 
 // Feed 40 numbered lines, then assert a scrolled-back view shows an OLDER top row
 // than the live tail. Pure Core content assertion — no display / renderer needed.
 // 40 lines into a 24-row screen pushes the older ones into history; scrolling up
-// by N reveals a top row N lines older than the live-tail top row.
+// by N reveals a top row N lines older than the live-tail top row. A pane held
+// there keeps that top row in the frame renderPaneInto reads while rows arrive
+// that its delivery has not handed it yet.
 int smokeScrollback()
 {
     activePane()->session->start(startupRows, startupColumns);
@@ -12218,7 +12231,20 @@ int smokeScrollback()
     g_print("smoke-scrollback: scrollbackCount=%d, top row offset 0 = \"%s\", offset %d = \"%s\" -- %s\n", historyDepth, topAtTail.c_str(), probeOffset, topAtHistory.c_str(), didPass ? "PASS" : "FAIL");
     if (!didPass)
         g_printerr("smoke-scrollback: offset %d expected \"%s\" (%d lines older than the tail)\n", probeOffset, expectedHistory, probeOffset);
-    return didPass ? 0 : 1;
+
+    // The pane measured at that offset, then rows the ingest thread parsed
+    // before a delivery: the frame stands over them, on the row it showed.
+    LinuxPane& pane = *activePane();
+    pane.viewOffset = probeOffset;
+    static_cast<void>(Ubiquitty::Selection::viewportAfterOutput(pane.selection, pane.viewOffset, Ubiquitty::Input::OutputSnapPolicy::Indeterminate,
+        Ubiquitty::Screen::historyFacts(term)));
+    Ubiquitty::processBytes(term, "arrived0\r\narrived1\r\narrived2\r\n");
+    const int frameOffset = paneFrameViewOffset(pane, *term);
+    const std::string topInFrame = visibleRowText(*term, frameOffset, 0, 6);
+    const bool doesFrameHoldRows = frameOffset == probeOffset + 3 && topInFrame == topAtHistory;
+    g_print("smoke-scrollback: held at offset %d over 3 rows not yet delivered, frame offset %d, top row = \"%s\" -- %s\n", probeOffset,
+        frameOffset, topInFrame.c_str(), doesFrameHoldRows ? "PASS" : "FAIL");
+    return didPass && doesFrameHoldRows ? 0 : 1;
 }
 
 // Selection + copy-to-clipboard self-test. Feeds a known two-line screen,
