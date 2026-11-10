@@ -37,6 +37,9 @@ APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_SOURCES = ("Source/Platform/macOS", "Source/Platform/Apple",
                "Source/UbiquittyKit", "Source/UbiquittyRenderKit", "Source/Core")
 
+#: The source kinds a build consumes; a newer one means the app predates the tree.
+SOURCE_SUFFIXES = (".swift", ".cpp", ".h", ".mm")
+
 #: The entry point whose dispatch names every headless mode.
 DISPATCH = ("Source", "Platform", "macOS", "App", "Application", "ApplicationMain.swift")
 
@@ -70,6 +73,11 @@ class MacOSSmokes(Gate):
         if not os.access(binary, os.X_OK):
             return self.skipped(f"no macOS app in {build} (./Scripts/build-macos.sh builds it).",
                                 self.uncovered())
+
+        newer = self.newerSource(binary)
+        if newer:
+            return self.failed(f"{newer} is newer than the app ({binary}); "
+                               "./Scripts/build-macos.sh builds the app these smokes should judge")
 
         modes = self.modes()
         if not modes:
@@ -124,6 +132,29 @@ class MacOSSmokes(Gate):
         if waived:
             return self.ok(f"{len(modes) - len(waived)} mode(s) green and the grid cache differential; waived: {' '.join(waived)} ")
         return self.ok(f"{len(modes)} mode(s) green and the grid cache differential: {' '.join(modes)} ")
+
+    def newerSource(self, binary):
+        """The first source file the app was built from that is newer than it, or None.
+
+        An app older than its sources is the previous build, and it passes or
+        fails for the previous build's reasons; a failed compile leaves the last
+        good app in place. The iOS smokes apply the same rule to their bundle.
+        """
+        stamp = os.path.getmtime(binary)
+        coreRoot = str(ubq_roots.core_root())
+        kitRoot = str(ubq_roots.kit_root())
+        trees = [os.path.join(self.root, tree) for tree in APP_SOURCES]
+        trees += [os.path.join(kitRoot, "Source", "UbiquittyKit"),
+                  os.path.join(kitRoot, "Source", "UbiquittyRenderKit")]
+        trees += [os.path.join(coreRoot, "Source", tree) for tree in ("Core", "PAL", "Base")]
+        for tree in trees:
+            for directory, _, names in os.walk(tree):
+                for name in sorted(names):
+                    if name.endswith(SOURCE_SUFFIXES):
+                        path = os.path.join(directory, name)
+                        if os.path.getmtime(path) > stamp:
+                            return os.path.relpath(path, self.root)
+        return None
 
     @staticmethod
     def classify(outcomes, waivers=None):
@@ -193,10 +224,28 @@ class MacOSSmokes(Gate):
         if self.classify({"--smoke-not-waived": 0}, plantedWaivers) != ([], []):
             failures.append("an unwaived green was not simply green")
 
+        # A planted app, dated after every real source, is fresh; a source dated
+        # after it is the previous build's evidence, and is named.
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory, "Ubiquitty")
+            binary.write_text("", encoding="utf-8")
+            future = os.path.getmtime(binary) + 10 * 365 * 86400
+            os.utime(binary, (future, future))
+            source = pathlib.Path(directory, "Source", "Platform", "macOS", "Planted.swift")
+            source.parent.mkdir(parents=True)
+            source.write_text("", encoding="utf-8")
+            probe = MacOSSmokes([])
+            probe.root = directory
+            if probe.newerSource(str(binary)) is not None:
+                failures.append("an app newer than every source was called stale")
+            os.utime(source, (future + 60, future + 60))
+            if probe.newerSource(str(binary)) != os.path.join("Source", "Platform", "macOS", "Planted.swift"):
+                failures.append("a source newer than the app was not named")
+
         if failures:
             return self.failed("self-test finding(s)", failures)
         return self.ok("the derivation takes a mode, refuses the prefix literal, "
-                       "and the waiver set fails both ways")
+                       "the waiver set fails both ways, and a stale app is refused")
 
     def modes(self):
         """Every mode the dispatch accepts, from the dispatch.
