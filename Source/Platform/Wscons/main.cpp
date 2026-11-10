@@ -273,9 +273,10 @@ int main(int argc, char** argv)
 
         // A frame the coherence rule held at a drain's end is asked again on
         // the rule's schedule: a program that went quiet writes no byte that
-        // would ask for it. A frame it releases is painted by the host.
+        // would ask for it. A frame it releases is painted by the host. This loop
+        // reads the pty itself, so a drain that has ended has seen the writer stop.
         const int paintsBeforeHeldFrame = drainHost.paintCount();
-        const std::optional<std::uint64_t> untilHeldFrame = runtime.publishHeldFrameIfDue(drainHost);
+        const std::optional<std::uint64_t> untilHeldFrame = runtime.publishHeldFrameIfDue(drainHost, Ubiquitty::Runtime::TerminalRuntime::HeldFrameWriter::Stopped);
         if (drainHost.paintCount() != paintsBeforeHeldFrame)
             runtime.noteDrainForOwnPaint(Ubiquitty::Runtime::TerminalRuntime::SettlePaint::Painted);
         int timeoutMilliseconds = runtime.owedPaintWaitMilliseconds(Ubiquitty::PAL::monotonicTicks(), Ubiquitty::PAL::monotonicMicros());
