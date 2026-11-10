@@ -534,6 +534,25 @@ void updateProgressBar();
     return std::optional<Ubiquitty::Runtime::TerminalSession::ModelReadScope>(std::in_place, *pane.session);
 }
 
+// A write hold on a pane's model, for a path that feeds or edits the Terminal
+// directly instead of through the session: the parser calls back into the
+// session's trigger, notification and window-request queues under the model
+// lock, and a Debug build asserts that. The release publishes what was written.
+class PaneModelWrite {
+public:
+    explicit PaneModelWrite(Ubiquitty::Runtime::TerminalSession& session) UBIQUITTY_NO_THREAD_SAFETY_ANALYSIS
+        : m_session(session)
+    {
+        m_session.lockForWrite();
+    }
+    ~PaneModelWrite() UBIQUITTY_NO_THREAD_SAFETY_ANALYSIS { m_session.unlockAfterWrite(); }
+    PaneModelWrite(const PaneModelWrite&) = delete;
+    PaneModelWrite& operator=(const PaneModelWrite&) = delete;
+
+private:
+    Ubiquitty::Runtime::TerminalSession& m_session;
+};
+
 // Declared ahead of the input handlers that arm it; defined beside the PTY
 // read handler it pairs with.
 void armPTYWriteDrain(LinuxPane* pane);
@@ -10562,7 +10581,12 @@ int smokeTrigger()
     // clipboard it captured, and check-linux-smokes reads a printed FAIL as a
     // verdict contradicting a zero exit. Test data that spells a verdict word
     // becomes one by the time it reaches the log.
-    if (!Ubiquitty::Triggers::addRuleSpec(term, "BUILD BROKE: [a-z]+", "copy", Ubiquitty::CaseSensitivity::Sensitive)) {
+    bool isRuleInstalled = false;
+    {
+        const PaneModelWrite write(*activePane()->session);
+        isRuleInstalled = Ubiquitty::Triggers::addRuleSpec(term, "BUILD BROKE: [a-z]+", "copy", Ubiquitty::CaseSensitivity::Sensitive);
+    }
+    if (!isRuleInstalled) {
         g_printerr("smoke-trigger: FAILED — the rule did not install\n");
         return 1;
     }
@@ -10575,7 +10599,10 @@ int smokeTrigger()
     // A line the rule does not match, fed first: it establishes that what the
     // matching line writes came from the match rather than from any line
     // arriving at all.
-    Ubiquitty::processBytes(term, std::string_view("all tests passed\r\n"));
+    {
+        const PaneModelWrite write(*activePane()->session);
+        Ubiquitty::processBytes(term, std::string_view("all tests passed\r\n"));
+    }
     servicePaneQueues(*activePane(), triggerDelivery);
     const std::string afterMiss = Ubiquitty::Linux::Clipboard::lastSetText();
     g_print("  non-matching line -> clipboard \"%s\"\n", afterMiss.c_str());
@@ -10584,7 +10611,10 @@ int smokeTrigger()
         ++failures;
     }
 
-    Ubiquitty::processBytes(term, std::string_view("BUILD BROKE: linker\r\n"));
+    {
+        const PaneModelWrite write(*activePane()->session);
+        Ubiquitty::processBytes(term, std::string_view("BUILD BROKE: linker\r\n"));
+    }
     servicePaneQueues(*activePane(), triggerDelivery);
     const std::string afterMatch = Ubiquitty::Linux::Clipboard::lastSetText();
     g_print("  matching line     -> clipboard \"%s\"\n", afterMatch.c_str());
