@@ -230,7 +230,13 @@ int main(int argc, char** argv)
     initParameters.columns = columns;
     runtime.init(initParameters);
 
-    if (!runtime.launch(Ubiquitty::Runtime::LaunchCommand::loginShell(), Ubiquitty::Preferences::terminalIdentity(Ubiquitty::Preferences::values()))) {
+    // A launch readies the model, then opens its PTY. This frontend is single
+    // threaded, so the model's lock is never taken (the drain host's is a
+    // no-op) and the two steps run back to back. A fresh runtime owns no
+    // stream, so anything but Ready is a launch that did not happen.
+    const Ubiquitty::Runtime::LaunchCommand loginShell = Ubiquitty::Runtime::LaunchCommand::loginShell();
+    if (runtime.prepareLaunch(loginShell) != Ubiquitty::Runtime::TerminalRuntime::LaunchReadiness::Ready
+        || !runtime.openLaunchStream(loginShell, Ubiquitty::Preferences::terminalIdentity(Ubiquitty::Preferences::values()))) {
         std::fprintf(stderr, "ubiquitty-wscons: failed to spawn the login shell\n");
         return 1;
     }
