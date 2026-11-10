@@ -2892,14 +2892,17 @@ GdkTexture* makeExportedFrameTexture(GtkWidget* picture, const Ubiquitty::Linux:
     return texture;
 }
 
-void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty::Runtime::TerminalSession::ModelReadScope>* outerHold)
+// Draws the pane's frame, unless Core's check under the frame's hold declines
+// it: an update the parser opened, or a screen it erased, after the tick's
+// published check. Returns false only then, so the caller keeps the frame owed.
+bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty::Runtime::TerminalSession::ModelReadScope>* outerHold)
 {
     if (!picture)
-        return; // headless (no window) — the smoke paths render via rasterizeTerm directly
+        return true; // headless (no window) — the smoke paths render via rasterizeTerm directly
     const std::uint32_t frameStartMicros = Ubiquitty::PAL::monotonicMicros();
     Ubiquitty::Terminal* term = pane.session->terminal();
     if (!term)
-        return;
+        return true;
     // Held for the capture: the renderer reads the grid where it builds the
     // frame's instances and hands the model back before the GPU pass, so the
     // parser waits for the build and not for the draw and the readback. The
@@ -2911,6 +2914,10 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     if (!outerHold && pane.session)
         ownHold.emplace(*pane.session);
     auto* const hold = outerHold ? outerHold : &ownHold;
+    Ubiquitty::Runtime::FrameDemand demand;
+    demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
+    if (pane.session->liveReadDecline(*term, demand).decline != Ubiquitty::Runtime::FrameDecline::None)
+        return false;
     const int frameViewOffset = paneFrameViewOffset(pane, *term);
     std::unique_ptr<std::vector<uint8_t>> frameBuffer = app().framePool.take();
     std::vector<uint8_t>& rgba = *frameBuffer;
@@ -2994,7 +3001,7 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
         ok = app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks);
     }
     if (!ok)
-        return;
+        return true;
     if (hasRichFrame) {
         const auto overlayHold = holdPaneModel(pane);
         pane.richText.composite(pane.richTextFrame, rgba, width, height,
@@ -3093,7 +3100,7 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
         // frame reads back.
         app().vulkan.disableFrameExport();
         requestRepaint();
-        return;
+        return true;
     }
     if (!texture)
         texture = makeMemoryFrameTexture(std::move(frameBuffer), width, height);
@@ -3112,11 +3119,12 @@ void renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     gtk_picture_set_paintable(GTK_PICTURE(picture), paintable);
     g_object_unref(paintable);
     g_object_unref(texture);
+    return true;
 }
 
 // Paint the focused pane into the shared picture. (Split panes render each visible
 // leaf into its own picture; today there is one, app().focusedPicture.)
-void renderGridFrame() { renderPaneInto(*activePane(), app().focusedPicture, nullptr); }
+void renderGridFrame() { static_cast<void>(renderPaneInto(*activePane(), app().focusedPicture, nullptr)); }
 
 // Input.
 
@@ -6927,7 +6935,18 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     // withheld -- its frames are the passes' own -- which is what keeps a flood
     // on screen rather than frozen until it ends. Asked before the hold below:
     // the rule stamps the block under the model lock itself.
-    const bool shouldHoldForSync = activePane()->session->shouldWithholdFrame(Ubiquitty::PAL::monotonicTicks());
+    //
+    // The decision is takeFrame's, as every frontend's is. This frontend
+    // registers no capture geometry, so the drain captures nothing for it and
+    // the answer is a read of the model or a decline; a capture handed back
+    // regardless is released, and the model read.
+    Ubiquitty::Runtime::FrameDemand demand;
+    demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
+    demand.selection = &activePane()->selection;
+    Ubiquitty::Runtime::FrameSupply supply;
+    if (Ubiquitty::Rendering::FrameCapture* capture = activePane()->session->takeFrame(demand, supply))
+        ::releaseFrameCapture(capture);
+    const bool shouldHoldForSync = supply.route == Ubiquitty::Runtime::FrameRoute::Declined;
     // Core's drive recommends continuous presentation while the screen
     // changes at frame rate: the grid moves between any two ticks, so a frame
     // is owed on each whatever the delivery cadence, as the Swift arm's frame
@@ -7006,10 +7025,13 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         // accessible snapshot of the grid it paints.
         const float paintedBlinkAlpha = resolveCursorOverlay(activePane()->session->terminal()).blinkAlpha;
         publishAccessibleTerminal();
-        forEachVisibleLeaf([&](LinuxPane& pane) { renderPaneInto(pane, pane.picture, &pane == activePane() ? &hold : nullptr); });
+        bool didDrawEveryLeaf = true;
+        forEachVisibleLeaf([&](LinuxPane& pane) {
+            didDrawEveryLeaf = renderPaneInto(pane, pane.picture, &pane == activePane() ? &hold : nullptr) && didDrawEveryLeaf;
+        });
         activePane()->lastCursorBlinkAlpha = paintedBlinkAlpha;
         app().lastBlinkPaintTicks = nowBlinkTicks; // advance the text-blink phase baseline
-        app().isRepaintPending = false;
+        app().isRepaintPending = !didDrawEveryLeaf;
     }
     // The OSC 9;4 bar lives in its own GtkOverlay child (not the grid texture), so
     // it reconciles independently of app().isRepaintPending — progress changes and the comet
