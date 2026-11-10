@@ -598,13 +598,16 @@ gate_esctest() {
 # somebody has it, and stops being checked at the moment it stops being true.
 gate_core_builder_frames() {
     local changed
-    changed="$(git diff --name-only origin/main...HEAD 2>/dev/null)" || return 0
-    # The Kit's build modules hold the renderer's flags and source lists; the
-    # Kit pin, which carries Core's, may also change those sources outside the
-    # App checkout.
-    if ! ubq_select_all && ! printf '%s\n' "$changed" | grep -E '^Source/Core/Rendering/|^Source/Platform/macOS/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$|^Libraries/ubiquitty-kit$' >/dev/null; then
-        printf '  %-34s %s\n' "core builder frames" "none — this branch changes no frame path"
-        return 0
+    # A run that selects every gate (the full tier, CI) needs no diff to read.
+    if ! ubq_select_all; then
+        changed="$(git diff --name-only origin/main...HEAD 2>/dev/null)" || return 0
+        # The Kit's build modules hold the renderer's flags and source lists; the
+        # Kit pin, which carries Core's, may also change those sources outside the
+        # App checkout.
+        if ! printf '%s\n' "$changed" | grep -E '^Source/Core/Rendering/|^Source/Platform/macOS/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$|^Libraries/ubiquitty-kit$' >/dev/null; then
+            printf '  %-34s %s\n' "core builder frames" "none — this branch changes no frame path"
+            return 0
+        fi
     fi
     if [ "$(uname -s)" != "Darwin" ]; then
         SKIPPED+=("core builder frames (needs the macOS app and a Metal device; this host is $(uname -s))")

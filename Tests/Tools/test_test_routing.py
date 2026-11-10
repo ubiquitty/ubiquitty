@@ -21,6 +21,13 @@ import library_scripts  # noqa: E402
 
 CORE_ROOT = Path(library_scripts.CORE_ROOT)
 KIT_ROOT = Path(library_scripts.KIT_ROOT)
+
+
+def gate_library_function(name):
+    """A function of Core's gate library, as the hook defines it."""
+    source = (CORE_ROOT / "Scripts/pre-push-gates-lib.sh").read_text()
+    start = source.index(name + "() {\n")
+    return source[start:source.index("\n}\n", start) + 3]
 INPUTS = {
     "Scripts/library-scripts.sh": "app",
     "cmake/LicenseNotices.cmake": "core",
@@ -179,7 +186,7 @@ class RendererGateSelection(unittest.TestCase):
         start = source.index(name + "() {\n")
         return source[start:source.index("\n}\n", start) + 3]
 
-    def select(self, name, changed, *, expanded=None, status=0, host="Darwin", tier="quick"):
+    def select(self, name, changed, *, expanded=None, status=0, host="Darwin", tier="quick", select_all=False):
         diff = self.directory / "diff"
         diff.write_text(changed)
         logical = self.directory / "expanded"
@@ -198,12 +205,16 @@ uname() { printf '%s\\n' "$FRAME_HOST"; }
 run() { printf 'RUN:<%s><%s>\\n' "$1" "$2"; }
 SKIPPED=()
 '''
+        script += gate_library_function("ubq_select_all")
         script += self.function(KIT_ROOT / "Scripts/pre-push-gates-kit.sh", "kit_swift_arm_reached")
         script += self.function(ROOT / "Scripts/pre-push-gates.sh", name)
         script += f"\n{name}\nprintf '\\nSKIPS:%s\\n' \"${{SKIPPED[*]-}}\"\n"
         environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         environment.update(FRAME_DIFF=str(diff), FRAME_EXPANDED=str(logical), FRAME_DIFF_STATUS=str(status),
                            FRAME_HOST=host, TIER=tier, UBQ_CORE_ROOT=str(CORE_ROOT), UBQ_KIT_ROOT=str(KIT_ROOT))
+        environment.pop("UBQ_PREPUSH_SELECT", None)
+        if select_all:
+            environment["UBQ_PREPUSH_SELECT"] = "all"
         checked = subprocess.run(["bash", "-c", script], env=environment, text=True,
                                  capture_output=True, timeout=20)
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
@@ -284,6 +295,14 @@ SKIPPED=()
             with self.subTest(status=status):
                 self.assertEqual(self.renderer_arms("Libraries/ubiquitty-kit", status=status), [])
 
+    def test_a_run_that_selects_every_gate_takes_every_arm_and_the_frame_gate(self):
+        for path, status in (("", 0), ("Docs/guide.md", 0), ("Libraries/ubiquitty-kit", 128)):
+            with self.subTest(path=path, status=status):
+                self.assertEqual(self.renderer_arms(path, status=status, select_all=True),
+                                 ["swift", "portable", "web", "linux"])
+                self.assertIn("RUN:<core builder frames>",
+                              self.select("gate_core_builder_frames", path, status=status, select_all=True))
+
 
 class ComposedSnapshotRouting(unittest.TestCase):
     def setUp(self):
@@ -363,6 +382,7 @@ UBQ_GATE_CACHE_ENABLED=0
 ubq_renderer_arms() { printf '%s' "$SNAPSHOT_ARMS"; }
 ubq_linux_route() { UBQ_LINUX_HOST=""; }
 '''
+        script += gate_library_function("ubq_select_all") + "\n"
         for function in ("ubq_arm_rebuild", "ubq_app_snapshot_sources", "ubq_optional_web_snapshots", name):
             script += self.function(function) + "\n"
         script += name + '''
