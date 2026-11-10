@@ -111,7 +111,7 @@ gate_host_apple() {
     # by the commit that adds it. Runs only
     # when the macOS sources moved, against whatever app the arm gates
     # above already required to be fresh.
-    if ! git diff --quiet origin/main -- Source/Platform/macOS Scripts/check-macos-smokes.py 2>/dev/null; then
+    if ubq_select_all || ! git diff --quiet origin/main -- Source/Platform/macOS Scripts/check-macos-smokes.py 2>/dev/null; then
         run "macOS headless smokes" ./Scripts/check-macos-smokes.py
     fi
 }
@@ -195,6 +195,11 @@ gate_linux_compile() {
 # failure, matching the snapshots stanza. Only a real disagreement fails.
 ubq_renderer_arms() {
     local changed arms=""
+    # A run that selects every gate (the full tier, CI) renders every arm.
+    if ubq_select_all; then
+        printf '%s' ' swift portable web linux'
+        return 0
+    fi
     # Three dots, so the base is the MERGE BASE rather than origin/main's tip:
     # against the tip, every file another branch landed since this branch started
     # reads as changed here, and the arms selected would be theirs.
@@ -516,7 +521,7 @@ gate_wasm() {
     # What the push changes, a library read as the files between its pins.
     local changed
     changed="$(ubq_changed_with_libraries 2>/dev/null)" || true
-    grep -qE '^(Source/(Core|Base|Platform/Web)/|Tests/Snapshots/(cases\.json|golden)|Libraries/ubiquitty-(core|kit)$)' <<<"$changed" || return 0
+    ubq_select_all || grep -qE '^(Source/(Core|Base|Platform/Web)/|Tests/Snapshots/(cases\.json|golden)|Libraries/ubiquitty-(core|kit)$)' <<<"$changed" || return 0
     if ! command -v emcmake >/dev/null 2>&1; then
         SKIPPED+=("wasm build (no emscripten; emsdk provides emcmake)")
         printf '  %-34s %s\n' "wasm build" "SKIPPED (no emscripten)"
@@ -597,7 +602,7 @@ gate_core_builder_frames() {
     # The Kit's build modules hold the renderer's flags and source lists; the
     # Kit pin, which carries Core's, may also change those sources outside the
     # App checkout.
-    if ! printf '%s\n' "$changed" | grep -E '^Source/Core/Rendering/|^Source/Platform/macOS/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$|^Libraries/ubiquitty-kit$' >/dev/null; then
+    if ! ubq_select_all && ! printf '%s\n' "$changed" | grep -E '^Source/Core/Rendering/|^Source/Platform/macOS/|^Scripts/cmake/(UbiquittyKit|AppleSharedSwift)\.cmake$|^Libraries/ubiquitty-kit$' >/dev/null; then
         printf '  %-34s %s\n' "core builder frames" "none — this branch changes no frame path"
         return 0
     fi
@@ -625,9 +630,13 @@ case "$TIER" in
     default) gate_pgo_drift; gate_style; gate_commit_rules; gate_host; gate_linux_compile; gate_forks; gate_wasm; gate_core_builder_frames; gate_renderer_snapshots; gate_swift_renderer_drivers; gate_ios ;;
     ctest)   gate_pgo_drift; gate_style; gate_commit_rules; gate_host; gate_linux_compile; gate_forks; gate_wasm; gate_core_builder_frames; gate_ctest; gate_renderer_snapshots; gate_swift_renderer_drivers; gate_ios ;;
     linux)   gate_pgo_drift; gate_style; gate_commit_rules; gate_host; gate_forks; gate_wasm; gate_core_builder_frames; gate_linux; gate_renderer_snapshots; gate_swift_renderer_drivers; gate_ios ;;
-    full)    gate_pgo_drift; gate_style; gate_commit_rules; gate_host; gate_forks; gate_wasm; gate_core_builder_frames; gate_ctest; gate_linux; gate_snapshots; gate_esctest ;;
+    # Every gate, each run whatever the push reaches (the lib sets select-all for
+    # this tier): what CI runs, run here.
+    full)    gate_pgo_drift; gate_style; gate_commit_rules; gate_host; gate_forks; gate_wasm; gate_core_builder_frames; gate_ctest; gate_linux; gate_snapshots; gate_ios; gate_esctest ;;
+    # The families UBQ_PREPUSH_FAMILIES names, in order: CI's entry.
+    families) ubq_run_families ;;
     *)
-        echo "pre-push gates: unknown tier '$TIER' (want lint|quick|ctest|linux|full)" >&2
+        echo "pre-push gates: unknown tier '$TIER' (want lint|quick|ctest|linux|full|families)" >&2
         exit 1
         ;;
 esac
