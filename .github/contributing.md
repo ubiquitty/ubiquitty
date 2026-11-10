@@ -89,10 +89,14 @@ A change is ready when `run-tests.sh` and `check-style.py` both pass, relevant
 snapshot catalogs are green, and the affected frontends build clean. Follow the
 [snapshot workflow](../Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/README.md) when fixing rendering bugs,
 adding visual cases, or introducing renderer features; baseline replacement is
-a reviewed part of the code change, never a way to silence a mismatch. Hosted
-CI runs the preflight checks and the secret scan. The maintainers run the test
-batteries, snapshot catalogs included, on their own Linux and macOS machines
-before every landing.
+a reviewed part of the code change, never a way to silence a mismatch.
+
+Every pull request runs the full matrix on GitHub-hosted runners
+([`.github/workflows/ci.yml`](workflows/ci.yml)): the Linux and Apple batteries,
+snapshot catalogs included, in parallel groups, and the push gates the pre-push
+hook runs. The check that has to pass is `CI`; it needs every other job. The
+macOS UI scenarios run on a hosted runner when a run by hand asks for them, and
+on the maintainers' Macs for every batch.
 
 ### Core and the Kit
 
