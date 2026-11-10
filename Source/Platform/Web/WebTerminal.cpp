@@ -445,10 +445,11 @@ void WebTerminal::feed(std::string_view bytes)
 
 void WebTerminal::followTailOrHoldViewport()
 {
-    // The page is single-threaded, so Core reads the mode straight off the
-    // terminal, keeps the baseline the growth is measured from, and decides;
-    // the page supplies where its view sits and applies the verdict.
-    m_viewOffset = static_cast<int>(Ubiquitty::Selection::updateAfterOutput(m_selection, m_terminal, m_viewOffset).viewport.viewOffset);
+    // The page is single-threaded, so nothing holds the lock against the
+    // try-lock Core takes to read the mode off the terminal; Core keeps the
+    // baseline the growth is measured from, and decides. The page supplies
+    // the history it just wrote, where its view sits, and applies the verdict.
+    m_viewOffset = static_cast<int>(Ubiquitty::Selection::updateAfterOutput(m_selection, m_terminal, m_modelLock, m_viewOffset, Screen::historyFacts(&m_terminal)).viewport.viewOffset);
 }
 
 void WebTerminal::refreshConfiguration()
@@ -2032,7 +2033,7 @@ Search::Request WebTerminal::literalSearchRequest(const char* literal)
 std::shared_ptr<Search::SearchController> WebTerminal::searchController()
 {
     if (!m_searchController) {
-        m_searchController = Search::SearchController::make(m_terminal, m_searchLock, m_searchExecutor);
+        m_searchController = Search::SearchController::make(m_terminal, m_modelLock, m_searchExecutor);
         if (m_searchController)
             m_searchController->setChangedCallback([](void* context) { static_cast<WebTerminal*>(context)->searchDidChange(); }, this);
         m_searchExecutor.schedule(m_searchController);
@@ -2043,7 +2044,7 @@ std::shared_ptr<Search::SearchController> WebTerminal::searchController()
 bool WebTerminal::pumpSearch()
 {
     if (m_searchController) {
-        const std::scoped_lock hold(m_searchLock);
+        const std::scoped_lock hold(m_modelLock);
         m_searchController->noteModelChanged(m_terminal);
     }
     return m_searchExecutor.pump(std::chrono::steady_clock::now() + std::chrono::milliseconds(4));
@@ -2080,7 +2081,7 @@ bool WebTerminal::stepSearch(Search::StepDirection direction)
     if (!m_searchController || m_searchController->status().generation != m_searchController->requestedGeneration())
         return false;
     {
-        const std::scoped_lock hold(m_searchLock);
+        const std::scoped_lock hold(m_modelLock);
         if (!m_searchController->step(direction))
             return false;
     }
@@ -2099,7 +2100,7 @@ bool WebTerminal::searchLiteralAndWait(const char* literal)
 
 void WebTerminal::searchDidChange()
 {
-    const std::scoped_lock hold(m_searchLock);
+    const std::scoped_lock hold(m_modelLock);
     Search::Status status = m_searchController->status();
     if (status.generation != m_searchController->requestedGeneration())
         return;
