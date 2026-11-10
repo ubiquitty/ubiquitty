@@ -596,6 +596,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
     # ------------------------------------------------------------------
     ubiquitty_kit_swift_flags(PLATFORM iOS SOURCE_ROOTS "${CMAKE_SOURCE_DIR}")
     ubiquitty_kit_add_swift_modules(PLATFORM iOS
+        CXX_TARGETS ubiquitty-core-ios ubiquitty-ios-bridge
         MODULE_MAPS "${UBIQUITTY_IOS_MODULE_MAP_DIR}/module.modulemap"
         LINK_LIBRARIES ubiquitty-core-ios
         CONDITIONS ${UBIQUITTY_IOS_SWIFT_CONDITIONS})
@@ -914,6 +915,12 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         # response file because the set is the dependency graph's rather than
         # ours and does not exist until the package has been built.
         "$<$<COMPILE_LANGUAGE:Swift>:SHELL:@${_ubq_ssh_flags}>")
+    # The importer reads Core's headers under every definition the C++ that
+    # compiles Core and this app's own C++ carry, and a Core type the two lay
+    # out apart fails the link of the layout probe the app waits for.
+    ubiquitty_kit_forward_definitions(UbiquittyIOSApp CXX_TARGETS ubiquitty-core-ios ubiquitty-ios-bridge UbiquittyIOSApp)
+    ubiquitty_kit_add_layout_probe(PLATFORM iOS CXX_TARGETS ubiquitty-core-ios ubiquitty-ios-bridge)
+    add_dependencies(UbiquittyIOSApp ubiquitty-kit-layout-probe)
     target_link_libraries(UbiquittyIOSApp PRIVATE
         UbiquittyKitModule
         UbiquittyRenderKit

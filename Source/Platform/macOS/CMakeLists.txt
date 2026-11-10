@@ -652,6 +652,7 @@ target_compile_options(Ubiquitty PRIVATE
 # sources and in this order.
 # ----------------------------------------------------------------------
 ubiquitty_kit_add_swift_modules(PLATFORM macOS
+    CXX_TARGETS Ubiquitty
     MODULE_MAPS "${UBIQUITTY_SWIFT_DIR}/module.modulemap"
     CONDITIONS ${UBIQUITTY_SWIFT_CONDITIONS}
     HEADER_PASS_OPTIONS ${UBIQUITTY_RENDERKIT_HEADER_PASS_OPTIONS}
@@ -760,6 +761,12 @@ target_link_options(Ubiquitty PRIVATE "LINKER:-ObjC")
 # without them, TerminalRuntime is laid out one field short, and the Swift
 # shell's first ingest pass faults.
 ubiquitty_kit_add_swift_conditions(Ubiquitty ${UBIQUITTY_SWIFT_CONDITIONS})
+# The importer reads Core's headers under every definition this executable's
+# C++ compiles Core with, and a Core type the two lay out apart fails the link
+# of the layout probe the executable waits for.
+ubiquitty_kit_forward_definitions(Ubiquitty CXX_TARGETS Ubiquitty)
+ubiquitty_kit_add_layout_probe(PLATFORM macOS CXX_TARGETS Ubiquitty)
+add_dependencies(Ubiquitty ubiquitty-kit-layout-probe)
 # The window-server blur radius is set from Swift (WindowBlurBackdrop) under
 # the same gate the C-family definition above carries.
 if(UBIQUITTY_BACKGROUND_BLUR)
