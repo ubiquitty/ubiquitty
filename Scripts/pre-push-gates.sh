@@ -472,7 +472,7 @@ gate_ios() {
         "CMakeLists.txt Source/Platform/macOS/CMakeLists.txt cmake Scripts/cmake Scripts/generate-xcode-workspace.sh Scripts/library-scripts.sh Scripts/check-xcode-workspace.py Scripts/apple-development-teams.py Scripts/macos-deployment-target.txt" \
         ./Scripts/generate-xcode-workspace.sh
     run_scoped "iOS UI tests" \
-        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/library-scripts.sh Scripts/run-ios-ui-tests.sh Scripts/build-root.sh Scripts/ios-simulator.sh" \
+        "Source/Platform/iOS Source/UbiquittyKit Source/UbiquittyRenderKit CMakeLists.txt Scripts/cmake cmake Scripts/build-ios.sh Scripts/library-scripts.sh Scripts/run-ios-ui-tests.sh Scripts/build-root.sh Scripts/ios-simulator.sh Tests/Platform/test_ios_protected_file_probe.swift" \
         ./Scripts/run-ios-ui-tests.sh
 }
 
