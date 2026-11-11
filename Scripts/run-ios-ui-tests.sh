@@ -297,20 +297,52 @@ coldResumeFailed() { # <message>
         | awk '{ print "run-ios-ui-tests: free space on the device volume: " $4 }' >&2
     exit 1
 }
-if ! runTestBuildCheck "cold-resume: -- PASS" --check-cold-resume; then
-    coldResumeFailed "the protected cold-resume check failed"
-fi
-coldHost="$(uuidgen)"
-coldWrite="$(runTestBuildCheck "cold-resume: -- PASS" --check-cold-resume --cold-resume-phase write "$coldHost")" || {
-    printf '%s\n' "$coldWrite"
-    coldResumeFailed "the cold-resume write launch failed"
+# The cold-resume checks seal into storage that needs Complete protection,
+# the precondition of the Kit's protected-file suite, and are gated by the same
+# probe (Tests/Platform/test_ios_protected_file_probe.swift), built here with an
+# entry point and run on the device. Only a measured class other than Complete
+# skips them, by name and with the class; a probe that reads back no class
+# fails the run, and a device that applies Complete runs them in full.
+probeDirectory="$(mktemp -d "${TMPDIR:-/tmp}/ubq-ios-protection-probe.XXXXXX")"
+printf 'import Foundation\nexit(completeProtectionApplies() ? 0 : 1)\n' >"$probeDirectory/main.swift"
+xcrun --sdk iphonesimulator swiftc -O -warnings-as-errors -target "$(uname -m)-apple-ios17.0-simulator" \
+    "$KIT_ROOT/Tests/Platform/test_ios_protected_file_probe.swift" "$probeDirectory/main.swift" \
+    -o "$probeDirectory/probe" >"$probeDirectory/build.log" 2>&1 || {
+    cat "$probeDirectory/build.log" >&2
+    echo "run-ios-ui-tests: the protection probe did not build" >&2
+    exit 1
 }
-printf '%s\n' "$coldWrite"
-coldClient="$(sed -nE 's/.*process write client=([0-9A-F-]+) PASS.*/\1/p' <<<"$coldWrite" | head -1)"
-if [ -z "$coldClient" ] || ! runTestBuildCheck "cold-resume: -- PASS" --check-cold-resume \
-    --cold-resume-phase read "$coldHost" --cold-resume-client "$coldClient"; then
-    coldResumeFailed "the cold-resume relaunch did not restore the written workspace"
+probeStatus=0
+probe="$(xcrun simctl spawn "$DEVICE" "$probeDirectory/probe" 2>&1)" || probeStatus=$?
+printf '%s\n' "$probe"
+readBack="$(sed -n 's/^probe: a file written with Complete protection reads back //p' <<<"$probe" | head -n 1)"
+complete="NSURLFileProtectionComplete"
+if [ "$probeStatus" -eq 0 ] && [ "$readBack" = "$complete" ]; then
+    if ! runTestBuildCheck "cold-resume: -- PASS" --check-cold-resume; then
+        coldResumeFailed "the protected cold-resume check failed"
+    fi
+    coldHost="$(uuidgen)"
+    coldWrite="$(runTestBuildCheck "cold-resume: -- PASS" --check-cold-resume --cold-resume-phase write "$coldHost")" || {
+        printf '%s\n' "$coldWrite"
+        coldResumeFailed "the cold-resume write launch failed"
+    }
+    printf '%s\n' "$coldWrite"
+    coldClient="$(sed -nE 's/.*process write client=([0-9A-F-]+) PASS.*/\1/p' <<<"$coldWrite" | head -1)"
+    if [ -z "$coldClient" ] || ! runTestBuildCheck "cold-resume: -- PASS" --check-cold-resume \
+        --cold-resume-phase read "$coldHost" --cold-resume-client "$coldClient"; then
+        coldResumeFailed "the cold-resume relaunch did not restore the written workspace"
+    fi
+elif [ "$probeStatus" -ne 0 ] && [[ "$readBack" == NSURLFileProtection* ]] && [ "$readBack" != "$complete" ]; then
+    skip="run-ios-ui-tests: cold resume SKIPPED — this simulator does not apply Complete protection: a file written with it reads back $readBack"
+    echo "$skip"
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        echo "::warning title=iOS cold resume skipped::$skip"
+    fi
+else
+    echo "run-ios-ui-tests: the protection probe (exit $probeStatus) read back '${readBack:-nothing}', so cold resume has no verdict" >&2
+    exit 1
 fi
+rm -rf "$probeDirectory"
 
 echo "run-ios-ui-tests: $BUNDLE_NAME against $BUNDLE_ID on $DEVICE_NAME"
 LOG="$STAGE/xcodebuild.log"
