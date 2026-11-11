@@ -446,7 +446,9 @@ skipped=$(grep -cE "^Test Case '.*' skipped" "$LOG" 2>/dev/null || true)
 for line in $(grep -oE "^Test Case '.*' (passed|failed)" "$LOG" 2>/dev/null | sed 's/Test Case .-\[[^ ]* //;s/\]. /|/'); do
     printf '  %s\n' "$line" | sed 's/|passed/  ok/;s/|failed/  FAIL/'
 done
-grep -E "^\s+.*: error: -\[" "$LOG" 2>/dev/null | sed 's/^/        /'
+# Each failed case's reason, however the log indents it: XCTest's issue
+# lines, and the runner's restart after a crash or a hang.
+grep -E ": error: -\[|Restarting after unexpected exit" "$LOG" 2>/dev/null | sed 's/^[[:space:]]*/        /'
 
 echo "run-ios-ui-tests: $passed passed, $failed failed, $skipped skipped ($expected selected, $declaredCases declared)"
 
