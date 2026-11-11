@@ -14819,30 +14819,43 @@ int smokeWindowChrome(const char* outputDirectory)
             g_usleep(1000);
         } while (g_get_monotonic_time() < deadline);
     };
-    const auto capture = [&](GtkWidget* widget, const char* name) {
+    // Why a window produced no frame, or empty when it did. A window is given
+    // its size on a frame-clock tick, which on a loaded machine can come after
+    // the settle above, so the capture waits for the size, bounded, rather
+    // than reading a window that has not been laid out yet.
+    const auto capture = [&](GtkWidget* widget, const char* name) -> std::string {
+        const gint64 deadline = g_get_monotonic_time() + 5'000'000;
+        while ((gtk_widget_get_width(widget) <= 0 || gtk_widget_get_height(widget) <= 0) && g_get_monotonic_time() < deadline) {
+            g_main_context_iteration(nullptr, FALSE);
+            g_usleep(1000);
+        }
         const int width = gtk_widget_get_width(widget);
         const int height = gtk_widget_get_height(widget);
         if (width <= 0 || height <= 0)
-            return false;
+            return "it was given no size within 5 s";
         GdkPaintable* paintable = gtk_widget_paintable_new(widget);
         GtkSnapshot* snapshot = gtk_snapshot_new();
         gdk_paintable_snapshot(paintable, GDK_SNAPSHOT(snapshot), width, height);
         g_object_unref(paintable);
         GskRenderNode* node = gtk_snapshot_free_to_node(snapshot);
         if (!node)
-            return false;
+            return "its snapshot made no render node";
         const graphene_rect_t bounds = GRAPHENE_RECT_INIT(0, 0, static_cast<float>(width), static_cast<float>(height));
         GdkTexture* texture = gsk_renderer_render_texture(gtk_native_get_renderer(GTK_NATIVE(widget)), node, &bounds);
         gsk_render_node_unref(node);
         if (!texture)
-            return false;
+            return "its renderer drew no texture";
         bool didSave = true;
         if (outputDirectory) {
             const std::string path = std::string(outputDirectory) + "/" + name + ".png";
             didSave = gdk_texture_save_to_png(texture, path.c_str());
         }
         g_object_unref(texture);
-        return didSave;
+        return didSave ? std::string() : "its frame could not be saved";
+    };
+    const auto checkFrame = [&](GtkWidget* widget, const char* name, const char* message) {
+        const std::string missing = capture(widget, name);
+        check(missing.empty(), (std::string(message) + (missing.empty() ? "" : ": " + missing)).c_str());
     };
     GtkApplication* application = gtk_application_new("org.ubiquitty.chrome-test", G_APPLICATION_NON_UNIQUE);
     if (!g_application_register(G_APPLICATION(application), nullptr, nullptr)) {
@@ -14872,7 +14885,7 @@ int smokeWindowChrome(const char* outputDirectory)
         check(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(firstButton)), "the selected tab follows the model");
     } else
         check(false, "the strip contains a tab button");
-    check(capture(app().window, "tabs"), "the window produces a rendered frame");
+    checkFrame(app().window, "tabs", "the window produces a rendered frame");
     g_action_group_activate_action(G_ACTION_GROUP(application), "about", nullptr);
     settle();
     GListModel* windows = gtk_window_get_toplevels();
@@ -14894,7 +14907,7 @@ int smokeWindowChrome(const char* outputDirectory)
             "About shows the running build identity");
         check(gtk_about_dialog_get_license_type(GTK_ABOUT_DIALOG(about)) == GTK_LICENSE_APACHE_2_0,
             "About identifies the application license");
-        check(capture(about, "about"), "About produces a rendered frame");
+        checkFrame(about, "about", "About produces a rendered frame");
         gtk_window_close(GTK_WINDOW(about));
         g_object_unref(about);
     }
