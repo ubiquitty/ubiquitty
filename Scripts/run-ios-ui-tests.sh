@@ -245,27 +245,51 @@ xcrun simctl install "$DEVICE" "$APP" >/dev/null 2>&1 \
 # that passes only on a machine that has run it before.
 xcrun simctl uninstall "$DEVICE" "$BUNDLE_ID" >/dev/null 2>&1
 xcrun simctl install "$DEVICE" "$APP" >/dev/null 2>&1
+# A check is judged by the report file the app writes in its data container
+# (SmokeLaunch.report), as run-ios-smokes.sh judges a smoke, never by the
+# console, which has lost the last lines a launch printed before it exited.
+CONTAINER="$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE_ID" data 2>/dev/null)"
+[ -n "$CONTAINER" ] && [ -d "$CONTAINER" ] \
+    || { echo "run-ios-ui-tests: no data container for $BUNDLE_ID on $DEVICE_NAME" >&2; exit 2; }
+REPORT="$CONTAINER/tmp/smoke-report.txt"
 
 # Launches the installed app once with test-build-only arguments and prints
-# what it wrote. Passes when the launch exits 0 and printed <verdict>.
+# what it reported, then its console. Passes when the launch exits 0 and its
+# report holds <verdict> and no FAIL.
 runTestBuildCheck() { # <verdict> <launch argument...>
-    /usr/bin/python3 - "$DEVICE" "$BUNDLE_ID" "$@" <<'PY'
+    /usr/bin/python3 - "$DEVICE" "$BUNDLE_ID" "$REPORT" "$@" <<'PY'
+import os
 import subprocess
 import sys
 
-device, bundle, verdict = sys.argv[1], sys.argv[2], sys.argv[3]
+device, bundle, report, verdict = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+arguments = sys.argv[5:]
+try:
+    os.remove(report)
+except FileNotFoundError:
+    pass
 try:
     result = subprocess.run(
         ["xcrun", "simctl", "launch", "--console-pty", "--terminate-running-process",
-         device, bundle, *sys.argv[4:]],
+         device, bundle, *arguments],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
 except subprocess.TimeoutExpired as expired:
     output = expired.stdout or ""
     print(output if isinstance(output, str) else output.decode("utf-8", "replace"), end="")
-    print(f"run-ios-ui-tests: {sys.argv[4]} timed out; rebuild with --ui-tests", file=sys.stderr)
+    print(f"run-ios-ui-tests: {arguments[0]} timed out; rebuild with --ui-tests", file=sys.stderr)
     sys.exit(1)
-print(result.stdout, end="")
-sys.exit(0 if result.returncode == 0 and verdict in result.stdout and " FAIL" not in result.stdout else 1)
+try:
+    with open(report, encoding="utf-8", errors="replace") as file:
+        written = file.read()
+except FileNotFoundError:
+    written = ""
+print(written, end="")
+if result.stdout.strip():
+    print("console:")
+    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+if verdict.rsplit(" ", 1)[0] not in written:
+    print(f"run-ios-ui-tests: {arguments[0]} reported no verdict: the check ended before reaching one", file=sys.stderr)
+sys.exit(0 if result.returncode == 0 and verdict in written and " FAIL" not in written else 1)
 PY
 }
 
