@@ -133,9 +133,10 @@ extension TerminalWindowController {
     ///   - columns: The pane's grid columns, likewise.
     ///   - clientAddress: The primary's tmux client's address.
     ///   - streamAddress: The control channel stream's address.
-    ///   - sessionAddress: The attached session this pane is numbered in, as an
-    ///     address that is one value for all of a session's panes and another
-    ///     for every concurrently attached session.
+    ///   - sessionAddress: The hosting source of the attached session this
+    ///     pane is numbered in (``RuntimeDrive/hostedWindowSourceAddress``):
+    ///     one value for all of a session's panes and another for every
+    ///     concurrently attached session. The pane's surface is built over it.
     /// - Returns: Whether the pane is bound after the call.
     @objc
     @discardableResult
@@ -173,14 +174,7 @@ extension TerminalWindowController {
             }
             unbindTmuxPane(paneID)
         }
-        guard
-            let surface = TerminalSurface.makeAdopting(
-                terminal: terminal,
-                lockAddress: lockAddress,
-                rows: rows,
-                columns: columns
-            )
-        else {
+        guard let surface = TerminalSurface.makeHostingPane(paneID, ofSource: sessionAddress, rows: rows, columns: columns) else {
             return false
         }
         surface.renderer = windowRenderer
