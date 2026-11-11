@@ -79,6 +79,51 @@ except subprocess.TimeoutExpired as error:
 PY
 }
 
+# Prints each crash report the system wrote for the app since <marker> was
+# made: the exception, the termination reason and the crashed thread's frames.
+# simctl answers 0 for a launch whose process then died, so a smoke that
+# printed no verdict either ended before printing it, which leaves a report
+# here, or had the line lost on its way out, which leaves none.
+crashReportsSince() { # <marker>
+    local found=0 report
+    while IFS= read -r report; do
+        found=1
+        echo "        crash report: $report"
+        /usr/bin/python3 - "$report" <<'PY' | sed 's/^/          /'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8", errors="replace") as file:
+    file.readline()
+    body = file.read()
+try:
+    report = json.loads(body)
+except ValueError:
+    print(body[:4000])
+    sys.exit(0)
+exception = report.get("exception", {})
+print("exception:", exception.get("type", "?"), exception.get("signal", ""), exception.get("subtype", ""))
+termination = report.get("termination", {})
+if termination:
+    print("termination:", termination.get("namespace", "?"), termination.get("code", ""), termination.get("indicator", ""))
+for lines in report.get("asi", {}).values():
+    for line in lines:
+        print("message:", line)
+images = report.get("usedImages", [])
+for thread in report.get("threads", []):
+    if not thread.get("triggered"):
+        continue
+    print("crashed thread:", thread.get("name") or thread.get("queue") or thread.get("id", "?"))
+    for frame in thread.get("frames", [])[:24]:
+        index = frame.get("imageIndex")
+        image = images[index].get("name", "?") if isinstance(index, int) and index < len(images) else "?"
+        print(f"  {image}  {frame.get('symbol', hex(frame.get('imageOffset', 0)))}+{frame.get('symbolLocation', 0)}")
+PY
+    done < <(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f -newer "$1" \
+        \( -name "$(basename "$EXECUTABLE")-*.ips" -o -name "$(basename "$EXECUTABLE")_*.ips" \) 2>/dev/null)
+    [ "$found" -eq 1 ] || echo "        crash report: none written since the launch"
+}
+
 [ -d "$APP" ] || { echo "run-ios-smokes: app bundle not found: $APP (build it with ./Scripts/build-ios.sh --sdk iphonesimulator)" >&2; exit 2; }
 [ -f "$SRC" ] || { echo "run-ios-smokes: source not found: $SRC" >&2; exit 2; }
 command -v xcrun >/dev/null 2>&1 || { echo "run-ios-smokes: xcrun not on PATH" >&2; exit 2; }
@@ -128,9 +173,11 @@ printf '  warm-up launch: ok (%ds)\n' $((SECONDS - warmupStart))
 pass=0
 fail=0
 failed_flags=()
+launchMarker="$(mktemp -t run-ios-smokes)"
 for flag in "${FLAGS[@]}"; do
     # simctl launch answers for the LAUNCH, not for the process, so the verdict
     # is the smoke's own printed line. Each smoke prints one and exits.
+    touch "$launchMarker"
     out="$(runWithTimeout "$TIMEOUT" xcrun simctl launch --console-pty --terminate-running-process \
         "$DEVICE" "$BUNDLE_ID" "$flag")"
     rc=$?
@@ -140,10 +187,15 @@ for flag in "${FLAGS[@]}"; do
     else
         printf '  FAIL  %s (rc=%d)\n' "$flag" "$rc"
         sed 's/^/        /' <<<"$out"
+        if ! grep -qE -- '-- (PASS|FAIL)' <<<"$out"; then
+            echo "        no verdict line: the smoke ended before printing one, or its output was lost"
+            crashReportsSince "$launchMarker"
+        fi
         fail=$((fail + 1))
         failed_flags+=("$flag")
     fi
 done
+rm -f "$launchMarker"
 
 echo "run-ios-smokes: $pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then
