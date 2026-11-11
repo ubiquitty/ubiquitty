@@ -402,9 +402,32 @@ enum SmokeLaunch {
         CommandLine.arguments.contains("--seed-sign-in-prompt")
     }
 
-    /// Writes one line to stderr, which is where the simulator console reads.
+    /// The file every smoke line is appended to, in the app's temporary
+    /// directory inside its data container, where `Scripts/run-ios-smokes.sh`
+    /// reads the verdict once the launch returns.
+    static let reportFileName = "smoke-report.txt"
+
+    /// Writes one line to stderr, which is where the simulator console reads,
+    /// and appends it to the report file.
+    ///
+    /// The console can lose the last lines a process writes before it exits.
+    /// A line is in the report file once its write returns, so the runner
+    /// judges a smoke by the file and shows the console only as diagnostics.
+    ///
+    /// - Parameter line: The line, without its newline.
     static func report(_ line: String) {
-        FileHandle.standardError.write(Data((line + "\n").utf8))
+        let data = Data((line + "\n").utf8)
+        FileHandle.standardError.write(data)
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(reportFileName)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        guard let file = try? FileHandle(forWritingTo: url) else {
+            return
+        }
+        _ = try? file.seekToEnd()
+        try? file.write(contentsOf: data)
+        try? file.close()
     }
 
     /// Puts a surface in a window of the app's scene, which is what makes the
