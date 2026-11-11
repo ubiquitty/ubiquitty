@@ -12,10 +12,11 @@ import UbiquittyRenderKit
 // tmux window's panes released when the reader closes it or rebound to a new
 // model when the pane's model changes.
 //
-// The tmux cases bind panes to local sessions' models rather than to a tmux
-// server's. The binding takes a terminal and a lock and nothing else, so a
-// local window's pair stands in for a session pane's, and the cases run
-// without a server and name exactly the model each pane should be reading.
+// The tmux cases bind panes a hosting session's source owns, with no tmux
+// server: a program that speaks the control protocol is launched as a local
+// `tmux -CC` is, lists the panes a case names and writes each a marker, so the
+// cases name exactly the model each pane should be reading. Its session has no
+// window of its own, so nothing binds its panes but the case.
 
 enum SessionPlumbingScenarios {
     static func register() {
@@ -67,32 +68,69 @@ enum SessionPlumbingScenarios {
         return (controller, surface)
     }
 
-    /// The model and lock a pane bound to `surface` adopts.
-    @MainActor
-    private static func adoption(of surface: TerminalSurface) -> (terminal: UnsafeMutableRawPointer, lockAddress: UInt)? {
-        guard let terminal = surface.drive.borrowTerminal() else { return nil }
-        return (unsafeBitCast(terminal, to: UnsafeMutableRawPointer.self), surface.drive.modelLockAddress())
+    /// A program that speaks tmux's control protocol to the client that
+    /// launched it: it attaches, lists one window holding `panes`, and writes
+    /// each pane its marker. With `relisting`, it then waits for the drop
+    /// trigger file, drops the panes from the window, waits for the relist
+    /// trigger, and lists the first pane again, a new model, writing it the
+    /// relisting marker. Echo is off so the client's commands do not come
+    /// back as text.
+    private static func controlModeProgram(
+        panes: [(id: Int32, marker: String)],
+        relisting: (marker: String, dropTrigger: String, relistTrigger: String)? = nil
+    ) -> String {
+        let layout = panes.count == 1
+            ? "ef01,80x24,0,0,\(panes[0].id)"
+            : "abcd,80x24,0,0{40x24,0,0,\(panes[0].id),39x24,41,0,\(panes[1].id)}"
+        var script = "stty -echo; printf '%%begin 1 1 0\\n%%end 1 1 0\\n"
+        script += "%%begin 2 2 1\\n@1 %%\(panes[0].id) 80 24 1 \(layout) work editor\\n%%end 2 2 1\\n"
+        for pane in panes {
+            script += "%%output %%\(pane.id) \(pane.marker)\\\\015\\\\012\\n"
+        }
+        script += "'; "
+        if let relisting {
+            let first = panes[0].id
+            script += "while [ ! -e '\(relisting.dropTrigger)' ]; do sleep 0.05; done; "
+            script += "printf '%%layout-change @1 ef02,80x24,0,0,90199 ef02,80x24,0,0,90199 *\\n'; "
+            script += "while [ ! -e '\(relisting.relistTrigger)' ]; do sleep 0.05; done; "
+            script += "printf '%%layout-change @1 ef01,80x24,0,0,\(first) ef01,80x24,0,0,\(first) *\\n"
+            script += "%%output %%\(first) \(relisting.marker)\\\\015\\\\012\\n'; "
+        }
+        return script + "exec sleep 60"
     }
 
-    /// Binds `paneID`, as a pane of `session`, in `host` to `surface`'s model.
+    /// A session hosting the window `program` lists, its panes live.
+    @MainActor
+    private static func hostingSession(_ t: UBUITestContext, running program: String, panes: [Int32]) -> RuntimeDrive? {
+        guard let drive = RuntimeDrive(rows: 24, columns: 80),
+            drive.launchTmuxControlClient(arguments: ["/bin/sh", "-c", program]),
+            drive.startIngest()
+        else {
+            t.expect(false, desc: "a control-mode program launches and its session hosts its window")
+            return nil
+        }
+        guard t.wait(until: { panes.allSatisfy { drive.hostedPaneFacts($0) != nil } }, timeout: 10) else {
+            t.expect(false, desc: "the program's panes are live")
+            return nil
+        }
+        return drive
+    }
+
+    /// Binds `paneID`, a pane `source` hosts, in `host`, as the hosted-window
+    /// flow binds one.
     @MainActor
     @discardableResult
-    private static func bind(
-        _ paneID: Int32,
-        of session: UInt,
-        in host: TerminalWindowController,
-        to surface: TerminalSurface
-    ) -> Bool {
-        guard let adopted = adoption(of: surface) else { return false }
+    private static func bind(_ paneID: Int32, of source: RuntimeDrive, in host: TerminalWindowController) -> Bool {
+        guard let facts = source.hostedPaneFacts(paneID) else { return false }
         return host.bindTmuxPane(
             paneID,
-            terminal: adopted.terminal,
-            lockAddress: adopted.lockAddress,
-            rows: 24,
-            columns: 80,
+            terminal: facts.terminal,
+            lockAddress: facts.lockAddress,
+            rows: facts.rows,
+            columns: facts.columns,
             clientAddress: 0,
             streamAddress: 0,
-            sessionAddress: session
+            sessionAddress: source.hostedWindowSourceAddress
         )
     }
 
@@ -270,12 +308,21 @@ enum SessionPlumbingScenarios {
     // bound pane, as a session gives each pane its own.
     @MainActor
     private static func closedWindowReleasesItsPanes(_ t: UBUITestContext) {
-        guard let (paneOwner, paneModel) = owner(t, printing: "release-owner") else { return }
-        defer { paneOwner.shellCloseWindow() }
-        guard let (sharedOwner, sharedModel) = owner(t, printing: "release-shared") else { return }
-        defer { sharedOwner.shellCloseWindow() }
-        guard let (otherOwner, otherModel) = owner(t, printing: "release-other") else { return }
-        defer { otherOwner.shellCloseWindow() }
+        let pane: Int32 = 90_101
+        let shared: Int32 = 90_102
+        guard
+            let closingSource = hostingSession(
+                t,
+                running: controlModeProgram(panes: [(pane, "release-owner"), (shared, "release-shared")]),
+                panes: [pane, shared]
+            ),
+            let otherSource = hostingSession(t, running: controlModeProgram(panes: [(shared, "release-other")]), panes: [shared])
+        else { return }
+        // Last, once both windows have let go of the panes the sources own.
+        defer {
+            closingSource.endHostedWindows()
+            otherSource.endHostedWindows()
+        }
         guard let closing = TerminalWindowController.spawnTmuxHostingWindow(),
             let other = TerminalWindowController.spawnTmuxHostingWindow()
         else {
@@ -283,18 +330,19 @@ enum SessionPlumbingScenarios {
             return
         }
         defer { other.shellCloseWindow() }
-        let closingSession: UInt = 0x9101
-        let otherSession: UInt = 0x9102
-        let pane: Int32 = 90_101
-        let shared: Int32 = 90_102
-        t.expect(bind(pane, of: closingSession, in: closing, to: paneModel), desc: "the pane binds to its model")
-        t.expect(bind(shared, of: closingSession, in: closing, to: sharedModel), desc: "the shared pane id binds in the closing window")
-        t.expect(bind(shared, of: otherSession, in: other, to: otherModel), desc: "and in the other session's window")
+        let closingSession = closingSource.hostedWindowSourceAddress
+        let otherSession = otherSource.hostedWindowSourceAddress
+        t.expect(bind(pane, of: closingSource, in: closing), desc: "the pane binds to its model")
+        t.expect(bind(shared, of: closingSource, in: closing), desc: "the shared pane id binds in the closing window")
+        t.expect(bind(shared, of: otherSource, in: other), desc: "and in the other session's window")
         guard let adopted = closing.tmuxSurfaceForTesting(pane) else {
             t.expect(false, desc: "the bound pane has a surface")
             return
         }
-        t.expect(adopted.searchScrollbackAndWait("release-owner").totalMatches > 0, desc: "the bound surface reads its model")
+        t.expect(
+            t.wait(until: { adopted.searchScrollbackAndWait("release-owner").totalMatches > 0 }, timeout: 5),
+            desc: "the bound surface reads its model"
+        )
         t.expect(
             TerminalWindowController.repaintTmuxPane(pane, sessionAddress: closingSession),
             desc: "the registry routes the pane to its window"
@@ -312,7 +360,7 @@ enum SessionPlumbingScenarios {
             !TerminalWindowController.repaintTmuxPane(shared, sessionAddress: otherSession),
             desc: "and the pane that left is gone from its own session"
         )
-        t.expect(bind(shared, of: otherSession, in: other, to: otherModel), desc: "the other session binds its pane again")
+        t.expect(bind(shared, of: otherSource, in: other), desc: "the other session binds its pane again")
 
         closing.window?.close()
         t.pump(0.1)
@@ -325,45 +373,73 @@ enum SessionPlumbingScenarios {
             adopted.searchScrollbackAndWait("release-owner").totalMatches == 0,
             desc: "the released surface no longer reads the session's model"
         )
-        t.expect(!bind(pane, of: closingSession, in: closing, to: paneModel), desc: "a closed window binds nothing")
+        t.expect(!bind(pane, of: closingSource, in: closing), desc: "a closed window binds nothing")
         t.expect(
             TerminalWindowController.repaintTmuxPane(shared, sessionAddress: otherSession) && other.tmuxSurfaceForTesting(shared) != nil,
             desc: "the other window's pane under the same id keeps its registration"
         )
+        other.unbindTmuxPane(shared)
     }
 
-    // A pane bound again to the model it holds keeps its surface; bound to
-    // another model it gets a new one, which reads only the new model, and the
-    // surface that left stops reading the old.
+    // A pane bound again to the model it holds keeps its surface. A pane tmux
+    // drops and lists again is a new model: the window unbinds and releases
+    // the pane the layout left, and the new model binds to a new surface,
+    // which reads only the new model, while the surface that left stops
+    // reading the old.
     @MainActor
     private static func reboundPaneGetsANewSurface(_ t: UBUITestContext) {
-        guard let (firstOwner, firstSurface) = owner(t, printing: "retarget-first") else { return }
-        defer { firstOwner.shellCloseWindow() }
-        guard let (secondOwner, secondSurface) = owner(t, printing: "retarget-second") else { return }
-        defer { secondOwner.shellCloseWindow() }
+        let pane: Int32 = 90_103
+        let triggers = NSTemporaryDirectory() + "ubq-relist-\(UUID().uuidString)"
+        let dropTrigger = triggers + "-drop"
+        let relistTrigger = triggers + "-relist"
+        let program = controlModeProgram(
+            panes: [(pane, "retarget-first")],
+            relisting: ("retarget-second", dropTrigger, relistTrigger)
+        )
+        guard let source = hostingSession(t, running: program, panes: [pane]) else { return }
+        defer {
+            source.endHostedWindows()
+            try? FileManager.default.removeItem(atPath: dropTrigger)
+            try? FileManager.default.removeItem(atPath: relistTrigger)
+        }
         guard let host = TerminalWindowController.spawnTmuxHostingWindow() else {
             t.expect(false, desc: "a tmux-hosting window opens")
             return
         }
         defer { host.shellCloseWindow() }
-        let session: UInt = 0x9103
-        let pane: Int32 = 90_103
-        t.expect(bind(pane, of: session, in: host, to: firstSurface), desc: "the pane binds to the first model")
+        let session = source.hostedWindowSourceAddress
+        t.expect(bind(pane, of: source, in: host), desc: "the pane binds to the first model")
         guard let before = host.tmuxSurfaceForTesting(pane) else {
             t.expect(false, desc: "the bound pane has a surface")
             return
         }
-        t.expect(bind(pane, of: session, in: host, to: firstSurface), desc: "binding the same model again succeeds")
+        t.expect(bind(pane, of: source, in: host), desc: "binding the same model again succeeds")
         t.expect(host.tmuxSurfaceForTesting(pane) === before, desc: "and keeps the surface a layout pass re-lists")
+        t.expect(
+            t.wait(until: { before.searchScrollbackAndWait("retarget-first").totalMatches > 0 }, timeout: 5),
+            desc: "the first surface reads the first model"
+        )
 
-        t.expect(bind(pane, of: session, in: host, to: secondSurface), desc: "the pane binds to the second model")
+        // tmux drops the pane from its window; the window unbinds the pane
+        // the layout left and releases it; tmux lists the pane again.
+        FileManager.default.createFile(atPath: dropTrigger, contents: nil)
+        t.expect(
+            t.wait(until: { source.hostedPaneFacts(90_199) != nil }, timeout: 10),
+            desc: "tmux drops the pane from its window"
+        )
+        host.unbindTmuxPane(pane)
+        source.releaseHostedPane(pane)
+        FileManager.default.createFile(atPath: relistTrigger, contents: nil)
+        t.expect(t.wait(until: { source.hostedPaneFacts(pane) != nil }, timeout: 10), desc: "tmux lists the pane again")
+
+        t.expect(bind(pane, of: source, in: host), desc: "the pane binds to the second model")
         guard let after = host.tmuxSurfaceForTesting(pane) else {
             t.expect(false, desc: "the rebound pane has a surface")
             return
         }
-        t.expect(after !== before, desc: "a retarget builds a new surface")
+        t.expect(after !== before, desc: "a new model builds a new surface")
         t.expect(
-            after.searchScrollbackAndWait("retarget-second").totalMatches > 0
+            t.wait(until: { after.searchScrollbackAndWait("retarget-second").totalMatches > 0 }, timeout: 5)
                 && after.searchScrollbackAndWait("retarget-first").totalMatches == 0,
             desc: "the new surface reads the new model and none of the old"
         )
@@ -373,7 +449,7 @@ enum SessionPlumbingScenarios {
         )
         t.expect(
             TerminalWindowController.repaintTmuxPane(pane, sessionAddress: session),
-            desc: "the registry routes the pane to its window after the retarget"
+            desc: "the registry routes the pane to its window after the rebind"
         )
         host.unbindTmuxPane(pane)
     }

@@ -84,8 +84,7 @@ extension TerminalWindowController {
             guard let facts = surface.drive.hostedPaneFacts(pane) else {
                 continue
             }
-            let previous = tmuxSurfaces[pane]
-            let isBound = bindTmuxPane(
+            bindTmuxPane(
                 pane,
                 terminal: facts.terminal,
                 lockAddress: facts.lockAddress,
@@ -95,11 +94,6 @@ extension TerminalWindowController {
                 streamAddress: facts.inputStreamAddress,
                 sessionAddress: sourceAddress
             )
-            // A pane bound here for the first time, or rebound to a new model,
-            // resizes through its source from now on.
-            if isBound, let bound = tmuxSurfaces[pane], bound !== previous {
-                bound.drive.routeResizeThroughHostedSource(sourceAddress, paneID: pane)
-            }
         }
         for pane in boundTmuxPaneIDs() where !live.contains(pane) {
             unbindTmuxPane(pane)
