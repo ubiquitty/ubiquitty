@@ -195,6 +195,11 @@ enum ResizeParityScenarios {
                     var sampledRows: Set<Int> = [openingRows]
                     var lostZoomIntent = false
                     var movedOrigin = false
+                    var drawnAnimationFrames = 0
+                    surface.frameEncodedObserverForTesting = { _ in
+                        if window.inLiveResize { drawnAnimationFrames += 1 }
+                    }
+                    defer { surface.frameEncodedObserverForTesting = nil }
                     @MainActor
                     func sample() {
                         sampledRows.insert(Int(surface.drive.readSnapshot().rows))
@@ -227,6 +232,11 @@ enum ResizeParityScenarios {
                     )
                     t.expect(!lostZoomIntent, desc: "every live zoom step retains its programmatic resize intent")
                     t.expect(!movedOrigin, desc: "zoom leaves the rendered grid at its top-left inset")
+                    t.expect(
+                        drawnAnimationFrames >= 4,
+                        desc:
+                            "zoom presents intermediate frames instead of holding its opening picture until settle (\(drawnAnimationFrames) frames)"
+                    )
                     if let box = surface.gridFitBoxForTesting {
                         let grid = surface.drive.readSnapshot()
                         let slackWidth = surface.bounds.width - box.insets.left - box.insets.right - CGFloat(grid.columns) * box.cell.width
@@ -236,10 +246,11 @@ enum ResizeParityScenarios {
                             desc: "the filled screen leaves only a partial cell on the right and bottom"
                         )
                     }
+                    drawnAnimationFrames = 0
                     window.performZoom(nil)
                     let restored = t.wait(
                         until: {
-                            if window.inLiveResize && !window.isZoomResizeInProgress { lostZoomIntent = true }
+                            sample()
                             return !window.isZoomResizeInProgress && !window.inLiveResize
                                 && abs(window.frame.width - openingFrame.width) < 2 && abs(window.frame.height - openingFrame.height) < 2
                         },
@@ -247,6 +258,14 @@ enum ResizeParityScenarios {
                     )
                     t.expect(restored, desc: "unzoom completes and clears its intent")
                     t.expect(!lostZoomIntent, desc: "unzoom retains its resize intent")
+                    t.expect(
+                        firstDifferentRow == nil && !movedOrigin,
+                        desc: "unzoom preserves the visible top-left through its steps and settle"
+                    )
+                    t.expect(
+                        drawnAnimationFrames >= 4,
+                        desc: "unzoom presents intermediate terminal frames (\(drawnAnimationFrames) frames)"
+                    )
                 }
             }
         }
