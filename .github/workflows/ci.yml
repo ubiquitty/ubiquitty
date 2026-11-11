@@ -167,8 +167,11 @@ jobs:
           - group: clang
             stages: --only setup --only quic --only fuzz --only sanitizers
             families: ""
+          # Linux-native snapshots are not hosted (Stage.hosted): their goldens
+          # take fallback glyphs from the system fonts of the Linux host that
+          # drew them, which this runner's image does not carry.
           - group: frontend
-            stages: --only setup --only frontend-tools --only quic --only linux-build --only linux-smokes --only linux-snapshots --only linux-determinism
+            stages: --only setup --only frontend-tools --only quic --only linux-build --only linux-smokes --only linux-determinism
             families: ""
           - group: wasm
             stages: --only setup --only wasm-tools --only wasm-smoke --only web-build --only web-snapshots
