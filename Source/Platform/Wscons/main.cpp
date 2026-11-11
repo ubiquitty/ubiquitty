@@ -230,7 +230,22 @@ int main(int argc, char** argv)
     initParameters.columns = columns;
     runtime.init(initParameters);
 
-    if (!runtime.launch(Ubiquitty::Runtime::LaunchCommand::loginShell(), Ubiquitty::Preferences::terminalIdentity(Ubiquitty::Preferences::values()))) {
+    // A launch is two steps since Core opens the PTY outside the model lock: ready
+    // the model, then open the stream. This frontend runs no ingest thread yet, so
+    // there is no reader to exclude between them.
+    const Ubiquitty::Runtime::LaunchCommand loginShell = Ubiquitty::Runtime::LaunchCommand::loginShell();
+    bool isShellRunning = false;
+    switch (runtime.prepareLaunch(loginShell)) {
+    case Ubiquitty::Runtime::TerminalRuntime::LaunchReadiness::Refused:
+        break;
+    case Ubiquitty::Runtime::TerminalRuntime::LaunchReadiness::StreamOwned:
+        isShellRunning = true;
+        break;
+    case Ubiquitty::Runtime::TerminalRuntime::LaunchReadiness::Ready:
+        isShellRunning = runtime.openLaunchStream(loginShell, Ubiquitty::Preferences::terminalIdentity(Ubiquitty::Preferences::values()));
+        break;
+    }
+    if (!isShellRunning) {
         std::fprintf(stderr, "ubiquitty-wscons: failed to spawn the login shell\n");
         return 1;
     }
