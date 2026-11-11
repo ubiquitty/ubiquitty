@@ -161,8 +161,11 @@ jobs:
           - group: gcc
             stages: --only setup --only quic --only host-tests --only portable-build --only portable-snapshots --only host-glibc --only agent-smokes --only host-musl
             families: ""
+          # The Linux pgo stage is not hosted (Stage.hosted): its profile is
+          # stamped with the image it was trained in, which this runner never
+          # has.
           - group: clang
-            stages: --only setup --only quic --only fuzz --only pgo --only sanitizers
+            stages: --only setup --only quic --only fuzz --only sanitizers
             families: ""
           - group: frontend
             stages: --only setup --only frontend-tools --only quic --only linux-build --only linux-smokes --only linux-snapshots --only linux-determinism
