@@ -26,6 +26,13 @@
 # line, bounded by SMOKE_WARMUP_TIMEOUT rather than the smoke budget, and a
 # warm-up that never comes back fails the run.
 #
+# A smoke is judged by the report file it writes in the app's data container
+# (SmokeLaunch.report), never by the console: the console has lost the last
+# lines a smoke printed before exiting. A smoke passes on the line naming it
+# with "-- PASS" and no FAIL line. A file with no verdict line means the smoke
+# ended before reaching one, and the crash report the system wrote, if any,
+# is shown with it.
+#
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -81,9 +88,8 @@ PY
 
 # Prints each crash report the system wrote for the app since <marker> was
 # made: the exception, the termination reason and the crashed thread's frames.
-# simctl answers 0 for a launch whose process then died, so a smoke that
-# printed no verdict either ended before printing it, which leaves a report
-# here, or had the line lost on its way out, which leaves none.
+# simctl answers 0 for a launch whose process then died, so this is what says
+# why a smoke reached no verdict.
 crashReportsSince() { # <marker>
     local found=0 report
     while IFS= read -r report; do
@@ -173,29 +179,39 @@ printf '  warm-up launch: ok (%ds)\n' $((SECONDS - warmupStart))
 pass=0
 fail=0
 failed_flags=()
+CONTAINER="$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE_ID" data 2>/dev/null)"
+[ -d "$CONTAINER/tmp" ] || { echo "run-ios-smokes: no data container for $BUNDLE_ID on $DEVICE_NAME" >&2; exit 2; }
+REPORT="$CONTAINER/tmp/smoke-report.txt"
 launchMarker="$(mktemp -t run-ios-smokes)"
 for flag in "${FLAGS[@]}"; do
     # simctl launch answers for the LAUNCH, not for the process, so the verdict
-    # is the smoke's own printed line. Each smoke prints one and exits.
+    # is the smoke's own line in its report file. Each smoke writes one and
+    # exits; --console-pty is what makes the launch wait for that exit.
+    name="${flag#--smoke-}"
+    rm -f "$REPORT"
     touch "$launchMarker"
     out="$(runWithTimeout "$TIMEOUT" xcrun simctl launch --console-pty --terminate-running-process \
         "$DEVICE" "$BUNDLE_ID" "$flag")"
     rc=$?
-    if [ "$rc" -eq 0 ] && grep -qE -- '-- PASS' <<<"$out" && ! grep -qE '\bFAIL' <<<"$out"; then
+    report="$(cat "$REPORT" 2>/dev/null)"
+    if [ "$rc" -eq 0 ] && grep -qxF -- "$name: -- PASS" <<<"$report" && ! grep -qE '\bFAIL' <<<"$report"; then
         printf '  ok    %s\n' "$flag"
         pass=$((pass + 1))
     else
         printf '  FAIL  %s (rc=%d)\n' "$flag" "$rc"
-        sed 's/^/        /' <<<"$out"
-        if ! grep -qE -- '-- (PASS|FAIL)' <<<"$out"; then
-            echo "        no verdict line: the smoke ended before printing one, or its output was lost"
+        echo "        report:"
+        sed 's/^/          /' <<<"$report"
+        echo "        console:"
+        sed 's/^/          /' <<<"$out"
+        if ! grep -qxE -- "$name: -- (PASS|FAIL)" <<<"$report"; then
+            echo "        no verdict in the report: the smoke ended before reaching one"
             crashReportsSince "$launchMarker"
         fi
         fail=$((fail + 1))
         failed_flags+=("$flag")
     fi
 done
-rm -f "$launchMarker"
+rm -f "$launchMarker" "$REPORT"
 
 echo "run-ios-smokes: $pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then
