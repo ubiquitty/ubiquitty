@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "Harness.h"
+#include "HostedPaneFixture.h"
 
 // test_ios_session_clients — the clipboard writer and the capability policy
 // the iOS shell gives each pane's terminal (Source/Platform/iOS/SessionClients.cpp).
@@ -75,14 +76,13 @@ TEST(aPaneSessionTakesTheShellsClipboardAndPolicyWhenItAsks)
 TEST(anAdoptedTerminalLosesTheShellsClientsWhenTheAdoptionEnds)
 {
     const RegisteredSessionClients registered;
-    TerminalSession* owner = TerminalSession::make();
-    TerminalSession* adapter = TerminalSession::make();
-    REQUIRE(owner && adapter);
-    owner->start(24, 80);
-    adapter->start(24, 80);
-    Terminal* external = owner->terminal();
+    UbiquittyTest::HostedPaneFixture pane;
+    Terminal* external = pane.paneTerminal();
     REQUIRE(external);
-    adapter->adoptExternalTerminal(external, owner->modelLockAddressForAdoption());
+    TerminalSession* adapter = TerminalSession::make();
+    REQUIRE(adapter);
+    adapter->start(24, 80);
+    REQUIRE(adapter->adoptHostedPane(pane.sourceAddress(), UbiquittyTest::HostedPaneFixture::paneID));
     WorkspaceSession::installDefaultClients(*adapter);
     CHECK(external->clipboardClient);
     CHECK(external->capabilityPolicy.installed());
@@ -90,7 +90,6 @@ TEST(anAdoptedTerminalLosesTheShellsClientsWhenTheAdoptionEnds)
     CHECK(!external->clipboardClient);
     CHECK(!external->capabilityPolicy.installed());
     releaseTerminalSession(adapter);
-    releaseTerminalSession(owner);
 }
 
 UBIQUITTY_TEST_MAIN()
