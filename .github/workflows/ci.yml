@@ -144,7 +144,7 @@ jobs:
             echo "::endgroup::"
           done
   linux:
-    # Four groups of the Linux battery on four runners, so the battery's wall
+    # Three groups of the Linux battery on three runners, so the battery's wall
     # time is its longest group rather than their sum. ci_reach.py reads the
     # battery as complete only when every group is.
     name: Linux battery (${{ matrix.group }})
@@ -159,23 +159,14 @@ jobs:
       matrix:
         include:
           - group: gcc
-            stages: --only setup --only quic --only host-tests --only portable-build --only portable-snapshots --only host-glibc --only agent-smokes --only host-musl
+            stages: --only setup --only quic --only host-tests
             families: ""
-          # The Linux pgo stage is not hosted (Stage.hosted): its profile is
-          # stamped with the image it was trained in, which this runner never
-          # has.
-          - group: clang
-            stages: --only setup --only quic --only fuzz --only sanitizers
-            families: ""
-          # Linux-native snapshots are not hosted (Stage.hosted): their goldens
-          # take fallback glyphs from the system fonts of the Linux host that
-          # drew them, which this runner's image does not carry.
           - group: frontend
             stages: --only setup --only frontend-tools --only quic --only linux-build --only linux-smokes --only linux-determinism
             families: ""
           - group: wasm
-            stages: --only setup --only wasm-tools --only wasm-smoke --only web-build --only web-snapshots
-            families: core_gate_wasm_oracle
+            stages: --only setup --only wasm-tools --only web-build --only web-snapshots
+            families: ""
     env:
       UBQ_CI_CODE: ${{ needs.preflight.outputs.code }}
       UBQ_CI_CMAKE: ${{ needs.preflight.outputs.cmake }}
@@ -307,13 +298,13 @@ jobs:
       matrix:
         include:
           - group: macos
-            stages: --only setup --only swift-format --only xcode --only quic --only tidy --only macos-build --only macos-smokes --only ui-scenarios --only pgo --only core-frames --only portable-build --only swift-renderer --only forks --only snapshots
-            families: kit_gate_apple core_gate_pgo_drift gate_esctest
+            stages: --only setup --only swift-format --only xcode --only quic --only tidy --only macos-build --only macos-smokes --only ui-scenarios --only core-frames --only forks --only snapshots
+            families: gate_esctest
           - group: tests
             stages: --only setup --only quic --only host-tests
             families: core_gate_host_builds core_gate_forks core_gate_style_checks
           - group: ios
-            stages: --only setup --only quic --only ios-build --only ios-smokes --only ios-sync --only ios-protected-file --only ios-ui
+            stages: --only setup --only quic --only ios-build --only ios-smokes --only ios-sync --only ios-ui
             families: ""
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer

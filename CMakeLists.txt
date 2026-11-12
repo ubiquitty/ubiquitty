@@ -2081,8 +2081,8 @@ else()
 endif()
 
 # ----------------------------------------------------------------------
-# The host tests. Tests/CMakeLists.txt finds them on disk; nothing here or there
-# keeps a list of them.
+# The app's host tests and shell integration scenarios use its pinned Core.
+# Core and Kit register their own unit suites in their respective projects.
 # ----------------------------------------------------------------------
 if(UBIQUITTY_BUILD_TESTS AND NOT TARGET ubiquitty-core)
     message(FATAL_ERROR
@@ -2090,7 +2090,7 @@ if(UBIQUITTY_BUILD_TESTS AND NOT TARGET ubiquitty-core)
         "the Core frontend defines; configure with -DUBIQUITTY_FRONTEND=Core.")
 elseif(UBIQUITTY_BUILD_TESTS)
     enable_testing()
-    add_subdirectory("${UBIQUITTY_CORE_SOURCE_DIR}/Tests" "${CMAKE_CURRENT_BINARY_DIR}/Tests")
+    add_subdirectory(Tests)
 endif()
 
 # Last, once every target of every arm exists.

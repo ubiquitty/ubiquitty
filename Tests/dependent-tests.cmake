@@ -4,12 +4,10 @@
 #
 # Tests/dependent-tests.cmake — the app's host tests.
 #
-# ubiquitty-core's Tests/CMakeLists.txt reads this file, in its own directory
-# scope, in a configure whose top directory is the app. The settings below are
-# the ones it reads for any test: what each test of the app compiles beside its
-# own source, links and defines. UBQ_DEPENDENT_TESTS names the tests, as paths
-# under this repository's Tests/; Core registers them in the pass that registers
-# its own, so they build against the Core it has already compiled.
+# Tests/CMakeLists.txt reads the per-test sources, links and definitions below.
+# UBQ_DEPENDENT_TESTS names paths under this repository's Tests/. The shared
+# Core test machinery links them against the same Core the app builds, while
+# Core and Kit register their own unit tests in their repositories.
 #
 # The tests whose subject needs a frontend's library are not listed: the iOS
 # session tests and the SwiftBridge clipboard resolver run as stanzas of
