@@ -30,6 +30,8 @@
 set -euo pipefail
 
 repoRoot="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=Scripts/library-scripts.sh
+. "$repoRoot/Scripts/library-scripts.sh"
 resultsDir="$repoRoot/BuildEsctest"
 
 # Prints each argument on a line of its own to stderr, then exits with status 1.
@@ -71,7 +73,7 @@ if [[ -z "$bundle" ]]; then
     # conformance failure's clothes. The in-tree path stays as the fallback for
     # a checkout that builds in place.
     # shellcheck source=Scripts/build-root.sh
-    . "$repoRoot/Scripts/build-root.sh"
+    . "$CORE_ROOT/Scripts/build-root.sh"
     for candidate in "${UBQ_BUILD_ROOT:-}/macos" "$repoRoot/build/macos"; do
         [[ -n "$candidate" && -d "$candidate" ]] || continue
         bundle="$(find "$candidate" -maxdepth 4 -name 'Ubiquitty.app' -print -quit 2>/dev/null || true)"

@@ -149,7 +149,10 @@ parseFailing() {
 
 # One suite run. Leaves the failing set on stdout, one case per line.
 runOnce() {
-    if ! "${RUNNER[@]}" ${PASSTHROUGH+-- "${PASSTHROUGH[@]}"} > /dev/null 2>&1; then
+    local runnerLog="$ROOT/BuildEsctest/runner.log"
+    mkdir -p "$(dirname "$runnerLog")" || return 1
+    if ! "${RUNNER[@]}" ${PASSTHROUGH+-- "${PASSTHROUGH[@]}"} > "$runnerLog" 2>&1; then
+        tail -n 25 "$runnerLog" >&2
         return 1
     fi
     grep -q 'tests passed' "$LOG" 2>/dev/null || return 1
