@@ -658,4 +658,5 @@ if wanted test_app_tools; then
     python3 "$ROOT/Tests/Tools/test_fetch_sparkle.py" || exit 1
     python3 "$ROOT/Tests/Tools/test_test_routing.py" || exit 1
     python3 "$ROOT/Tests/Tools/test_package_notices.py" || exit 1
+    python3 "$ROOT/Tests/Tools/test_release_ci.py" || exit 1
 fi

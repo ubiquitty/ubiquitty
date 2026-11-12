@@ -119,8 +119,12 @@ Release downloads:
 
 Each host is the file that release's app bundles, byte for byte, and
 `https://ubiquitty.org/download/host/<os>-<arch>` sends the newest release's.
-Releases carry no iOS, Web, wscons, Emacs or Neovim build, and no Intel macOS build
-or host.
+Tagged releases also carry a servable Web distribution, Emacs and Neovim source
+packages, and iOS device/simulator development bundles. The iOS bundles require
+your own signing for device installation; TestFlight is a separate channel.
+The recursive source archive includes the BSD wscons frontend. There is no
+prebuilt BSD or Intel macOS executable.
+[Release artifacts and automation](Docs/release-ci.md).
 
 The Mac app supports a Mac with Apple silicon running macOS 26 or later. Using an
 earlier version of macOS or an Intel-based Mac? We're looking for contributors to

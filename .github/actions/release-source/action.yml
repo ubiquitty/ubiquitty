@@ -1,0 +1,60 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release source composition
+description: Check out a clean product tag and the pinned private signing tools.
+inputs:
+  tag:
+    description: Annotated product release tag
+    required: true
+  tools-token:
+    description: Read-only token for the private release tools repository
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Require access to the private release tools
+      shell: bash
+      env:
+        TOOLS_TOKEN: ${{ inputs.tools-token }}
+      run: |
+        if [ -z "$TOOLS_TOKEN" ]; then
+          echo "::error::Configure UBIQUITTY_RELEASE_TOKEN with read-only access to yaglo/ubiquitty-private."
+          exit 1
+        fi
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ubiquitty/ubiquitty
+        ref: ${{ inputs.tag }}
+        path: product
+        fetch-depth: 0
+        submodules: recursive
+        persist-credentials: false
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: yaglo/ubiquitty-private
+        ref: 450b12a353bc1205c71e32b67a36cdf31ab559f6
+        token: ${{ inputs.tools-token }}
+        path: .release-tools
+        persist-credentials: false
+    - name: Resolve build tools and source composition
+      shell: bash
+      working-directory: product
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" = macOS ]; then
+          command -v cmake >/dev/null || brew install cmake
+          command -v ninja >/dev/null || brew install ninja
+          command -v ccache >/dev/null || brew install ccache
+        else
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake ninja-build ccache pkg-config
+        fi
+        python3 ../.release-tools/release/Scripts/release_sources.py environment
+        {
+          echo "UBQ_BUILD_ROOT=$RUNNER_WORKSPACE/build-release"
+          echo "UBQ_RELEASE_CI=$GITHUB_WORKSPACE/Scripts/release_ci.py"
+          echo "CCACHE_DIR=$RUNNER_WORKSPACE/ccache"
+          echo "CCACHE_MAXSIZE=2G"
+          echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-release.log"
+        } >> "$GITHUB_ENV"
