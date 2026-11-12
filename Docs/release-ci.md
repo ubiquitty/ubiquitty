@@ -54,7 +54,8 @@ Secrets, not source files or job output:
 
 | Secret | Purpose |
 |---|---|
-| `UBIQUITTY_RELEASE_TOKEN` | Read-only checkout access to `yaglo/ubiquitty-private`; GitHub release writes use the job's own token |
+| `UBIQUITTY_RELEASE_TOOLS_SSH_KEY` | Read-only deploy key for the release tooling checkout |
+| `UBIQUITTY_RELEASE_TOKEN` | Alternative read-only token for the private tools checkout |
 | `SPARKLE_ED_PRIVATE_KEY` | Exported Sparkle Ed25519 signing key |
 | `MACOS_CERT_P12_BASE64`, `MACOS_CERT_PASSWORD`, `MACOS_DEVELOPER_ID` | Developer ID identity |
 | `MACOS_PROVISIONING_PROFILE_BASE64` | Developer ID provisioning profile with the app's keychain-sharing group |
@@ -66,6 +67,8 @@ The signing implementation is pinned to private tools commit
 `450b12a353bc1205c71e32b67a36cdf31ab559f6`. Update that pin when
 changing the signing or publishing procedure. Temporary certificate, Sparkle
 key and provisioning files are removed at the end of the macOS job.
+Configure one private-tools reader credential. A deploy key is restricted to
+the tools repository; GitHub release writes use the job's own token.
 Configure one complete notarization credential set. The Team API key uses the
 existing `.p8` file; the workflow stores a temporary notarytool profile and
 removes the key file after the job.

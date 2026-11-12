@@ -9,7 +9,8 @@ name: Release
 # See Docs/release-ci.md for credentials and immutable PGO image preparation.
 #
 # Secrets:
-#   UBIQUITTY_RELEASE_TOKEN  read-only checkout access to private release tools.
+#   UBIQUITTY_RELEASE_TOOLS_SSH_KEY  read-only deploy key for private tools.
+#   UBIQUITTY_RELEASE_TOKEN  alternative read-only token for private tools.
 #   SPARKLE_ED_PRIVATE_KEY   the ed25519 private key exported by
 #                            `generate_keys -x key.txt`; file contents pasted in.
 #   MACOS_CERT_P12_BASE64    Developer ID Application cert + key, base64 of a .p12.
@@ -71,6 +72,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Require matching tags, clean pins, versions and green CI
         env:
           GH_TOKEN: ${{ github.token }}
@@ -78,6 +80,7 @@ jobs:
       - name: Check publishing credential names before building
         env:
           RELEASE_TOOLS_TOKEN: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          RELEASE_TOOLS_SSH_KEY: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -115,6 +118,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Resolve the build root
         run: echo "UBQ_BUILD_ROOT=$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)" >> "$GITHUB_ENV"
       - name: Cache static-host dependencies
@@ -149,6 +153,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -341,6 +346,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -435,6 +441,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Resolve the build root
         run: echo "UBQ_BUILD_ROOT=$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)" >> "$GITHUB_ENV"
       - name: Build the static command-line client
@@ -461,6 +468,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -507,6 +515,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -539,6 +548,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Validate notices and build the recursive source and editor archives
         run: |
           python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-licenses.py --release
@@ -571,6 +581,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ubq-release-${{ matrix.arch }}
@@ -607,6 +618,7 @@ jobs:
         with:
           tag: ${{ env.PRODUCT_TAG }}
           tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
+          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
 
       # Wrangler, which writes to R2, needs Node.js 22 or later.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

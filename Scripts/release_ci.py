@@ -24,11 +24,12 @@ TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 CORE_PATH = Path("Libraries/ubiquitty-kit/Libraries/ubiquitty-core")
 KIT_PATH = Path("Libraries/ubiquitty-kit")
 SECRETS = (
-    "RELEASE_TOOLS_TOKEN", "SPARKLE_ED_PRIVATE_KEY", "MACOS_CERT_P12_BASE64",
+    "SPARKLE_ED_PRIVATE_KEY", "MACOS_CERT_P12_BASE64",
     "MACOS_CERT_PASSWORD", "MACOS_DEVELOPER_ID", "MACOS_PROVISIONING_PROFILE_BASE64",
     "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
     "PGO_LINUX_X86_64_IMAGE", "PGO_LINUX_ARM64_IMAGE",
 )
+TOOLS_CREDENTIALS = ("RELEASE_TOOLS_TOKEN", "RELEASE_TOOLS_SSH_KEY")
 NOTARY_CREDENTIALS = (
     ("NOTARY_KEY_P8", "NOTARY_KEY_ID", "NOTARY_ISSUER_ID"),
     ("NOTARY_APPLE_ID", "NOTARY_TEAM_ID", "NOTARY_APP_PASSWORD"),
@@ -37,6 +38,8 @@ NOTARY_CREDENTIALS = (
 
 def missing_credentials(environment):
     missing = [name for name in SECRETS if not environment.get(name)]
+    if not any(environment.get(name) for name in TOOLS_CREDENTIALS):
+        missing.append("read-only private-tools access: " + " or ".join(TOOLS_CREDENTIALS))
     if not any(all(environment.get(name) for name in group) for group in NOTARY_CREDENTIALS):
         missing.append("one complete notarization credential set: "
                        + " or ".join("/".join(group) for group in NOTARY_CREDENTIALS))
