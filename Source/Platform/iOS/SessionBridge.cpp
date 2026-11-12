@@ -233,6 +233,7 @@ private:
 // must go before the observer and the terminal it was built over, or a hook in
 // flight reaches freed state.
 struct UbiquittyIOSSessionOpaque {
+    Ubiquitty::RestrictiveCapabilityPolicy effectPolicy;
     Ubiquitty::Terminal terminal;
     Ubiquitty::Runtime::PostedDispatcher dispatcher = mainQueueDispatcher();
     std::unique_ptr<ForwardingObserver> observer;
@@ -359,7 +360,8 @@ UbiquittyIOSSession* ubiquittyIOSSessionCreateDirect(UbiquittyIOSCarrierDriver d
     // The resize reaches the carrier's own geometry through the same channel —
     // an SSH window-change request — which is the second half of setSize.
     auto* channelForResize = handle->channel;
-    handle->session = UbiquittyKit::Session::createDirect(handle->terminal, handle->dispatcher,
+    handle->session = UbiquittyKit::Session::createDirect(handle->terminal,
+        UbiquittyKit::Session::EffectPolicy::withPolicy(handle->effectPolicy, Ubiquitty::CapabilityOrigin::Remote), handle->dispatcher,
         *handle->observer, std::move(channel),
         [channelForResize](int columns, int rows) { channelForResize->setWindowSize(columns, rows); });
 

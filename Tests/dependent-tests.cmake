@@ -9,10 +9,6 @@
 # Core test machinery links them against the same Core the app builds, while
 # Core and Kit register their own unit tests in their repositories.
 #
-# The tests whose subject needs a frontend's library are not listed: the iOS
-# session tests and the SwiftBridge clipboard resolver run as stanzas of
-# Scripts/run-tests-stanzas-app.sh, which build what they need.
-#
 
 set(UBQ_DEPENDENT_TESTS
     Core/test_frontend_capability_environment.cpp
@@ -22,6 +18,12 @@ set(UBQ_DEPENDENT_TESTS
     Platform/test_web_font_inventory.cpp
     Platform/test_web_font_rasterizer.cpp
     Platform/test_linux_updater_security.cpp)
+
+if(APPLE)
+    list(APPEND UBQ_DEPENDENT_TESTS Platform/test_ios_control_client.cpp)
+    set(test_ios_control_client_EXTRA_SOURCES ${CMAKE_SOURCE_DIR}/Source/Platform/iOS/SessionBridge.cpp)
+    set(test_ios_control_client_EXTRA_LIBS ubiquitty-kit "-framework CoreFoundation")
+endif()
 
 # The app's tests include its own headers beside Core's and the Kit's, which the
 # include directories Core hands every test do not reach.

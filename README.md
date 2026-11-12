@@ -251,16 +251,24 @@ share the one enum, so the allow-lists cannot drift apart.
 
 **Permission policy depends on the surface.** The macOS app and host daemon
 provide consent-aware policies. Linux, Web, and Wscons also install policies;
-their simpler policies allow local-origin effects and refuse agent or remote
-origins. They do not provide the same consent UI as macOS. Origin attribution
+their simpler policies keep benign replies and grid effects while refusing
+host-escaping and exfiltrating effects for agent or remote origins. They do not
+provide the same consent UI as macOS. Origin attribution
 and policy installation are both required for this distinction to hold.
 
 With no policy installed, Core answers from PAL's default decisions: local
 output runs every effect except the authoritative file reads, which refuse, and
 agent or remote output keeps only its benign, informational and rendering
-effects, with a consent prompt counted as a refusal. Embedders must install an
-appropriate capability policy before processing untrusted output;
-missing-policy defaults remain a security limitation.
+effects, with a consent prompt counted as a refusal. C++ embedding session
+factories require an explicit `Session::EffectPolicy` choice: supply a policy
+and principal with `EffectPolicy::withPolicy(policy, origin)`, or explicitly
+select the existing Local defaults with `EffectPolicy::localDefaults()`.
+`RestrictiveCapabilityPolicy` permits grid metadata, rendering and benign
+replies while refusing host-escaping and exfiltrating effects for every origin.
+The raw model still allows construction without a policy; install one before
+feeding untrusted output. The
+[embedding guide](https://github.com/ubiquitty/core/blob/main/Docs/libubiquittycore.md#capability-policy)
+covers selection and lifetime.
 Consent grants access to a session; it does not serialize typing between clients
 or isolate commands in an operating-system sandbox.
 

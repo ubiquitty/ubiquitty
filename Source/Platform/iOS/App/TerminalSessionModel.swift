@@ -879,6 +879,9 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
         // UIPasteboard through the PAL seam, so a remote program's allowed
         // copy lands, and the frontend's capability policy.
         created.drive.installDefaultClients()
+        // Every shell pane is remote, including a direct SSH stream fed
+        // before any Sync attachment. Attribute it before bytes can arrive.
+        created.drive.withWritableTerminal { $0.currentCapabilityOrigin = .Remote }
         // The host's chosen theme, else the configured launch theme: the
         // ground the screen already shows, so adopting this pane changes it
         // to nothing. A pane that then attaches beside another takes that

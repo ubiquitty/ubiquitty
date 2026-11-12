@@ -3,12 +3,11 @@
 
 import Foundation
 import UIKit
+import UbiquittyCore
 import UbiquittyIOSBridge
 import UbiquittyKit
 
 #if UBIQUITTY_IOS_UI_TESTS
-import UbiquittyCore
-
 private typealias SyncWire = Ubiquitty.`Protocol`.Sync
 #endif
 
@@ -74,6 +73,7 @@ enum SmokeLaunch {
         let legs: [(String, @MainActor () -> Bool)] = [
             ("--smoke-draw-entry", { DrawEntrySmokeEntry.run() }),
             ("--smoke-clipboard", { clipboardReachesThePasteboard() }),
+            ("--smoke-ssh-capability-origin", { sshPaneUsesRemoteCapabilityPolicy() }),
             ("--smoke-touch", { TouchSmokeEntry.run() }),
             ("--smoke-accessibility-value", { AccessibilityValueSmokeEntry.run() }),
             ("--smoke-network-path", { NetworkPathSmokeEntry.run() }),
@@ -450,6 +450,58 @@ enum SmokeLaunch {
         window.addSubview(surface)
         window.makeKeyAndVisible()
         return window
+    }
+
+    /// Verifies a shell-created SSH pane is Remote before its first feed.
+    @MainActor
+    private static func sshPaneUsesRemoteCapabilityPolicy() -> Bool {
+        let model = TerminalSessionModel()
+        defer { model.disconnect() }
+        guard let surface = model.surfaceForDrawing() else {
+            report("ssh-capability-origin: Core declined a surface")
+            return false
+        }
+
+        func hasRemotePolicy(_ surface: TerminalSurface) -> Bool {
+            surface.drive.withWritableTerminal { terminal in
+                terminal.currentCapabilityOrigin == .Remote
+                    && terminal.capabilityPolicy.installed()
+                    && !Ubiquitty.effectAllowed(terminal, .ClipboardWrite, std.string_view())
+                    && !Ubiquitty.effectGranted(terminal, .FileReadAccess, std.string_view())
+                    && Ubiquitty.effectAllowed(terminal, .CursorStateRead, std.string_view())
+            } == true
+        }
+
+        guard hasRemotePolicy(surface) else {
+            report("ssh-capability-origin: the shell-created pane did not select Remote policy")
+            return false
+        }
+        var replies = Data()
+        surface.drive.setReplyHandler { replies.append($0) }
+        defer { surface.drive.setReplyHandler(nil) }
+        let savedPasteboard = UIPasteboard.general.items
+        defer { UIPasteboard.general.items = savedPasteboard }
+        let unchangedClipboard = "ssh-policy-preserved"
+        UIPasteboard.general.string = unchangedClipboard
+
+        // These follow the direct SSH byte path: the screen read and copy
+        // are refused, while the status and cursor queries are answered.
+        surface.feed(Data(("\u{1b}]52;c;cmVtb3RlLWNvcHk=\u{1b}\\"
+            + "\u{1b}[12;0;1;1;1;1*y\u{1b}[5n\u{1b}[2;3H\u{1b}[6n").utf8))
+        surface.serviceIngestEvents()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        guard replies == Data("\u{1b}[0n\u{1b}[2;3R".utf8),
+            UIPasteboard.general.string == unchangedClipboard
+        else {
+            report("ssh-capability-origin: a denied effect escaped or a benign reply changed")
+            return false
+        }
+        surface.feed(Data("\u{1b}c".utf8))
+        guard hasRemotePolicy(surface), let replacement = model.makePaneSurface(), hasRemotePolicy(replacement) else {
+            report("ssh-capability-origin: reset or replacement lost Remote policy")
+            return false
+        }
+        return true
     }
 
     /// Whether text the terminal copies arrives on the system pasteboard.

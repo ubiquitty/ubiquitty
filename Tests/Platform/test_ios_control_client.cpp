@@ -11,7 +11,9 @@
 #include <dispatch/dispatch.h>
 
 #include <functional>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -96,6 +98,55 @@ struct Observer {
     {
         if (shouldDestroyOnAnswer)
             ubiquittyIOSControlClientDestroy(std::exchange(client, nullptr));
+    }
+};
+
+struct DirectSession {
+    std::string sent;
+    std::string title;
+    int starts = 0;
+    int stops = 0;
+    int carrierReleases = 0;
+    int observerReleases = 0;
+    int frames = 0;
+    int titles = 0;
+    int bells = 0;
+    int exits = 0;
+    std::unique_ptr<UbiquittyIOSSession, decltype(&ubiquittyIOSSessionDestroy)> session { nullptr, &ubiquittyIOSSessionDestroy };
+
+    DirectSession()
+    {
+        UbiquittyIOSCarrierDriver driver {};
+        driver.context = this;
+        driver.start = [](void* context) {
+            auto& direct = *static_cast<DirectSession*>(context);
+            ++direct.starts;
+            ubiquittyIOSSessionNotifyConnect(direct.session.get());
+            return true;
+        };
+        driver.send = [](void* context, const std::uint8_t* bytes, std::size_t count) {
+            static_cast<DirectSession*>(context)->sent.append(reinterpret_cast<const char*>(bytes), count);
+        };
+        driver.stop = [](void* context) { ++static_cast<DirectSession*>(context)->stops; };
+        driver.release = [](void* context) { ++static_cast<DirectSession*>(context)->carrierReleases; };
+
+        UbiquittyIOSSessionObserver observer {};
+        observer.context = this;
+        observer.onFrame = [](void* context) { ++static_cast<DirectSession*>(context)->frames; };
+        observer.onTitle = [](void* context, const char* bytes, std::size_t count) {
+            auto& direct = *static_cast<DirectSession*>(context);
+            ++direct.titles;
+            direct.title.assign(bytes, count);
+        };
+        observer.onBell = [](void* context) { ++static_cast<DirectSession*>(context)->bells; };
+        observer.onExit = [](void* context) { ++static_cast<DirectSession*>(context)->exits; };
+        observer.release = [](void* context) { ++static_cast<DirectSession*>(context)->observerReleases; };
+        session.reset(ubiquittyIOSSessionCreateDirect(driver, "host.example", observer));
+    }
+
+    void deliver(std::string_view bytes)
+    {
+        ubiquittyIOSSessionDeliver(session.get(), reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
     }
 };
 
@@ -237,6 +288,57 @@ TEST(controlBridgeCopiesCoresPassiveRemoteCommand)
     char firstByte = '\0';
     CHECK_EQ(ubiquittyIOSControlRemoteCommand(&firstByte, 1), command.size());
     CHECK_EQ(firstByte, command.front());
+}
+
+TEST(directSSHSessionAnswersCursorQueriesWithoutDisclosingScreenChecksums)
+{
+    DirectSession direct;
+    REQUIRE(direct.session);
+    ubiquittyIOSSessionStart(direct.session.get(), 80, 24);
+    drainMainQueue();
+    direct.sent.clear();
+
+    // DECRQCRA reads screen content and must be refused, while the cursor
+    // reply still reaches the remote program through the same carrier.
+    direct.deliver("\033]2;remote title\007secret\033[12;0;1;1;1;1*y\033[3;7H\033[6n");
+    drainMainQueue();
+    CHECK(direct.sent == "\033[3;7R");
+    CHECK_EQ(direct.titles, 1);
+    CHECK(direct.title == "remote title");
+
+    int column = -1;
+    int row = -1;
+    (void)ubiquittyIOSSessionCursor(direct.session.get(), &column, &row);
+    CHECK_EQ(column, 6);
+    CHECK_EQ(row, 2);
+    CHECK_EQ(direct.starts, 1);
+    direct.session.reset();
+    CHECK_EQ(direct.stops, 1);
+    CHECK_EQ(direct.carrierReleases, 1);
+    CHECK_EQ(direct.observerReleases, 1);
+}
+
+TEST(destroyingADirectSSHSessionCancelsQueuedRepliesAndObserverCallbacks)
+{
+    DirectSession direct;
+    REQUIRE(direct.session);
+    ubiquittyIOSSessionStart(direct.session.get(), 80, 24);
+    drainMainQueue();
+    direct.sent.clear();
+    const int framesBefore = direct.frames;
+
+    direct.deliver("\033]2;queued title\007\007\033[6n");
+    ubiquittyIOSSessionNotifyClose(direct.session.get(), UbiquittyIOSCarrierOutcomeClosed, "peer closed");
+    direct.session.reset();
+    drainMainQueue();
+    CHECK(direct.sent.empty());
+    CHECK_EQ(direct.frames, framesBefore);
+    CHECK_EQ(direct.titles, 0);
+    CHECK_EQ(direct.bells, 0);
+    CHECK_EQ(direct.exits, 0);
+    CHECK_EQ(direct.stops, 1);
+    CHECK_EQ(direct.carrierReleases, 1);
+    CHECK_EQ(direct.observerReleases, 1);
 }
 
 UBIQUITTY_TEST_MAIN()
