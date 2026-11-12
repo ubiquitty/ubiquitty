@@ -913,6 +913,18 @@ public:
     ///   the next call.
     [[nodiscard]] const char* captureProgramState();
 
+    /// Reads stored image pixels and active-screen placements without changing
+    /// terminal state or draining replies. Pixel data is straight RGBA8 hex;
+    /// metadata remains available when the caller's byte budget is exhausted.
+    /// - Parameter pixelByteLimit: Total RGBA bytes to copy, capped at one MiB.
+    /// - Returns: A JSON document valid until the next graphics capture.
+    [[nodiscard]] const char* captureGraphicsState(std::size_t pixelByteLimit);
+
+    /// Advances image animation by an explicit elapsed interval. Embedders
+    /// supply time rather than coupling frame selection to inspection.
+    /// - Parameter elapsedMilliseconds: Elapsed time since the previous step.
+    void advanceGraphicsClock(std::uint32_t elapsedMilliseconds);
+
     /// Reads program metadata without capturing the grid or draining events.
     ///
     /// Raw title and directory, decoded OSC 7501 records with their inherited
@@ -2073,6 +2085,7 @@ private:
     };
     BellRoute m_bellRoute;
     std::string m_capturedProgramState;
+    std::string m_capturedGraphicsState;
     std::string m_programMetadataJSON;
     std::vector<std::array<int, 2>> m_progressReports;
     std::string m_takenProgressReports;

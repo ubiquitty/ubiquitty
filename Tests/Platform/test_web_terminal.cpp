@@ -6462,6 +6462,71 @@ TEST(testCaptureProgramStateExposesTheSeparateHostWritableStatusRow)
     CHECK(disabledStatus->isNull());
 }
 
+TEST(webGraphicsCaptureReadsPixelsPlacementsAndDeletionWithoutDrainingReplies)
+{
+    namespace JSON = Ubiquitty::Codec::JSON;
+    WebTerminal terminal(4, 6, 1);
+    terminal.feed("\033_Ga=T,i=31,p=7,f=24,s=1,v=1,c=2,r=1,C=1;/wAA\033\\");
+    bool isJSON = false; // bool-ok: JSON parser result
+    const JSON::Value state = JSON::parse(terminal.captureGraphicsState(4), isJSON);
+    REQUIRE(isJSON);
+    REQUIRE(state.find("images"));
+    REQUIRE(state.find("placements"));
+    REQUIRE(state.find("images")->items().size() == 1);
+    REQUIRE(state.find("placements")->items().size() == 1);
+    const JSON::Value& image = state.find("images")->items()[0];
+    CHECK(image.numberOr("id") == 31);
+    CHECK(image.numberOr("width") == 1);
+    CHECK(image.numberOr("height") == 1);
+    CHECK(image.stringOr("rgba") == "ff0000ff");
+    const JSON::Value& placement = state.find("placements")->items()[0];
+    CHECK(placement.numberOr("image") == 31);
+    CHECK(placement.numberOr("id") == 7);
+    CHECK(placement.numberOr("row") == 1);
+    CHECK(placement.numberOr("col") == 1);
+    CHECK(placement.numberOr("columns") == 2);
+    const JSON::Value bounded = JSON::parse(terminal.captureGraphicsState(0), isJSON);
+    REQUIRE(isJSON);
+    CHECK(bounded.find("images")->items()[0].find("rgba")->isNull());
+    char reply[128] {};
+    const int length = terminal.takeReplies(reply);
+    CHECK(std::string_view(reply, static_cast<std::size_t>(length)) == "\033_Gi=31,p=7;OK\033\\");
+    terminal.feed("\033_Ga=d,d=I,i=31\033\\");
+    const JSON::Value deleted = JSON::parse(terminal.captureGraphicsState(4), isJSON);
+    REQUIRE(isJSON);
+    CHECK(deleted.find("images")->items().empty());
+    CHECK(deleted.find("placements")->items().empty());
+}
+
+TEST(webGraphicsClockAdvancesFramesAtTheSpecifiedGapAndHonorsStop)
+{
+    namespace JSON = Ubiquitty::Codec::JSON;
+    WebTerminal terminal(4, 6, 1);
+    terminal.feed("\033[?25l\033_Ga=T,i=31,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\033\\");
+    terminal.feed("\033_Ga=f,i=31,f=32,s=1,v=1,z=25;AAD//w==\033\\");
+    terminal.feed("\033_Ga=a,i=31,r=1,z=25,s=3\033\\");
+    const auto pixels = [&] {
+        bool isJSON = false; // bool-ok: JSON parser result
+        const JSON::Value state = JSON::parse(terminal.captureGraphicsState(4), isJSON);
+        CHECK(isJSON);
+        return state.find("images")->items()[0].stringOr("rgba");
+    };
+    CHECK(pixels() == "ff0000ff");
+    CHECK(terminal.render()[0] == 255);
+    terminal.advanceGraphicsClock(24);
+    CHECK(pixels() == "ff0000ff");
+    terminal.advanceGraphicsClock(1);
+    CHECK(pixels() == "0000ffff");
+    const auto& rendered = terminal.render();
+    REQUIRE(rendered.size() >= 4);
+    CHECK(rendered[0] == 0);
+    CHECK(rendered[2] == 255);
+    CHECK(rendered[3] == 255);
+    terminal.feed("\033_Ga=a,i=31,s=1\033\\");
+    terminal.advanceGraphicsClock(100);
+    CHECK(pixels() == "0000ffff");
+}
+
 TEST(webProgramMetadataReadsDecodedRecordsWithoutDrainingThem)
 {
     namespace JSON = Ubiquitty::Codec::JSON;

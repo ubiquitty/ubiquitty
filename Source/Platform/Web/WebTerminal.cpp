@@ -2423,6 +2423,75 @@ const char* WebTerminal::captureProgramState()
     return m_capturedProgramState.c_str();
 }
 
+void WebTerminal::advanceGraphicsClock(std::uint32_t elapsedMilliseconds)
+{
+    Image::advanceFrames(&m_terminal, elapsedMilliseconds);
+}
+
+const char* WebTerminal::captureGraphicsState(std::size_t pixelByteLimit)
+{
+    namespace JSON = Codec::JSON;
+    std::size_t remainingBytes = std::min(pixelByteLimit, std::size_t { 1024 * 1024 });
+    JSON::Value images = JSON::Value::array();
+    for (const Image::TerminalImage& image : m_terminal.images.stored) {
+        if (!image.used)
+            continue;
+        JSON::Value captured = JSON::Value::object();
+        captured.set("id", JSON::Value::number(image.imageID));
+        captured.set("width", JSON::Value::number(image.width));
+        captured.set("height", JSON::Value::number(image.height));
+        captured.set("frames", JSON::Value::number(image.frameCount));
+        captured.set("frame", JSON::Value::number(image.currentFrame));
+        const std::size_t pixelCount = static_cast<std::size_t>(image.width) * image.height;
+        const std::size_t components = image.format == 24 ? 3 : 4;
+        const Image::TerminalImageFrame* frame = image.currentFrame < image.frameCount ? &image.frames[image.currentFrame] : nullptr;
+        const unsigned char* framePixels = frame ? frame->pixels : nullptr;
+        JSON::Value pixels = JSON::Value::null();
+        if (framePixels && (image.format == 24 || image.format == 32)
+            && pixelCount <= remainingBytes / 4 && frame->pixelLength == pixelCount * components) {
+            constexpr std::string_view digits = "0123456789abcdef";
+            std::string rgba;
+            rgba.reserve(pixelCount * 8);
+            for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+                for (std::size_t component = 0; component < 4; ++component) {
+                    const unsigned char value = component < components ? framePixels[pixel * components + component] : 255;
+                    rgba.push_back(digits[value >> 4]);
+                    rgba.push_back(digits[value & 15]);
+                }
+            }
+            pixels = JSON::Value::string(std::move(rgba));
+            remainingBytes -= pixelCount * 4;
+        }
+        captured.set("rgba", std::move(pixels));
+        images.push(std::move(captured));
+    }
+    JSON::Value placements = JSON::Value::array();
+    for (const Image::TerminalImagePlacement& placement : m_terminal.images.placements) {
+        if (!placement.used || !Image::placementIsOnActiveScreen(placement, m_terminal.screens.isUsingAlternateScreen))
+            continue;
+        JSON::Value captured = JSON::Value::object();
+        captured.set("image", JSON::Value::number(placement.imageID));
+        captured.set("id", JSON::Value::number(placement.placementID));
+        captured.set("row", JSON::Value::number(placement.cursorY + 1));
+        captured.set("col", JSON::Value::number(placement.cursorX + 1));
+        captured.set("columns", JSON::Value::number(placement.cellColumns));
+        captured.set("rows", JSON::Value::number(placement.cellRows));
+        captured.set("x", JSON::Value::number(placement.pixelOffsetX));
+        captured.set("y", JSON::Value::number(placement.pixelOffsetY));
+        captured.set("sourceX", JSON::Value::number(placement.sourceX));
+        captured.set("sourceY", JSON::Value::number(placement.sourceY));
+        captured.set("sourceWidth", JSON::Value::number(placement.sourceWidth));
+        captured.set("sourceHeight", JSON::Value::number(placement.sourceHeight));
+        captured.set("z", JSON::Value::number(placement.zIndex));
+        placements.push(std::move(captured));
+    }
+    JSON::Value state = JSON::Value::object();
+    state.set("images", std::move(images));
+    state.set("placements", std::move(placements));
+    m_capturedGraphicsState = JSON::serialize(state);
+    return m_capturedGraphicsState.c_str();
+}
+
 const char* WebTerminal::programMetadataJSON()
 {
     namespace JSON = Codec::JSON;

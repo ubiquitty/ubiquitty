@@ -1659,6 +1659,17 @@ UBIQUITTY_WEB_EXPORT const char* ubiquittyWebCaptureProgramState()
     return terminal ? terminal->captureProgramState() : "";
 }
 
+UBIQUITTY_WEB_EXPORT const char* ubiquittyWebCaptureGraphicsState(int pixelByteLimit)
+{
+    return terminal ? terminal->captureGraphicsState(static_cast<std::size_t>(std::max(0, pixelByteLimit))) : "";
+}
+
+UBIQUITTY_WEB_EXPORT void ubiquittyWebAdvanceGraphicsClock(int elapsedMilliseconds)
+{
+    if (terminal && elapsedMilliseconds >= 0)
+        terminal->advanceGraphicsClock(static_cast<std::uint32_t>(elapsedMilliseconds));
+}
+
 // A non-consuming metadata snapshot, without the grid capture's per-cell work.
 // Null before create; the returned storage survives until the next metadata read.
 UBIQUITTY_WEB_EXPORT const char* ubiquittyWebProgramMetadataJSON()
