@@ -1329,6 +1329,12 @@ UBIQUITTY_WEB_EXPORT const unsigned char* ubiquittyWebBuildResize(int rows, int 
 // rule -- which mode reports, which modifier keeps a drag local, whether a
 // press opens a selection -- and reads the verdict back through
 // ubiquittyWebPointerVerdict.
+UBIQUITTY_WEB_EXPORT const unsigned char* ubiquittyWebLocalPointerInput()
+{
+    return terminal ? terminal->localPointerInput().data() : nullptr;
+}
+UBIQUITTY_WEB_EXPORT int ubiquittyWebLocalPointerInputLength() { return terminal ? static_cast<int>(terminal->localPointerInput().size()) : 0; }
+
 UBIQUITTY_WEB_EXPORT const unsigned char* ubiquittyWebPointer(int kind, int button, int row, int column, int pixelX, int pixelY, int deltaX, int deltaY, int shift, int alternate, int control, int command, int clickCount, int isDragging, double xInCells)
 {
     if (!terminal)
@@ -1670,6 +1676,12 @@ UBIQUITTY_WEB_EXPORT void ubiquittyWebAdvanceGraphicsClock(int elapsedMillisecon
         terminal->advanceGraphicsClock(static_cast<std::uint32_t>(elapsedMilliseconds));
 }
 
+UBIQUITTY_WEB_EXPORT void ubiquittyWebSetPresentationTime(int milliseconds)
+{
+    if (terminal && milliseconds >= 0)
+        terminal->setPresentationTime(static_cast<std::uint32_t>(milliseconds));
+}
+
 // A non-consuming metadata snapshot, without the grid capture's per-cell work.
 // Null before create; the returned storage survives until the next metadata read.
 UBIQUITTY_WEB_EXPORT const char* ubiquittyWebProgramMetadataJSON()
@@ -1902,6 +1914,7 @@ UBIQUITTY_WEB_EXPORT int ubiquittyWebDecorationInstanceCount() { return terminal
 // cursor's colours. The GPU path draws them as a layer of their own after
 // every head, so the cell's own ink is not composited twice.
 UBIQUITTY_WEB_EXPORT int ubiquittyWebCursorTierCellCount() { return terminal ? static_cast<int>(terminal->cursorTier().cells) : 0; }
+UBIQUITTY_WEB_EXPORT int ubiquittyWebCursorTierGlyphCount() { return terminal ? static_cast<int>(terminal->cursorTier().glyphs) : 0; }
 UBIQUITTY_WEB_EXPORT int ubiquittyWebCursorTierWideGlyphCount() { return terminal ? static_cast<int>(terminal->cursorTier().wideGlyphs) : 0; }
 UBIQUITTY_WEB_EXPORT int ubiquittyWebCursorTierProportionalGlyphCount() { return terminal ? static_cast<int>(terminal->cursorTier().proportionalGlyphs) : 0; }
 UBIQUITTY_WEB_EXPORT int ubiquittyWebCursorTierProportionalStripCount() { return terminal ? static_cast<int>(terminal->cursorTier().proportionalStrips) : 0; }
@@ -1913,6 +1926,12 @@ UBIQUITTY_WEB_EXPORT int ubiquittyWebCursorTierDecorationCount() { return termin
 // texture because a cell quad samples one texture, and a wide slot is two cells
 // across — so the same coordinate names a different glyph on the mono page, and
 // baking it into a cell draws a sharp, real, wrong one.
+UBIQUITTY_WEB_EXPORT const unsigned char* ubiquittyWebGlyphInstances()
+{
+    return terminal ? reinterpret_cast<const unsigned char*>(terminal->glyphInstances()) : nullptr;
+}
+UBIQUITTY_WEB_EXPORT int ubiquittyWebGlyphInstanceCount() { return terminal ? terminal->glyphInstanceCount() : 0; }
+
 UBIQUITTY_WEB_EXPORT const unsigned char* ubiquittyWebWideGlyphInstances()
 {
     return terminal ? reinterpret_cast<const unsigned char*>(terminal->wideGlyphInstances()) : nullptr;

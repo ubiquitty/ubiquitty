@@ -491,6 +491,8 @@ void WebTerminal::applyConfiguredFrameStyle(Rendering::TerminalSnapshotOptions& 
     Preferences::Effective::applyBackgroundImageSettings(options, m_configuration, &m_backgroundImage);
     options.style.shouldEnhanceTextContrast = m_configuration.shouldEnhanceTextContrast;
     options.style.backgroundOpacity = static_cast<float>(m_configuration.backgroundOpacity);
+    options.shouldResolveBlink = true;
+    options.blinkTicks = m_presentationTicks.value_or(PAL::monotonicTicks().count);
 }
 
 void WebTerminal::updatePresentation()
@@ -536,7 +538,7 @@ std::vector<std::uint8_t> WebTerminal::renderFrame(Rendering::EdgeInsets padding
 {
     Rendering::TerminalSnapshotOptions options;
     options.style.paddingInPixels = paddingInPixels;
-    options.style.unifontScale = m_glyphScale;
+    options.style.unifontScale = m_fonts->face.isAvailable() ? 0 : m_glyphScale;
     applyConfiguredFrameStyle(options);
     Rendering::applyPointSpace(options, static_cast<float>(cellHeight()), m_glyphScale, m_lineSpacing);
     options.viewOffset = m_viewOffset;
@@ -1839,6 +1841,7 @@ int WebTerminal::hostRecordLength(const char* hostKey) const
 const std::vector<std::uint8_t>& WebTerminal::pointer(Input::PointerFact fact)
 {
     m_frame.clear();
+    m_localPointerInput.clear();
     m_pointerVerdict = 0;
     fact.viewOffset = m_viewOffset;
     auto policy = Input::pointerPolicyFromPreferences(Preferences::values());
@@ -1850,18 +1853,24 @@ const std::vector<std::uint8_t>& WebTerminal::pointer(Input::PointerFact fact)
     }
     const Input::PointerRoute route = Input::routePointer(m_pointerLadder, m_terminal, &m_selection, fact,
         policy, static_cast<std::uint32_t>(PAL::monotonicTicks().count));
+    const auto sendBytes = [&](std::string_view bytes) {
+        if (m_isHostMirror)
+            appendRawInput(bytes);
+        else
+            m_localPointerInput.insert(m_localPointerInput.end(), bytes.begin(), bytes.end());
+    };
     if (route.locatorReportLength > 0)
-        appendRawInput({ route.locatorReport.data(), static_cast<std::size_t>(route.locatorReportLength) });
+        sendBytes({ route.locatorReport.data(), static_cast<std::size_t>(route.locatorReportLength) });
     if (route.reportLength > 0) {
         // The host encodes a pointer event under the modes live when it
         // writes it; a report with no event behind it travels as its bytes.
-        if (route.reported)
+        if (m_isHostMirror && route.reported)
             appendIntent(Protocol::Sync::PointerInput { .events = { Runtime::pointerEventOf(*route.reported) } });
         else
-            appendRawInput({ route.report.data(), static_cast<std::size_t>(route.reportLength) });
+            sendBytes({ route.report.data(), static_cast<std::size_t>(route.reportLength) });
     }
     if (!route.readlineInput.empty())
-        appendRawInput({ route.readlineInput.data(), route.readlineInput.size() });
+        sendBytes({ route.readlineInput.data(), route.readlineInput.size() });
     if (route.wasConsumed)
         m_pointerVerdict |= PointerVerdictConsumed;
     if (route.needsDisplay || route.needsRepublish)
@@ -1876,14 +1885,19 @@ const std::vector<std::uint8_t>& WebTerminal::pointer(Input::PointerFact fact)
 const std::vector<std::uint8_t>& WebTerminal::scroll(const Input::ScrollFact& fact)
 {
     m_frame.clear();
+    m_localPointerInput.clear();
     m_pointerVerdict = 0;
     // A pixel delta normalises by the live cell height, which is the
     // points-per-line the tuning wants.
     const Screen::ScrollTuning::Policy tuning = Preferences::Effective::wheelPolicy(Preferences::values(),
         static_cast<double>(cellHeight() > 0 ? cellHeight() : 1));
     const Input::ScrollRoute route = Input::routeScroll(m_pointerLadder, m_terminal, fact, tuning);
-    if (route.byteLength > 0)
-        appendRawInput({ route.bytes.data(), static_cast<std::size_t>(route.byteLength) });
+    if (route.byteLength > 0) {
+        if (m_isHostMirror)
+            appendRawInput({ route.bytes.data(), static_cast<std::size_t>(route.byteLength) });
+        else
+            m_localPointerInput.insert(m_localPointerInput.end(), route.bytes.data(), route.bytes.data() + route.byteLength);
+    }
     if (route.linesToOffsetView != 0) {
         m_viewOffset = Ubiquitty::Screen::clampViewOffset(m_viewOffset + static_cast<int>(route.linesToOffsetView), Ubiquitty::Screen::scrollbackCount(&m_terminal));
         m_pointerVerdict |= PointerVerdictNeedsDisplay;
@@ -2428,6 +2442,11 @@ void WebTerminal::advanceGraphicsClock(std::uint32_t elapsedMilliseconds)
     Image::advanceFrames(&m_terminal, elapsedMilliseconds);
 }
 
+void WebTerminal::setPresentationTime(std::uint32_t milliseconds)
+{
+    m_presentationTicks = static_cast<std::uint32_t>(static_cast<std::uint64_t>(milliseconds) * Cursor::Blink::caretPeriodTicks / 1000);
+}
+
 const char* WebTerminal::captureGraphicsState(std::size_t pixelByteLimit)
 {
     namespace JSON = Codec::JSON;
@@ -2964,6 +2983,7 @@ bool WebTerminal::buildFrame()
         return false;
 
     m_cellCount = 0;
+    m_glyphCount = 0;
     m_overlayCount = 0;
     m_boxFillCount = 0;
     m_decorationCount = 0;
@@ -2974,7 +2994,7 @@ bool WebTerminal::buildFrame()
     m_hasImages = false;
 
     Rendering::TerminalSnapshotOptions options;
-    options.style.unifontScale = m_glyphScale;
+    options.style.unifontScale = m_fonts->face.isAvailable() ? 0 : m_glyphScale;
     applyConfiguredFrameStyle(options);
     Rendering::applyPointSpace(options, static_cast<float>(cellHeight()), m_glyphScale, m_lineSpacing);
     options.viewOffset = m_viewOffset;
@@ -3059,6 +3079,8 @@ bool WebTerminal::buildFrame()
     // and the buffer is cheap, so this sizes to the grid rather than to half of
     // it — a wide glyph dropped for want of room is a blank cell in the middle
     // of a word, which reads as a font failure.
+    if (m_glyphs.size() < maxCells)
+        m_glyphs.resize(maxCells);
     if (m_wideGlyphs.size() < maxCells)
         m_wideGlyphs.resize(maxCells);
 
@@ -3072,6 +3094,8 @@ bool WebTerminal::buildFrame()
     out.boxFillCapacity = m_boxFills.size();
     out.decorations = m_decorations.data();
     out.decorationCapacity = m_decorations.size();
+    out.glyphs = m_glyphs.data();
+    out.glyphCapacity = m_glyphs.size();
     out.wideGlyphs = m_wideGlyphs.data();
     out.wideGlyphCapacity = m_wideGlyphs.size();
     if (m_fonts->renderer.proportionalAtlas().pixels) {
@@ -3143,6 +3167,7 @@ bool WebTerminal::buildFrame()
     m_overlayCount = static_cast<int>(counts.overlays < m_overlays.size() ? counts.overlays : m_overlays.size());
     m_boxFillCount = static_cast<int>(std::min(counts.boxFills, m_boxFills.size()));
     m_decorationCount = static_cast<int>(counts.decorations < m_decorations.size() ? counts.decorations : m_decorations.size());
+    m_glyphCount = static_cast<int>(std::min(counts.glyphs, m_glyphs.size()));
     m_wideGlyphCount = static_cast<int>(counts.wideGlyphs < m_wideGlyphs.size() ? counts.wideGlyphs : m_wideGlyphs.size());
     m_proportionalGlyphCount = static_cast<int>(std::min(counts.proportionalGlyphs, m_proportionalGlyphs.size()));
     m_proportionalStripCount = static_cast<int>(std::min(counts.proportionalStrips, m_proportionalStrips.size()));
@@ -3152,6 +3177,7 @@ bool WebTerminal::buildFrame()
     const auto tailOf = [](std::size_t tail, int drawn) { return std::min(tail, static_cast<std::size_t>(drawn)); };
     m_cursorTier = counts.cursorTier;
     m_cursorTier.cells = tailOf(counts.cursorTier.cells, m_cellCount);
+    m_cursorTier.glyphs = tailOf(counts.cursorTier.glyphs, m_glyphCount);
     m_cursorTier.wideGlyphs = tailOf(counts.cursorTier.wideGlyphs, m_wideGlyphCount);
     m_cursorTier.proportionalGlyphs = tailOf(counts.cursorTier.proportionalGlyphs, m_proportionalGlyphCount);
     m_cursorTier.proportionalStrips = tailOf(counts.cursorTier.proportionalStrips, m_proportionalStripCount);

@@ -1,0 +1,65 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Script and blink glyph parity</title>
+<pre id="verdict">running</pre>
+<script type="module">
+import { WebGLRenderer } from './webgl.js';
+import createModule from './ubiquitty.js';
+try {
+  const module = await createModule();
+  module.ubiquittyFontFamily = 'monospace';
+  const call = (name, result = 'number', parameters = []) => module.cwrap(`ubiquittyWeb${name}`, result, parameters);
+  const canvas = document.createElement('canvas');
+  document.body.append(canvas);
+  const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+  if (!gl) throw Error('WebGL2 unavailable');
+  const renderer = new WebGLRenderer(canvas), results = [];
+  for (const size of [16, 28]) {
+    call('Create', null, ['number','number','number'])(2, 12, 1);
+    call('SetFontSize', null, ['number'])(size);
+    const text = '\x1b[?25l\x1b[37;40m2\x1b[1;4H\x1b[73m2\x1b[75m\x1b[1;7H\x1b[74m2\x1b[75m\x1b[2;1H\x1b[5m2';
+    call('Feed', null, ['string','number'])(text, new TextEncoder().encode(text).length);
+    const phases = [];
+    for (const time of [0, 700]) {
+      call('SetPresentationTime', null, ['number'])(time);
+      const base = call('Render')(), width = call('ImageWidth')(), height = call('ImageHeight')();
+      const cpu = module.HEAPU8.slice(base, base + width * height * 4);
+      canvas.width = width; canvas.height = height;
+      if (!call('BuildFrame')()) throw Error('Frame withheld');
+      const atlas = call('AtlasPixels')(), aw = call('AtlasWidth')(), ah = call('AtlasHeight')();
+      renderer.uploadAtlas(module.HEAPU8.subarray(atlas, atlas + aw * ah), aw, ah);
+      const bytes = (name, count) => {const pointer=call(name)();return module.HEAPU8.subarray(pointer,pointer+count*64);};
+      const cellCount = call('CellInstanceCount')(), glyphCount = call('GlyphInstanceCount')();
+      if (glyphCount !== 2) throw Error(`Expected two scripted glyphs, got ${glyphCount}`);
+      const cw = call('CellWidth')(), ch = call('CellHeight')();
+      renderer.drawFrame({cellBytes:bytes('CellInstances',cellCount),cellCount,
+        glyphBytes:bytes('GlyphInstances',glyphCount),glyphCount,
+        wideGlyphCount:0,proportionalGlyphCount:0,proportionalStripCount:0,ligatureGlyphCount:0,colorGlyphCount:0,
+        overlayCount:0,decorationCount:0,boxFillCount:0,cellWidth:cw,cellHeight:ch,width,height});
+      const gpu = new Uint8Array(width*height*4);
+      gl.readPixels(0,0,width,height,gl.RGBA,gl.UNSIGNED_BYTE,gpu);
+      const bounds = (pixels,column,row,flip) => {
+        let top=Infinity,bottom=-1,count=0;
+        for(let y=row*ch;y<(row+1)*ch;y++)for(let x=column*cw;x<(column+1)*cw;x++){
+          const i=((flip?height-1-y:y)*width+x)*4;
+          if(pixels[i]>40){top=Math.min(top,y-row*ch);bottom=Math.max(bottom,y-row*ch);count++;}
+        }
+        return {top,bottom,count};
+      };
+      const phase = {};
+      for(const [name,pixels,flip] of [['cpu',cpu,false],['gpu',gpu,true]]){
+        const [normal,sup,sub]=[0,3,6].map(c=>bounds(pixels,c,0,flip));
+        if(!(sup.count>0&&sub.count>0&&sup.count<normal.count&&sub.count<normal.count&&sup.bottom<normal.bottom&&sub.top>normal.top))
+          throw Error(`${name} script geometry at ${size}: ${JSON.stringify({normal,sup,sub})}`);
+        phase[name]={normal,sup,sub,blink:bounds(pixels,0,1,flip).count};
+      }
+      phases.push(phase);
+    }
+    for(const name of ['cpu','gpu'])if(!(phases[0][name].blink>0&&phases[1][name].blink===0))throw Error(`${name} blink did not hide`);
+    results.push({size,phases});
+  }
+  document.getElementById('verdict').textContent=JSON.stringify({verdict:'MATCH',results});
+} catch(error) {document.getElementById('verdict').textContent=`ERROR ${error.stack||error}`;}
+</script>

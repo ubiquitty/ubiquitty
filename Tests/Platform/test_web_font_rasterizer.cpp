@@ -51,6 +51,8 @@ struct EngineLog {
     int lastIsItalic = 0;
     double lastPenX = 0;
     int colorCalls = 0;
+    int clusterCalls = 0;
+    std::vector<std::uint32_t> lastDrawnCluster;
     int proportionalMeasureCalls = 0;
     int proportionalDrawCalls = 0;
     int lastProportionalCount = 0;
@@ -121,6 +123,14 @@ int fakeDrawGlyph(const char* family, int codePoint, double pixelSize, double ho
     return 1;
 }
 
+int fakeDrawCluster(const char*, const std::uint32_t* codePoints, int count, int, int, int, int, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    ++engineLog.clusterCalls;
+    engineLog.lastDrawnCluster.assign(codePoints, codePoints + count);
+    std::memset(coverageOut, engineCoverageByte, static_cast<std::size_t>(slotWidth) * static_cast<std::size_t>(slotHeight));
+    return 1;
+}
+
 int fakeDrawColorCluster(const char* family, const std::uint32_t*, int, int slotInPixels, std::uint8_t* pixelsOut)
 {
     engineLog.lastFamily = family;
@@ -132,7 +142,7 @@ int fakeDrawColorCluster(const char* family, const std::uint32_t*, int, int slot
 // The probes: the engine's family exists and covers everything below the
 // box-drawing block, so U+2500 routes missing and exercises the empty-family
 // fallback while letters route to the primary.
-int fakeProbeCoverage(const char*, int codePoint) { return codePoint < 0x2500 ? 1 : 0; }
+int fakeProbeCoverage(const char*, int codePoint) { return codePoint < 0x2500 || (codePoint >= 0xFE70 && codePoint <= 0xFEFC) ? 1 : 0; }
 int fakeFamilyIsPresent(const char*) { return 1; }
 
 int fakeProbeCluster(const char* family, std::span<const std::uint32_t> codePoints, Rendering::Font::Presentation presentation, bool requireOwnFace) // bool-ok: Implements the browser probe's named-face coverage predicate.
@@ -235,6 +245,7 @@ void installFakeEngine()
     host.primaryFamily = fakePrimaryFamily;
     host.measure = fakeMeasure;
     host.drawGlyph = fakeDrawGlyph;
+    host.drawCluster = fakeDrawCluster;
     host.drawColorCluster = fakeDrawColorCluster;
     host.measureProportional = fakeMeasureProportional;
     host.drawProportional = fakeDrawProportional;
@@ -1079,6 +1090,29 @@ TEST(testLigaturesOffLeaveNothingToShape)
     for (const Rendering::LigatureRun& published : runs)
         CHECK_EQ(published.length, 0);
     CHECK_MSG(engineLog.shapeRunCalls == 0 && engineLog.drawShapedRunCalls == 0, "the engine is never asked");
+}
+
+TEST(testCombiningClusterReachesTheFontAsOneShapingRequest)
+{
+    installFakeEngine();
+    Rendering::UnifontRasterizer fallback;
+    WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+    const std::uint32_t cluster[] = { 'Z', 0x0324, 0x0308 };
+    std::vector<std::uint8_t> coverage(static_cast<std::size_t>(enginePixelSize) * enginePixelSize);
+    CHECK(rasterizer.rasterizeCluster(cluster, 3, Rendering::FontFace::Regular, 0, enginePixelSize, enginePixelSize, coverage.data()));
+    CHECK_EQ(engineLog.clusterCalls, 1);
+    CHECK(engineLog.lastDrawnCluster == std::vector<std::uint32_t>(std::begin(cluster), std::end(cluster)));
+    CHECK(std::ranges::all_of(coverage, [](std::uint8_t pixel) { return pixel == engineCoverageByte; }));
+}
+
+TEST(testCursivePresentationFormsReachBothCellEdges)
+{
+    installFakeEngine();
+    Rendering::UnifontRasterizer fallback;
+    WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+    std::vector<std::uint8_t> coverage(enginePixelSize * enginePixelSize);
+    CHECK(rasterizer.rasterizeGlyph(0xFE91, Rendering::FontFace::Regular, 0, enginePixelSize, enginePixelSize, coverage.data()));
+    CHECK_EQ(engineLog.lastHorizontalScale, 2.0);
 }
 
 UBIQUITTY_TEST_MAIN()

@@ -6794,6 +6794,56 @@ TEST(webSearchAutomationRefreshesAnIdenticalCompletedProbe)
     CHECK(terminal.searchStatus().isComplete);
 }
 
+TEST(testStandaloneMouseReportsReachTheLocalProgram)
+{
+    WebTerminal terminal(4, 12, 1);
+    terminal.feed("\x1b[?1000h\x1b[?1006h");
+    (void)press(terminal, 2, 4);
+    auto input = terminal.localPointerInput();
+    CHECK(std::string(input.begin(), input.end()) == "\x1b[<0;5;3M");
+    (void)release(terminal, 2, 4);
+    input = terminal.localPointerInput();
+    CHECK(std::string(input.begin(), input.end()) == "\x1b[<0;5;3m");
+    terminal.feed("\x1b[?1000l");
+    (void)press(terminal, 2, 4);
+    CHECK(terminal.localPointerInput().empty());
+    CHECK((terminal.pointerVerdict() & WebTerminal::PointerVerdictOpenedGesture) != 0);
+}
+
+TEST(testScriptedGlyphsReachTheBrowserInstanceStream)
+{
+    WebTerminal terminal(2, 12, 1);
+    terminal.feed("\x1b[?25l2\x1b[1;4H\x1b[73m2\x1b[75m\x1b[1;7H\x1b[74m2\x1b[75m");
+    CHECK(terminal.buildFrame());
+    CHECK_EQ(terminal.glyphInstanceCount(), 2);
+    const auto* glyphs = terminal.glyphInstances();
+    CHECK(glyphs[0].originInPixels.y < 0.0f);
+    CHECK(glyphs[1].originInPixels.y > 0.0f);
+    CHECK(glyphs[0].atlasBottomRight.x > glyphs[0].atlasTopLeft.x);
+    CHECK(glyphs[1].atlasBottomRight.x > glyphs[1].atlasTopLeft.x);
+    // Only the scripted cells leave the ordinary cell pass.
+    CHECK_EQ(terminal.cellInstanceCount(), 24);
+}
+
+TEST(testExplicitDisplayTimeResolvesTextBlinkInBothRenderPaths)
+{
+    WebTerminal terminal(2, 8, 1);
+    terminal.feed("\x1b[?25l\x1b[5mX");
+    CHECK(std::string(terminal.captureProgramState()).find("\"blink\":true") != std::string::npos);
+    terminal.setPresentationTime(0);
+    CHECK(terminal.buildFrame());
+    const auto visibleAlpha = terminal.cellInstances()[0].foreground.w;
+    const auto visible = terminal.render();
+    terminal.setPresentationTime(700);
+    CHECK(terminal.buildFrame());
+    CHECK_MSG(terminal.cellInstances()[0].foreground.w < visibleAlpha, "GPU glyph alpha follows the same blink phase");
+    const auto hidden = terminal.render();
+    CHECK_MSG(visible != hidden, "SGR blink follows the embedder's clock");
+    terminal.setPresentationTime(0);
+    CHECK(terminal.render() == visible);
+    CHECK(terminal.buildFrame());
+}
+
 UBIQUITTY_TEST_MAIN()
 
 // The page's own gesture entry points, not Core's: a drag held while the

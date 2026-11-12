@@ -72,7 +72,7 @@ DIST="$UBQ_BUILD_ROOT/web-dist"
 CHROME="${UBQ_WEB_BROWSER:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 PROBE="${1:-wide-glyph-parity}"
 case "$PROBE" in
-wide-glyph-parity|proportional-glyph-parity|doubled-run-parity|scaled-run-at-size|cursor-tier-parity|font-fallback-parity|box-drawing-parity|ligature-parity) ;;
+script-glyph-parity|wide-glyph-parity|proportional-glyph-parity|doubled-run-parity|scaled-run-at-size|cursor-tier-parity|font-fallback-parity|box-drawing-parity|ligature-parity) ;;
 *) echo "check-web-gpu-parity: unknown probe $PROBE" >&2; exit 2 ;;
 esac
 

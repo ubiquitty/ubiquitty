@@ -116,6 +116,8 @@ void main() {
         ivec2 texel = clamp(ivec2(source), ivec2(0), texSize - ivec2(1));
         coverage = int(round(texelFetch(uAtlas, texel, 0).r * 255.0));
     }
+    int opacity = int(round(clamp(abs(vForeground.a), 0.0, 1.0) * 255.0));
+    coverage = (coverage * opacity + 127) / 255;
     int invCoverage = 255 - coverage;
     ivec3 background = ivec3(round(vBackground.rgb * 255.0));
     ivec3 foreground = ivec3(round(vForeground.rgb * 255.0));
@@ -142,6 +144,7 @@ function sliceStreams(frame, segment) {
     return { bytes: tailCount > 0 ? bytes.subarray(headCount * stride) : null, count: tailCount };
   };
   const cells = cut(frame.cellBytes, frame.cellCount, tier.cellCount, CELL_INSTANCE_STRIDE);
+  const glyphs = cut(frame.glyphBytes, frame.glyphCount || 0, tier.glyphCount, GLYPH_INSTANCE_STRIDE);
   const wide = cut(frame.wideGlyphBytes, frame.wideGlyphCount, tier.wideGlyphCount, GLYPH_INSTANCE_STRIDE);
   const proportional = cut(frame.proportionalGlyphBytes, frame.proportionalGlyphCount, tier.proportionalGlyphCount, GLYPH_INSTANCE_STRIDE);
   const strips = cut(frame.proportionalStripBytes, frame.proportionalStripCount, tier.proportionalStripCount, GLYPH_INSTANCE_STRIDE);
@@ -151,6 +154,7 @@ function sliceStreams(frame, segment) {
   const boxes = cut(frame.boxFillBytes, frame.boxFillCount || 0, tier.boxFillCount, OVERLAY_INSTANCE_STRIDE);
   return {
     cellBytes: cells.bytes, cellCount: cells.count,
+    glyphBytes: glyphs.bytes, glyphCount: glyphs.count,
     wideGlyphBytes: wide.bytes, wideGlyphCount: wide.count,
     proportionalGlyphBytes: proportional.bytes, proportionalGlyphCount: proportional.count,
     proportionalStripBytes: strips.bytes, proportionalStripCount: strips.count,
@@ -225,7 +229,7 @@ void main()
     // colour the builder recorded rather than against whatever the framebuffer
     // holds, so the result does not depend on what drew underneath.
     // Atlas pixels; normalize here, where a divide is free.
-    float coverage = texture(uWideAtlas, vAtlasUV / vec2(textureSize(uWideAtlas, 0))).r;
+    float coverage = texture(uWideAtlas, vAtlasUV / vec2(textureSize(uWideAtlas, 0))).r * clamp(abs(vForeground.a), 0.0, 1.0);
     fragColor = vec4(mix(vBackground.rgb, vForeground.rgb, coverage), 1.0);
 }
 `;
@@ -291,6 +295,8 @@ void main()
         : int(floor(vAtlasMin.y + (float(local.y) + 0.5) * vTexelsPerPixel.y));
     ivec2 texel = clamp(ivec2(x, y), ivec2(0), textureSize(uProportionalAtlas, 0) - ivec2(1));
     int coverage = int(round(texelFetch(uProportionalAtlas, texel, 0).r * 255.0));
+    int opacity = int(round(clamp(abs(vForeground.a), 0.0, 1.0) * 255.0));
+    coverage = (coverage * opacity + 127) / 255;
     if (coverage == 0) discard;
     ivec3 background = ivec3(round(vBackground.rgb * 255.0));
     ivec3 foreground = ivec3(round(vForeground.rgb * 255.0));
@@ -335,6 +341,7 @@ void main()
     // SRC_ALPHA / ONE_MINUS_SRC_ALPHA. Emitting premultiplied here would darken
     // every antialiased emoji edge toward black.
     fragColor = texture(uColorAtlas, vAtlasUV / vec2(textureSize(uColorAtlas, 0)));
+    fragColor.a *= clamp(abs(vForeground.a), 0.0, 1.0);
 }
 `;
 
@@ -816,6 +823,22 @@ export function assertInstanceStrides(module) {
   }
 }
 
+// Present the software-composited Core raster with a draw to the canvas.
+const RGBA_VERTEX_SHADER = `#version 300 es
+out vec2 texturePosition;
+void main() {
+    vec2 point = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    texturePosition = vec2(point.x, 1.0 - point.y);
+    gl_Position = vec4(point * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const RGBA_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+uniform sampler2D raster;
+in vec2 texturePosition;
+out vec4 color;
+void main() { color = texture(raster, texturePosition); }
+`;
+
 export class WebGLRenderer {
   constructor(canvas) {
     const gl = canvas.getContext('webgl2', {
@@ -828,6 +851,9 @@ export class WebGLRenderer {
     if (!gl) throw new Error('WebGL2 unavailable');
     this.gl = gl;
     this.canvas = canvas;
+    this.rgbaProgram = link(gl, RGBA_VERTEX_SHADER, RGBA_FRAGMENT_SHADER, 'raster');
+    this.rgbaSampler = gl.getUniformLocation(this.rgbaProgram, 'raster');
+    this.rgbaVao = gl.createVertexArray();
 
     this.program = link(gl, CELL_VERTEX_SHADER, CELL_FRAGMENT_SHADER, 'cell');
     this.uViewportSize = gl.getUniformLocation(this.program, 'uViewportSize');
@@ -1053,14 +1079,18 @@ export class WebGLRenderer {
   // same GPU surface instead of asking it for an unavailable 2D context.
   presentRGBA(pixels, width, height) {
     const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0);
     this.resizeScene(width, height);
     gl.bindTexture(gl.TEXTURE_2D, this.sceneTexture);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.sceneFramebuffer);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-    // CPU scanlines start at the top; framebuffer coordinates start below.
-    gl.blitFramebuffer(0, 0, width, height, 0, height, width, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, width, height);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.rgbaProgram);
+    gl.uniform1i(this.rgbaSampler, 0);
+    gl.bindVertexArray(this.rgbaVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindVertexArray(null);
   }
 
   // Re-uploads the coverage atlas. Cheap to call every frame while the atlas is
@@ -1196,6 +1226,19 @@ export class WebGLRenderer {
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, streams.boxFillCount);
       gl.uniform1i(this.oBoxFill, 0);
       gl.disable(gl.BLEND);
+    }
+
+    // Scripted and fractionally sized mono glyphs carry their own geometry.
+    if (streams.glyphCount > 0) {
+      gl.useProgram(this.wideGlyphProgram);
+      gl.uniform2f(this.wViewportSize, width, height);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.atlasTexture);
+      gl.uniform1i(this.wAtlas, 0);
+      gl.bindVertexArray(this.wideGlyphVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.wideGlyphBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, streams.glyphBytes, gl.STREAM_DRAW);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, streams.glyphCount);
     }
 
     // Two-cell glyphs, from their own page. After the cell pass, which has

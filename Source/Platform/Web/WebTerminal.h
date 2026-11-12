@@ -550,6 +550,12 @@ public:
     /// The ``PointerVerdict`` bits of the last ``pointer`` or ``scroll``.
     [[nodiscard]] int pointerVerdict() const { return m_pointerVerdict; }
 
+    /// Returns mouse input encoded for an embedded local program.
+    ///
+    /// - Returns: Borrowed bytes from the last pointer or scroll event, valid
+    ///   until the next such event; empty for a host mirror or local selection.
+    [[nodiscard]] std::span<const std::uint8_t> localPointerInput() const { return m_localPointerInput; }
+
     /// Whether DECSET 7403 (relative pointer lock) is set.
     ///
     /// The page answers it with the Pointer Lock API, which is the same
@@ -924,6 +930,10 @@ public:
     /// supply time rather than coupling frame selection to inspection.
     /// - Parameter elapsedMilliseconds: Elapsed time since the previous step.
     void advanceGraphicsClock(std::uint32_t elapsedMilliseconds);
+
+    /// Supplies an embedder's display time for deterministic blink presentation.
+    /// - Parameter milliseconds: Absolute display time, in milliseconds.
+    void setPresentationTime(std::uint32_t milliseconds);
 
     /// Reads program metadata without capturing the grid or draining events.
     ///
@@ -1834,6 +1844,15 @@ public:
     [[nodiscard]] const Rendering::CellInstance* cellInstances() const { return m_cells.data(); }
     [[nodiscard]] int cellInstanceCount() const { return m_cellCount; }
 
+    /// Returns independently placed glyphs on the mono atlas, including SGR 73/74.
+    ///
+    /// - Returns: Borrowed instances valid until the next frame build.
+    [[nodiscard]] const Rendering::GlyphInstance* glyphInstances() const { return m_glyphs.data(); }
+    /// Returns the number of independent mono glyph instances.
+    ///
+    /// - Returns: The valid prefix of ``glyphInstances``.
+    [[nodiscard]] int glyphInstanceCount() const { return m_glyphCount; }
+
     /// Two-cell glyphs, which draw from their OWN atlas page in a second pass.
     ///
     /// A cell quad samples one texture. The two pages are the same SIZE but a
@@ -2231,12 +2250,14 @@ private:
     std::vector<Rendering::OverlayInstance> m_overlays;
     std::vector<Rendering::OverlayInstance> m_boxFills;
     std::vector<Rendering::DecorationInstance> m_decorations;
+    std::vector<Rendering::GlyphInstance> m_glyphs;
     std::vector<Rendering::GlyphInstance> m_wideGlyphs;
     std::vector<Rendering::GlyphInstance> m_proportionalGlyphs;
     std::vector<Rendering::GlyphInstance> m_proportionalStrips;
     std::vector<Rendering::GlyphInstance> m_ligatureGlyphs;
     std::vector<Rendering::GlyphInstance> m_colorGlyphs;
     int m_cellCount = 0;
+    int m_glyphCount = 0;
     int m_wideGlyphCount = 0;
     int m_proportionalGlyphCount = 0;
     int m_proportionalStripCount = 0;
@@ -2611,6 +2632,7 @@ private:
     std::optional<Protocol::Sync::Viewport> m_sentViewport;
     std::optional<std::uint64_t> m_resizeCallID;
     std::vector<std::uint8_t> m_frame;
+    std::vector<std::uint8_t> m_localPointerInput;
     // The subscription's monotonically allocated identity, and how many whole
     // answers the host's listing has given.
     std::uint32_t m_sessionListRequestID = 0;
@@ -2681,6 +2703,7 @@ private:
     int m_imageWidth = 0;
     int m_imageHeight = 0;
     int m_glyphScale = 1;
+    std::optional<std::uint32_t> m_presentationTicks;
     bool m_hasUnheardBell = false;
     mutable std::string m_composedTitle;
     bool m_isFocused = true; // a page that never told us is not a page drawing an unfocused cursor

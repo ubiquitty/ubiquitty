@@ -132,6 +132,19 @@ public:
 
     bool rasterizeGlyph(std::uint32_t codePoint, Rendering::FontFace, std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
 
+    /// Draws a complete combining cluster through the browser's text shaper.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The grapheme's base and combining code points.
+    ///   - count: The number of code points.
+    ///   - face: The glyph's weight and slant selection.
+    ///   - weight: The requested font weight.
+    ///   - slotWidth: The coverage slot's width in device pixels.
+    ///   - slotHeight: The coverage slot's height in device pixels.
+    ///   - coverageOut: Caller-owned alpha coverage for the slot.
+    /// - Returns: Whether the complete cluster was rasterized.
+    bool rasterizeCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
+
     /// True whenever the host's text engine is usable.
     ///
     /// A browser's emoji face is the system's rather than the page's, so the
@@ -409,6 +422,7 @@ struct WebFontHost {
     int (*primaryFamily)(char* familyOut, int capacity) = nullptr;
     int (*measure)(int pixelSize, int firstCharacter, int characterCount, double* advances, int* ascent, int* descent, int* xHeight) = nullptr;
     int (*drawGlyph)(const char* family, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut) = nullptr;
+    int (*drawCluster)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut) = nullptr;
     int (*drawColorCluster)(const char* family, const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut) = nullptr;
     int (*measureProportional)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, double* advancesOut) = nullptr;
     int (*drawProportional)(const char* family, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut) = nullptr;

@@ -1,0 +1,38 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Core raster presentation</title>
+<canvas id="screen" width="4" height="2" style="width:400px;height:200px;image-rendering:pixelated"></canvas>
+<pre id="verdict">running</pre>
+<script type="module">
+import { WebGLRenderer } from '../../Source/Platform/Web/webgl.js';
+try {
+    const canvas = document.getElementById('screen');
+    const renderer = new WebGLRenderer(canvas);
+    const pixels = new Uint8ClampedArray([
+        255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255,
+        255,255,0,255, 255,0,255,255, 0,255,255,255, 31,63,127,255,
+    ]);
+    const check = () => {
+        renderer.presentRGBA(pixels, 4, 2);
+        const actual = new Uint8Array(pixels.length);
+        const gl = renderer.gl;
+        gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, actual);
+        for (let row = 0; row < 2; row++)
+            for (let byte = 0; byte < 16; byte++)
+                if (actual[(1-row)*16+byte] !== pixels[row*16+byte])
+                    throw new Error(`Raster differs at row ${row}, byte ${byte}`);
+        if (gl.getError() !== gl.NO_ERROR) throw new Error('WebGL error');
+    };
+    check();
+    await new Promise(requestAnimationFrame);
+    // A WebKit compositor must also receive this draw after the buffer has
+    // been presented once. Readback alone does not test canvas invalidation.
+    check();
+    window.rasterPresentationReady = true;
+    document.getElementById('verdict').textContent = 'OK: top-down Core pixels retained across presentation';
+} catch (error) {
+    document.getElementById('verdict').textContent = `ERROR: ${error.stack ?? error}`;
+}
+</script>

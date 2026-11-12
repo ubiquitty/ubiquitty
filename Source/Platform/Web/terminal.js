@@ -452,6 +452,9 @@ async function main(module) {
   const isFrameWithheld = module.cwrap('ubiquittyWebIsFrameWithheld', 'number', []);
   const cellInstances = module.cwrap('ubiquittyWebCellInstances', 'number', []);
   const cellInstanceCount = module.cwrap('ubiquittyWebCellInstanceCount', 'number', []);
+  const glyphInstances = module.cwrap('ubiquittyWebGlyphInstances', 'number', []);
+  const glyphInstanceCount = module.cwrap('ubiquittyWebGlyphInstanceCount', 'number', []);
+  const cursorTierGlyphCount = module.cwrap('ubiquittyWebCursorTierGlyphCount', 'number', []);
   const wideGlyphInstances = module.cwrap('ubiquittyWebWideGlyphInstances', 'number', []);
   const wideGlyphInstanceCount = module.cwrap('ubiquittyWebWideGlyphInstanceCount', 'number', []);
   const wideAtlasPixels = module.cwrap('ubiquittyWebWideAtlasPixels', 'number', []);
@@ -1532,6 +1535,8 @@ async function main(module) {
     const overlayCount = overlayInstanceCount();
     const boxFillBase = boxFillInstances();
     const boxFillCount = boxFillInstanceCount();
+    const glyphBase = glyphInstances();
+    const glyphCount = glyphInstanceCount();
     const wideBase = wideGlyphInstances();
     const wideCount = wideGlyphInstanceCount();
     const proportionalBase = proportionalGlyphInstances();
@@ -1556,6 +1561,8 @@ async function main(module) {
       boxFillBytes: boxFillCount > 0 ? module.HEAPU8.subarray(boxFillBase, boxFillBase + boxFillCount * 112) : null,
       boxFillCount,
       isBitmapFace: Boolean(frameUsesBitmapFace()),
+      glyphBytes: glyphCount > 0 ? module.HEAPU8.subarray(glyphBase, glyphBase + glyphCount * 64) : null,
+      glyphCount,
       wideGlyphBytes: wideCount > 0 ? module.HEAPU8.subarray(wideBase, wideBase + wideCount * 64) : null,
       wideGlyphCount: wideCount,
       proportionalGlyphBytes: proportionalCount > 0 ? module.HEAPU8.subarray(proportionalBase, proportionalBase + proportionalCount * 64) : null,
@@ -1568,6 +1575,7 @@ async function main(module) {
       colorGlyphCount,
       cursorTier: {
         cellCount: cursorTierCellCount(),
+        glyphCount: cursorTierGlyphCount(),
         wideGlyphCount: cursorTierWideGlyphCount(),
         proportionalGlyphCount: cursorTierProportionalGlyphCount(),
         proportionalStripCount: cursorTierProportionalStripCount(),
@@ -3613,6 +3621,13 @@ async function main(module) {
   // does: prevent the browser's default when the event was taken,
   // repaint when the selection or a highlight changed, and track the local
   // gesture Core opened or finished. The bytes go to the host.
+  const localPointerInput = module.cwrap('ubiquittyWebLocalPointerInput', 'number', []);
+  const localPointerInputLength = module.cwrap('ubiquittyWebLocalPointerInputLength', 'number', []);
+  function deliverLocalPointerInput() {
+    if (isMirroringHost || !localProgram) return;
+    const base = localPointerInput(), length = localPointerInputLength();
+    if (base && length > 0) localProgram.input(module.HEAPU8.slice(base, base + length));
+  }
   function routePointer(kind, button, event, isDragging) {
     const cell = pointerCell(event);
     // Under relative pointer lock Core reports the motion delta rather than a
@@ -3624,6 +3639,7 @@ async function main(module) {
       event.detail || 1, isDragging ? 1 : 0, cell.xInCells);
     const verdict = pointerVerdict();
     if (base && socket) sendFrame(base);
+    else deliverLocalPointerInput();
     if (verdict & VERDICT_OPENED_GESTURE) isDraggingSelection = true;
     if (verdict & VERDICT_FINISHED_GESTURE) isDraggingSelection = false;
     if (verdict & VERDICT_NEEDS_DISPLAY) paint();
@@ -3700,6 +3716,7 @@ async function main(module) {
       event.shiftKey ? 1 : 0, event.altKey ? 1 : 0, event.ctrlKey ? 1 : 0);
     const verdict = pointerVerdict();
     if (base && socket) sendFrame(base);
+    else deliverLocalPointerInput();
     if (verdict & VERDICT_NEEDS_DISPLAY) paint();
     if (verdict & VERDICT_CONSUMED) event.preventDefault();
   }, { passive: false });

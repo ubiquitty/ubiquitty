@@ -238,6 +238,41 @@ EM_JS(int, webFontDrawGlyph, (const char* familyPtr, int codePoint, double pixel
 });
 // clang-format on
 
+// Rasterize a grapheme in one shaping operation; combining marks have no
+// independent advance and must be placed by the face against their base.
+// clang-format off
+EM_JS(int, webFontDrawCluster, (const char* familyPtr, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut), {
+    const family = UTF8ToString(familyPtr);
+    const canvas = Module.ubiquittyFontCanvas;
+    const context = Module.ubiquittyFontContext;
+    if (!family || !context || count <= 0 || slotWidth <= 0 || slotHeight <= 0)
+        return 0;
+    if (canvas.width < slotWidth || canvas.height < slotHeight) {
+        canvas.width = Math.max(canvas.width, slotWidth);
+        canvas.height = Math.max(canvas.height, slotHeight);
+    }
+    let text = "";
+    for (let index = 0; index < count; ++index)
+        text += String.fromCodePoint(HEAPU32[(codePoints >> 2) + index]);
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.font = `${isItalic ? "italic " : ""}${cssWeight} ${pixelSize}px ${family}`;
+    context.textBaseline = "alphabetic";
+    context.textAlign = "left";
+    context.clearRect(0, 0, slotWidth, slotHeight);
+    context.fillStyle = "#fff";
+    const base = HEAPU32[codePoints >> 2];
+    const cursive = (base >= 0xFB50 && base <= 0xFDFF) || (base >= 0xFE70 && base <= 0xFEFC);
+    const advance = context.measureText(text).width;
+    if (cursive && advance > 0) context.scale(slotWidth / advance, 1);
+    context.fillText(text, 0, baseline);
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    const pixels = context.getImageData(0, 0, slotWidth, slotHeight).data;
+    for (let index = 0; index < slotWidth * slotHeight; ++index)
+        HEAPU8[coverageOut + index] = pixels[index * 4 + 3];
+    return 1;
+});
+// clang-format on
+
 // Measures a proportional run and reports each code point's natural advance.
 //
 // The browser has no glyph indices to give, so the seam's `glyph` field carries
@@ -556,6 +591,10 @@ int webFontDrawGlyph(const char* family, int codePoint, double pixelSize, double
 {
     return s_webFontHost.drawGlyph ? s_webFontHost.drawGlyph(family, codePoint, pixelSize, horizontalScale, verticalScale, cssWeight, isItalic, penX, baseline, slotWidth, slotHeight, coverageOut) : 0;
 }
+int webFontDrawCluster(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    return s_webFontHost.drawCluster ? s_webFontHost.drawCluster(family, codePoints, count, pixelSize, cssWeight, isItalic, baseline, slotWidth, slotHeight, coverageOut) : 0;
+}
 int webFontDrawColorCluster(const char* family, const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut)
 {
     return s_webFontHost.drawColorCluster ? s_webFontHost.drawColorCluster(family, codePoints, count, slotInPixels, pixelsOut) : 0;
@@ -587,6 +626,7 @@ int webFontPrimaryFamily(char*, int) { return 0; }
 int webFontMeasureGlyph(const char*, int, double, int, int, double*) { return 0; }
 int webFontMeasure(int, int, int, double*, int*, int*, int*) { return 0; }
 int webFontDrawGlyph(const char*, int, double, double, double, int, int, double, double, int, int, std::uint8_t*) { return 0; }
+int webFontDrawCluster(const char*, const std::uint32_t*, int, int, int, int, int, int, int, std::uint8_t*) { return 0; }
 int webFontDrawColorCluster(const char*, const std::uint32_t*, int, int, std::uint8_t*) { return 0; }
 int webFontMeasureProportional(const char*, const std::uint32_t*, int, int, int, double*) { return 0; }
 int webFontDrawProportional(const char*, const std::uint32_t*, const double*, const double*, int, int, double, int, int, int, int, std::uint8_t*) { return 0; }
@@ -1000,13 +1040,34 @@ bool WebFontRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::FontF
     // Drawn at the slot's left edge: a letter of a proportional primary face
     // is placed on screen by the row's layout, which puts the slot at its pen.
     const int cssWeight = cssWeightFor(face, weight, m_userAxes, m_weights);
-    if (webFontDrawGlyph(family.c_str(), static_cast<int>(codePoint), m_pixelSize, 1.0, 1.0, cssWeight, Rendering::isItalic(face) ? 1 : 0,
+    double horizontalScale = 1.0;
+    // Core's display row has already selected the Arabic contextual forms.
+    // Their joining edges occupy the cell's advance, including when the
+    // browser's fallback face has a narrower proportional advance.
+    const bool isCursiveForm = (codePoint >= 0xFB50 && codePoint <= 0xFDFF) || (codePoint >= 0xFE70 && codePoint <= 0xFEFC);
+    if (isCursiveForm) {
+        double advance = 0.0;
+        if (webFontMeasureProportional(family.c_str(), &codePoint, 1, m_pixelSize, cssWeight, &advance) == 1 && advance > 0.0)
+            horizontalScale = static_cast<double>(slotWidth) / advance;
+    }
+    if (webFontDrawGlyph(family.c_str(), static_cast<int>(codePoint), m_pixelSize, horizontalScale, 1.0, cssWeight, Rendering::isItalic(face) ? 1 : 0,
             0.0, baseline, slotWidth, slotHeight, coverageOut))
         return true;
 
     // No glyph in the host's face. Box drawing, powerline separators and the
     // symbol ranges are the common case, and the fallback carries all of them.
     return m_fallback.rasterizeGlyph(codePoint, face, weight, slotWidth, slotHeight, coverageOut);
+}
+
+bool WebFontRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    if (!m_isAvailable || !codePoints || count <= 0 || slotWidth <= 0 || slotHeight <= 0 || !coverageOut)
+        return m_fallback.rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
+    const std::string family = familyForCluster(codePoints, count, face, weight);
+    const int baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), slotHeight);
+    if (!family.empty() && webFontDrawCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeightFor(face, weight, m_userAxes, m_weights), Rendering::isItalic(face) ? 1 : 0, baseline, slotWidth, slotHeight, coverageOut))
+        return true;
+    return m_fallback.rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
 }
 
 bool WebFontRasterizer::rasterizeColorCluster(const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut)
