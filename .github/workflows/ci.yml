@@ -354,17 +354,27 @@ jobs:
           restore-keys: |
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-
             ccache-apple-${{ matrix.group }}-
+      - name: Install the conformance suite at the baseline revision
+        if: matrix.group == 'macos'
+        env:
+          ESCTEST2_COMMIT: 664be3cf2c1e3f06bc93a8bafb48a0db83c607db
+        run: |
+          expected="$(awk '/^# suite-commit / { print $3; exit }' Tests/Esctest/known-failing-macos-nowinops.txt)"
+          test -n "$expected"
+          test "${ESCTEST2_COMMIT:0:${#expected}}" = "$expected"
+          suite="$RUNNER_TEMP/esctest2"
+          git clone --quiet --no-checkout https://github.com/ThomasDickey/esctest2.git "$suite"
+          git -C "$suite" checkout --quiet --detach "$ESCTEST2_COMMIT"
+          echo "UBIQUITTY_ESCTEST=$suite" >> "$GITHUB_ENV"
       - name: Run the fail-fast Apple battery
         id: battery
         run: |
           # STAGES is this group's list of `--only <stage>` words, split on purpose.
           # shellcheck disable=SC2086
           python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py run apple --source-root "$GITHUB_WORKSPACE" $STAGES
-      # What the push hook runs on a Mac and this group's stages do not: the
-      # Kit's Swift renderer from clean and its framework consumer, the PGO
-      # bounds against the portable profile, and esctest2 against the built app;
-      # the host's builds, the symbol-fork check over them, and the style checks
-      # whose self-tests read the built test objects.
+      # Additional App gates: external conformance against the built macOS
+      # app, and the host consumers and style probes that need test objects.
+      # Kit owns its renderer and framework-consumer battery.
       - name: Push gates (${{ matrix.group }})
         if: matrix.families != ''
         env:
