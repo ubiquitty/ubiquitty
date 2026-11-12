@@ -130,6 +130,21 @@ PY
     [ "$found" -eq 1 ] || echo "        crash report: none written since the launch"
 }
 
+# A missing app verdict can be the simulator exiting, rather than an app
+# crash. Preserve the runtime's first failure before later launches obscure it.
+simulatorDiagnostics() {
+    echo "        simulator state:"
+    xcrun simctl list devices | grep -F "$DEVICE" | sed 's/^/          /'
+    echo "        CoreSimulator host log (last ten minutes):"
+    runWithTimeout 30 /usr/bin/log show --last 10m --style compact \
+        --predicate 'process == "CoreSimulatorService" OR process == "SimulatorTrampoline" OR process == "launchd_sim" OR process == "SimRenderServer"' \
+        2>&1 | tail -100 | sed 's/^/          /'
+    echo "        recent runtime crash reports:"
+    find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f -newer "$launchMarker" \
+        \( -name 'CoreSimulatorService*' -o -name 'launchd_sim*' -o -name 'SimRenderServer*' -o -name 'SimulatorTrampoline*' \) \
+        -print -exec head -c 12000 {} \; 2>/dev/null | sed 's/^/          /'
+}
+
 [ -d "$APP" ] || { echo "run-ios-smokes: app bundle not found: $APP (build it with ./Scripts/build-ios.sh --sdk iphonesimulator)" >&2; exit 2; }
 [ -f "$SRC" ] || { echo "run-ios-smokes: source not found: $SRC" >&2; exit 2; }
 command -v xcrun >/dev/null 2>&1 || { echo "run-ios-smokes: xcrun not on PATH" >&2; exit 2; }
@@ -213,9 +228,15 @@ for flag in "${FLAGS[@]}"; do
         if ! grep -qxE -- "$name: -- (PASS|FAIL)" <<<"$report"; then
             echo "        no verdict in the report: the smoke ended before reaching one"
             crashReportsSince "$launchMarker"
+            simulatorDiagnostics
         fi
         fail=$((fail + 1))
         failed_flags+=("$flag")
+        state="$(ubq_ios_device_lookup "$DEVICE_NAME")"
+        if [ "${state##* }" != Booted ]; then
+            echo "run-ios-smokes: simulator left Booted state; remaining smokes are unexecuted" >&2
+            break
+        fi
     fi
 done
 rm -f "$launchMarker" "$REPORT"
