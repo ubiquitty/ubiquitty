@@ -446,27 +446,27 @@ skipped=$(grep -cE "^Test Case '.*' skipped" "$LOG" 2>/dev/null || true)
 for line in $(grep -oE "^Test Case '.*' (passed|failed)" "$LOG" 2>/dev/null | sed 's/Test Case .-\[[^ ]* //;s/\]. /|/'); do
     printf '  %s\n' "$line" | sed 's/|passed/  ok/;s/|failed/  FAIL/'
 done
-# Each failed case's reason, however the log indents it: XCTest's issue
-# lines, and the runner's restart after a crash or a hang.
-grep -E ": error: -\[|Restarting after unexpected exit" "$LOG" 2>/dev/null | sed 's/^[[:space:]]*/        /'
-
-# Keep each failed case's actions and multiline accessibility diagnostics in
-# the job log. The error's first line alone drops the tree that explains why
-# a control was missing, and hosted runners retain no local build directory.
+# Keep multiline assertion diagnostics in the job log: the first line alone
+# drops the accessibility tree explaining a missing control. Omit automation's
+# action trace, which can include text entered into the app.
 /usr/bin/python3 - "$LOG" <<'PY'
+import re
 import sys
 
-case = []
+diagnostics = []
+is_issue = False
 with open(sys.argv[1]) as log:
     for line in log:
-        if line.startswith("Test Case '") and " started" in line:
-            case = []
-        case.append(line)
-        if line.startswith("Test Case '") and " failed" in line:
-            print("".join(case), end="")
-            case = []
-        elif line.startswith("Test Case '") and (" passed" in line or " skipped" in line):
-            case = []
+        if ": error: -[" in line or "Restarting after unexpected exit" in line:
+            is_issue = True
+        elif re.match(r"\s*t = |Test Case '|\d{4}-\d\d-\d\d ", line):
+            is_issue = False
+        if is_issue:
+            diagnostics.append(line)
+text = "".join(diagnostics)
+text = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)",
+              "[private key omitted]", text, flags=re.DOTALL)
+print(text, end="")
 PY
 
 echo "run-ios-ui-tests: $passed passed, $failed failed, $skipped skipped ($expected selected, $declaredCases declared)"
