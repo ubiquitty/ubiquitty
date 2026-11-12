@@ -703,7 +703,7 @@ extension TerminalWindowController {
     ///
     /// A link that named a line (`#L12`) opens the copy at that line in the
     /// reader's `[links] line_handler`, as it opens a file of this machine
-    /// (``LinkOpener/openDownloadedCopy(_:atLine:column:)``). With no handler,
+    /// (``LinkOpener/openDownloadedCopy(_:atLine:column:from:ifUnhandled:)``). With no handler,
     /// or one that cannot be started, the copy is opened or revealed as any
     /// fetched file is.
     ///
@@ -718,13 +718,22 @@ extension TerminalWindowController {
         guard let landed = QuarantinedDownload.land(bytes: answer.bytes, suggestedName: answer.requestedPath) else {
             return nil
         }
-        if LinkOpener.openDownloadedCopy(landed, atLine: answer.requestedLine, column: answer.requestedColumn) {
-            return landed
+        let openWithoutLineHandler: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            if QuarantinedDownload.isSafeToOpen(landed) {
+                self.openDownload(landed)
+            } else {
+                self.revealDownload(landed)
+            }
         }
-        if QuarantinedDownload.isSafeToOpen(landed) {
-            openDownload(landed)
-        } else {
-            revealDownload(landed)
+        if !LinkOpener.openDownloadedCopy(
+            landed,
+            atLine: answer.requestedLine,
+            column: answer.requestedColumn,
+            from: window,
+            ifUnhandled: openWithoutLineHandler
+        ) {
+            openWithoutLineHandler()
         }
         return landed
     }

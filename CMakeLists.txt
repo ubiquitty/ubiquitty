@@ -646,6 +646,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         Source/Platform/iOS/App/TerminalAccessoryKey.swift
         Source/Platform/iOS/App/TerminalKeyboardAccessory.swift
         Source/Platform/iOS/App/SSHCarrierClient.swift
+        Source/Platform/iOS/App/SSHInboundBuffer.swift
         Source/Platform/iOS/App/SSHFailurePresentation.swift
         Source/Platform/iOS/App/QUICBootstrapProbe.swift
         Source/Platform/iOS/App/QUICBootstrapClosePolicy.swift

@@ -12,17 +12,16 @@ import UbiquittySSH
 /// surface — so this file has no model, no grid and no policy in it beyond the
 /// host-key verdict, which it asks Core for rather than deciding.
 final class SSHCarrierClient: SSHCarrierDelegate, @unchecked Sendable {
-    /// Called on the carrier's own thread with bytes from the remote.
-    var onBytes: ((UnsafeRawBufferPointer) -> Void)?
-    /// Called on the carrier's own thread when the host is reached, before
-    /// the handshake and sign-in.
-    var onTransportOpen: (() -> Void)?
-    /// Called on the carrier's own thread when the link opens.
-    var onConnect: (() -> Void)?
-    /// Called on the carrier's own thread when the link finishes, with why
+    /// Delivers ordered bounded batches on the main actor; false waits for a surface.
+    var onBytes: (@MainActor (Data) -> Bool)?
+    /// Called on the main actor when the host is reached, before sign-in.
+    var onTransportOpen: (@MainActor () -> Void)?
+    /// Called on the main actor when the link opens, before its output.
+    var onConnect: (@MainActor () -> Void)?
+    /// Called on the main actor after the last admitted batch, with why
     /// the host was never reached when that is what failed.
     var onClose:
-        ((_ isFailure: Bool, _ reason: String, _ reachFailure: SSHReachFailure?, _ classification: SSHCloseClassification?) -> Void)?
+        (@MainActor (_ isFailure: Bool, _ reason: String, _ reachFailure: SSHReachFailure?, _ classification: SSHCloseClassification?) -> Void)?
 
     /// The fingerprint the server offered, recorded during validation so a
     /// caller can pin it only once a connection actually succeeded.
@@ -41,6 +40,16 @@ final class SSHCarrierClient: SSHCarrierDelegate, @unchecked Sendable {
 
     private let lock = NSLock()
     private var carrier: SSHCarrier?
+    private let inbound = SSHInboundBuffer()
+    private let readingControl = DispatchQueue(label: "app.ubiquitty.ssh-inbound-reading")
+    private var isReadingUpdateScheduled = false
+    private struct Close {
+        let isFailure: Bool
+        let reason: String
+        let reachFailure: SSHReachFailure?
+        let classification: SSHCloseClassification?
+    }
+    private var pendingClose: Close?
 
     init(
         host: String,
@@ -109,10 +118,79 @@ final class SSHCarrierClient: SSHCarrierDelegate, @unchecked Sendable {
     /// Closes the connection and quiesces it.
     func stop() {
         lock.lock()
+        inbound.cancel()
         let carrier = self.carrier
         self.carrier = nil
+        pendingClose = nil
         lock.unlock()
         carrier?.stop()
+    }
+
+    /// Retries admitted output when the model acquires a drawing surface.
+    @MainActor
+    func resumeInboundDelivery() {
+        apply(inbound.consumerBecameReady())
+    }
+
+    private func apply(_ action: SSHInboundBuffer.Action) {
+        if action.changesReading {
+            updateReading()
+        }
+        if action.schedulesDelivery {
+            DispatchQueue.main.async { [weak self] in self?.deliverInbound() }
+        }
+        if action.overflows {
+            lock.lock()
+            let carrier = self.carrier
+            lock.unlock()
+            carrier?.fail(reason: "The SSH server exceeded the terminal's inbound buffer limit.")
+        }
+    }
+
+    private func updateReading() {
+        lock.lock()
+        guard !isReadingUpdateScheduled else {
+            lock.unlock()
+            return
+        }
+        isReadingUpdateScheduled = true
+        lock.unlock()
+        // Reconcile off the delegate's NIO loop, with no lock held over a
+        // resume that can deliver more bytes. One worker owns every edge.
+        readingControl.async { [weak self] in
+            guard let self else { return }
+            lock.lock()
+            let shouldSuspend = inbound.shouldSuspendReading
+            let carrier = self.carrier
+            // This queue is never NIO's event loop: these calls only post its
+            // read update. Keep stop/cancel ordered with that post.
+            if shouldSuspend {
+                carrier?.suspendReading()
+            } else {
+                carrier?.resumeReading()
+            }
+            isReadingUpdateScheduled = false
+            lock.unlock()
+            // A producer/consumer may have changed the desired state while
+            // this worker was active and found its wake already booked.
+            if inbound.shouldSuspendReading != shouldSuspend { updateReading() }
+        }
+    }
+
+    @MainActor
+    private func deliverInbound() {
+        if let batch = inbound.takeBatch() {
+            let delivered = onBytes?(batch) ?? false
+            apply(inbound.completeBatch(delivered: delivered))
+        } else if inbound.canDeliverClose {
+            lock.lock()
+            let closed = pendingClose
+            pendingClose = nil
+            lock.unlock()
+            if let closed {
+                onClose?(closed.isFailure, closed.reason, closed.reachFailure, closed.classification)
+            }
+        }
     }
 
     /// The SHA-256 fingerprint of a presented host key, in Core's spelling.
@@ -136,15 +214,15 @@ final class SSHCarrierClient: SSHCarrierDelegate, @unchecked Sendable {
     // MARK: - SSHCarrierDelegate
 
     func sshCarrierDidOpenTransport(_ carrier: SSHCarrier) {
-        onTransportOpen?()
+        DispatchQueue.main.async { [weak self] in self?.onTransportOpen?() }
     }
 
     func sshCarrierDidConnect(_ carrier: SSHCarrier) {
-        onConnect?()
+        DispatchQueue.main.async { [weak self] in self?.onConnect?() }
     }
 
     func sshCarrier(_ carrier: SSHCarrier, didReceive bytes: UnsafeRawBufferPointer) {
-        onBytes?(bytes)
+        apply(inbound.append(bytes))
     }
 
     func sshCarrier(_ carrier: SSHCarrier, shouldKeepWaitingAfter reachFailure: SSHReachFailure?) -> Bool {
@@ -164,6 +242,9 @@ final class SSHCarrierClient: SSHCarrierDelegate, @unchecked Sendable {
         reason: String,
         reachFailure: SSHReachFailure?
     ) {
-        onClose?(isFailure, reason, reachFailure, carrier.closeClassification)
+        lock.lock()
+        pendingClose = Close(isFailure: isFailure, reason: reason, reachFailure: reachFailure, classification: carrier.closeClassification)
+        lock.unlock()
+        apply(inbound.finish())
     }
 }

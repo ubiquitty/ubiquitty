@@ -5833,8 +5833,9 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
     ///   - target: The hovered link's target, or nil for none.
     ///   - surface: The pane the link is in, or nil when no pane is asking.
     func showLinkPreview(_ target: String?, from surface: TerminalSurface? = nil) {
-        let host = surface.flatMap { $0.isRemoteAttached ? $0.remoteFileHost : nil }
-        LinkOpener.showPreview(forTarget: target, onHost: host, in: window)
+        let host = surface.flatMap { $0.drive.isFilesystemLocal ? nil : $0.remoteFileHost }
+        let isPath = surface?.hoveredLinkRun?.isFilePath == true
+        LinkOpener.showPreview(forTarget: target, onHost: host, isPath: isPath, in: window)
     }
 
     /// Executes the whole cue one bell asked for.

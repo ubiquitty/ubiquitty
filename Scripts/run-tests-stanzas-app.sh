@@ -42,6 +42,20 @@ if wanted ui_test_pasteboard_isolation; then
     fi
 fi
 
+# The iOS SSH inbound budget and delivery state, without a carrier or UIKit.
+if [ "$(uname -s)" = "Darwin" ] && wanted test_ssh_inbound_buffer; then
+    NAME=test_ssh_inbound_buffer
+    OUT_BIN="$OUT/$NAME"
+    mkdir -p "$OUT"
+    echo "=== $NAME ==="
+    xcrun swiftc -swift-version 6 -warnings-as-errors -parse-as-library \
+        "$ROOT/Tests/Platform/test_ssh_inbound_buffer.swift" \
+        "$ROOT/Source/Platform/iOS/App/SSHInboundBuffer.swift" \
+        -o "$OUT_BIN" || exit 1
+    "$OUT_BIN" || exit 1
+    RAN=$((RAN + 1))
+fi
+
 # Settings search model — the first SWIFT host test: pins SettingsModel.swift's
 # settingsSearchHits() flatten (pane rows -> hits with rowID + the detail ??
 # card-title fallback; .custom -> one title-level hit carrying its

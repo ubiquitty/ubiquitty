@@ -636,7 +636,7 @@ enum RemoteFileScenarios {
         configureLineHandler("ubiquitty-no-such-editor-\(UUID().uuidString) {path}:{line}")
         let unstarted = land("/srv/app/run.sh", line: 7, column: 0)
         t.expect(
-            unstarted.map { revealedFiles == [$0] } == true,
+            t.wait(until: { unstarted.map { revealedFiles == [$0] } == true }, timeout: 4),
             desc: "and with one that cannot start, a script is revealed as any fetched script is (revealed \(revealedFiles.count))"
         )
         let noLine = land("/srv/app/other.txt", line: 0, column: 0)

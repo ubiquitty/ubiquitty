@@ -218,9 +218,14 @@ enum LinkScenarios {
 
                 // Command held: a bare path is a guess the terminal made, and
                 // it is spent on a click only when the reader asks by name.
-                surface.updateLinkAffordance(atViewPoint: onPresent, isCommandHeld: true)
                 t.expect(
-                    surface.isShowingLinkAffordance,
+                    t.wait(
+                        until: {
+                            surface.updateLinkAffordance(atViewPoint: onPresent, isCommandHeld: true)
+                            return surface.isShowingLinkAffordance
+                        },
+                        timeout: 4
+                    ),
                     desc: "the path that names a file offers the hand"
                 )
                 t.expect(
@@ -237,17 +242,35 @@ enum LinkScenarios {
 
                 t.expect(
                     surface.openLink(atViewPoint: onPresent, isCommandHeld: true),
-                    desc: "a Command-click on the present path opens"
+                    desc: "a Command-click on the present path admits its file check"
+                )
+                t.expect(surface.isFileLinkClickPendingForTesting, desc: "the click waits independently of hover")
+                t.expect(
+                    surface.openLink(atViewPoint: onAbsent, isCommandHeld: true),
+                    desc: "a second click is consumed while the first is pending"
+                )
+                surface.clearLinkAffordance()
+                t.expect(
+                    t.wait(until: { !surface.isFileLinkClickPendingForTesting }, timeout: 4),
+                    desc: "the first click finishes after hover is cleared"
                 )
                 t.expect(
                     opened.last?.hasSuffix("present.txt") == true,
                     desc: "and it opened the file the path named (\(opened.last ?? "none"))"
                 )
                 t.expect(
-                    !surface.openLink(atViewPoint: onAbsent, isCommandHeld: true),
-                    desc: "a Command-click on the absent one opens nothing"
+                    surface.openLink(atViewPoint: onAbsent, isCommandHeld: true),
+                    desc: "a Command-click on the absent path admits its file check"
+                )
+                t.expect(
+                    t.wait(until: { !surface.isFileLinkClickPendingForTesting }, timeout: 4),
+                    desc: "the absent path's file check finishes"
                 )
                 t.expect(opened.count == 1, desc: "so exactly one open happened (\(opened.count))")
+                t.expect(
+                    surface.openedLinksForTesting.count == 1 && surface.openedLinksForTesting.last == opened.last,
+                    desc: "only a real client-hook call is recorded as opened"
+                )
             }
         }
 
@@ -579,7 +602,7 @@ enum LinkScenarios {
                     desc: "a click on a line link whose handler is on no PATH directory is still handled"
                 )
                 t.expect(
-                    handed == ["reveal " + canonicalScript],
+                    t.wait(until: { handed == ["reveal " + canonicalScript] }, timeout: 4),
                     desc: "by what the link does with no line handler (\(handed))"
                 )
                 handed.removeAll()
@@ -911,10 +934,13 @@ enum LinkScenarios {
                 defer { LinkOpener.workspaceForTesting = previousWorkspace }
                 t.expect(
                     LinkOpener.open("file:///System/Applications/Calculator.app", from: nil),
-                    desc: "showing an application in Finder counts as handling the click"
+                    desc: "inspection of an application is admitted"
                 )
+                t.expect(t.wait(until: { handed.count == 1 }, timeout: 4), desc: "the application is shown in Finder after inspection")
                 t.expect(LinkOpener.open(alias.absoluteString, from: nil), desc: "and so does showing an alias")
+                t.expect(t.wait(until: { handed.count == 2 }, timeout: 4), desc: "the alias is shown after inspection")
                 t.expect(LinkOpener.open(notes.absoluteString, from: nil), desc: "a document is handled")
+                t.expect(t.wait(until: { handed.count == 3 }, timeout: 4), desc: "the document is opened after inspection")
                 t.expect(
                     !LinkOpener.open("file:///System/Applications/\u{200B}Calculator.app", from: nil),
                     desc: "a refused link reports nothing opened"
@@ -973,6 +999,20 @@ enum LinkScenarios {
                     LinkOpener.previewText(forTarget: "https://example.com/plain") == "https://example.com/plain",
                     desc: "an ordinary web link is shown as written"
                 )
+                for path in ["~/src/notes.txt", "/srv/project/notes.txt"] {
+                    t.expect(
+                        LinkOpener.previewText(forTarget: path, onHost: "build-box", isPath: true) == path,
+                        desc: "a typed host path stays on the host without local home expansion (\(path))"
+                    )
+                    t.expect(
+                        LinkOpener.previewText(forTarget: path, onHost: "", isPath: true) == refused + path,
+                        desc: "an unknown host does not resolve its bare path on this machine"
+                    )
+                    t.expect(
+                        LinkOpener.previewText(forTarget: path, onHost: "build-box") == refused + path,
+                        desc: "a declared invalid URI is not inferred to be a bare file path"
+                    )
+                }
                 // A joiner between two ASCII characters joins nothing and
                 // draws as nothing, so the plate spells it out: the file and
                 // the page it names are not the ones that read the same
@@ -1150,6 +1190,104 @@ enum LinkScenarios {
                 t.expect(
                     surface.drive.wideLinkScanCount > sweepsBefore,
                     desc: "which is the hover that pays for the sweep"
+                )
+            }
+        }
+
+        UBUITestRegister("swift_shell_file_click_inspection_does_not_block_or_outlive_its_window") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                let saved = String(Ubiquitty.Preferences.liveDocument().pointee)
+                defer { t.restoreConfiguration(saved) }
+                configureLineHandler(over: saved, nil)
+                let file = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("ubq-click-inspection-\(UUID().uuidString).txt")
+                guard FileManager.default.createFile(atPath: file.path, contents: Data("notes\n".utf8)) else {
+                    t.expect(false, desc: "the scenario could write its local document")
+                    return
+                }
+                defer { try? FileManager.default.removeItem(at: file) }
+                guard let shell = TerminalWindowController.spawn(), let window = shell.window else {
+                    t.expect(false, desc: "a source window opens")
+                    return
+                }
+                defer { window.close() }
+                var handed: [String] = []
+                let previousWorkspace = LinkOpener.workspaceForTesting
+                LinkOpener.workspaceForTesting = { handed.append(described($0)) }
+                defer { LinkOpener.workspaceForTesting = previousWorkspace }
+
+                let release = LinkOpener.holdFileInspectionForTesting()
+                defer { release() }
+                t.expect(LinkOpener.open(file.absoluteString, from: window), desc: "the first file click is admitted")
+                t.expect(handed.isEmpty, desc: "a blocked inspection has not launched or revealed anything")
+                var refusedRepeats = 0
+                for _ in 0..<64 where !LinkOpener.open(file.absoluteString, from: window) {
+                    refusedRepeats += 1
+                }
+                t.expect(refusedRepeats == 64, desc: "repeated clicks cannot accumulate filesystem work")
+                t.expect(LinkOpener.admittedFileInspectionCountForTesting == 1, desc: "only one file inspection is retained")
+                t.expect(handed == Array(repeating: "refuse", count: 64), desc: "busy clicks are explicitly refused")
+                handed.removeAll()
+
+                var mainActorAdvanced = false
+                DispatchQueue.main.async { mainActorAdvanced = true }
+                t.expect(
+                    t.wait(until: { mainActorAdvanced }, timeout: 1),
+                    desc: "the main run loop continues while filesystem inspection is held"
+                )
+                t.expect(
+                    LinkOpener.open("https://example.com/available", from: window),
+                    desc: "web links still open while a file is pending"
+                )
+                t.expect(handed == ["open /available"], desc: "a non-file link does not wait for the filesystem worker")
+                handed.removeAll()
+                window.close()
+                release()
+                LinkOpener.drainFileInspectionForTesting()
+                t.expect(
+                    t.wait(until: { LinkOpener.admittedFileInspectionCountForTesting == 0 }, timeout: 4),
+                    desc: "the canceled window's admitted lookup eventually retires"
+                )
+                t.expect(handed.isEmpty, desc: "a late answer from the closed window launches nothing")
+
+                t.expect(LinkOpener.open(file.absoluteString, from: nil), desc: "the next file click is admitted after retirement")
+                let expected = "open " + file.resolvingSymlinksInPath().path
+                t.expect(
+                    t.wait(until: { handed == [expected] }, timeout: 4),
+                    desc: "an uncanceled inspection still opens the checked document (\(handed))"
+                )
+
+                // A configured file handler precedes built-in URI validation,
+                // but its executable lookup uses the same bounded worker.
+                handed.removeAll()
+                let recorded = file.path + ".configured"
+                defer { try? FileManager.default.removeItem(atPath: recorded) }
+                let configuredURI = "file://elsewhere.invalid/srv/notes.txt?query#fragment"
+                configureLinkHandler(over: saved, scheme: "file", command: "ln -s %s \(recorded)")
+                let releaseHandler = LinkOpener.holdFileInspectionForTesting()
+                defer { releaseHandler() }
+                t.expect(LinkOpener.open(configuredURI, from: nil), desc: "configured file handler preparation is admitted")
+                t.expect(
+                    LinkOpener.admittedFileInspectionCountForTesting == 1,
+                    desc: "the configured file handler occupies the bounded worker"
+                )
+                t.pump(0.1)
+                t.expect(
+                    (try? FileManager.default.destinationOfSymbolicLink(atPath: recorded)) == nil && handed.isEmpty,
+                    desc: "configured file preparation does not launch or fall back while its worker is held"
+                )
+                releaseHandler()
+                t.expect(waitForHandlerOutput(at: recorded, pumpingWith: t), desc: "the prepared file handler starts after release")
+                t.expect(
+                    (try? FileManager.default.destinationOfSymbolicLink(atPath: recorded)) == configuredURI && handed.isEmpty,
+                    desc: "the configured handler receives the entire URI before built-in file validation"
+                )
+                configureLinkHandler(over: saved, scheme: "file", command: "ubiquitty-no-such-file-handler-\(UUID().uuidString) %s")
+                t.expect(LinkOpener.open(file.absoluteString, from: nil), desc: "a missing configured file handler is admitted")
+                t.expect(
+                    t.wait(until: { handed == [expected] }, timeout: 4),
+                    desc: "failed configured file launch falls back once to the checked file opener"
                 )
             }
         }

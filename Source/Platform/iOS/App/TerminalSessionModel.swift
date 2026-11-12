@@ -847,7 +847,6 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
     /// than waiting out a backoff measured for a flaky link.
     private var pathWatch: NetworkPathWatch?
     private weak var surface: TerminalSurface?
-    private var pendingInbound: [UInt8] = []
 
     /// The surface for this session, built on the first ask.
     ///
@@ -1000,11 +999,7 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
         // Before the held bytes, so the first frame a person sees is already
         // themed rather than repainting a moment later.
         applyThemeToSurface()
-        if !pendingInbound.isEmpty {
-            surface.feed(Data(pendingInbound))
-            surface.serviceIngestEvents()
-            pendingInbound.removeAll()
-        }
+        carrier?.resumeInboundDelivery()
         refreshGround()
         hasSelection = surface.hasSelection
         // A pane reports its position only when it moves, and one taken up
@@ -2369,36 +2364,26 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
             pinnedFingerprint: record.pinnedHostKeyFingerprint,
             terminalType: "xterm-256color"
         )
-        // The carrier answers on its own thread; the surface and everything
-        // published here belong to the main actor, so each hop is explicit.
+        // The client serializes lifecycle and bounded output delivery on main.
         client.onTransportOpen = { [weak self, weak client] in
-            Task { @MainActor in
-                guard let self, let client, self.carrier === client else { return }
-                self.noteReached()
-            }
+            guard let self, let client, self.carrier === client else { return }
+            self.noteReached()
         }
         client.onConnect = { [weak self, weak client] in
-            Task { @MainActor in
-                guard let self, let client, self.carrier === client else { return }
-                self.noteSignedIn()
-                self.connectionLog.step(String(localized: "Started a login shell"), .succeeded)
-                self.isConnected = true
-                self.statusDetail = "Connected"
-                self.watchTheNetworkPath()
-            }
+            guard let self, let client, self.carrier === client else { return }
+            self.noteSignedIn()
+            self.connectionLog.step(String(localized: "Started a login shell"), .succeeded)
+            self.isConnected = true
+            self.statusDetail = "Connected"
+            self.watchTheNetworkPath()
         }
         client.onBytes = { [weak self, weak client] bytes in
-            let copy = Array(bytes.bindMemory(to: UInt8.self))
-            Task { @MainActor in
-                guard let self, let client, self.carrier === client else { return }
-                self.receive(copy)
-            }
+            guard let self, let client, self.carrier === client else { return false }
+            return self.receive(bytes)
         }
         client.onClose = { [weak self, weak client] isFailure, reason, reachFailure, classification in
-            Task { @MainActor in
-                guard let self, let client, self.carrier === client else { return }
-                self.finish(isFailure: isFailure, reason: reason, reachFailure: reachFailure, classification: classification)
-            }
+            guard let self, let client, self.carrier === client else { return }
+            self.finish(isFailure: isFailure, reason: reason, reachFailure: reachFailure, classification: classification)
         }
         carrier = client
         // The surface's session has no stream of its own over SSH, so
@@ -2773,7 +2758,6 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
         let stoppedCarrier = carrier
         carrier = nil
         stoppedCarrier?.stop()
-        pendingInbound.removeAll()
         for pane in paneSurfaces.values where pane !== ownedSurface { pane.drive.close() }
         paneSurfaces.removeAll()
         panes.removeAll()
@@ -2853,13 +2837,11 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
         surface?.transmitAsUserInput(text)
     }
 
-    private func receive(_ bytes: [UInt8]) {
-        guard let surface else {
-            pendingInbound.append(contentsOf: bytes)
-            return
-        }
-        surface.feed(Data(bytes))
+    private func receive(_ bytes: Data) -> Bool {
+        guard let surface else { return false }
+        surface.feed(bytes)
         surface.serviceIngestEvents()
+        return true
     }
 
     /// Records how the connection ended.
