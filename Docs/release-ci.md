@@ -75,8 +75,8 @@ removes the key file after the job.
 The two repository variables `PGO_LINUX_X86_64_IMAGE` and
 `PGO_LINUX_ARM64_IMAGE` name native OCI images by manifest digest, for example
 `ghcr.io/ubiquitty/pgo-toolchains@sha256:...`. Make the exact training images
-available in that registry before the first tagged build. The x86 image is on
-hub; the ARM image is in this Mac's OrbStack. Their expected configuration
+available in that registry before the first tagged build. The images are kept
+in the corresponding native trainers' Docker stores. Their expected configuration
 digests are recorded in Core's matching `.trained-toolchain` files.
 
 The release job selects the trainer's Docker image store: classic on x86_64,
