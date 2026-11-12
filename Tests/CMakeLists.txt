@@ -26,4 +26,8 @@ set(shell_snapshots_SKIP_REGULAR_EXPRESSION
     "(^|\n)SKIP: snapshots: explicitly disabled with SNAPSHOT=skip(\n|$)")
 set(shell_snapshots_TIMEOUT 2400)
 ubiquitty_schedule_shell_stanzas(DRIVER "${_ubq_app_shell_driver}")
+add_test(NAME test_ios_sync_driver
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/Tests/Tools/test_ios_sync_conformance.py")
+ubiquitty_set_test_entry_properties(test_ios_sync_driver)
+
 ubiquitty_finish_host_tests()

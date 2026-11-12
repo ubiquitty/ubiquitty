@@ -101,9 +101,6 @@ CRYPTO="$QUIC_PREFIX/iphonesimulator/lib/libcrypto.a"
     exit 2
 }
 
-ubq_ios_device_acquire run-ios-sync-conformance || exit 2
-DEVICE="$UBQ_IOS_DEVICE"
-
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
@@ -111,6 +108,7 @@ echo "run-ios-sync-conformance: ${#TESTS[@]} test(s) built for iOS, run on $DEVI
 pass=0
 fail=0
 failed=()
+built=()
 for source in "${TESTS[@]}"; do
     name="$(basename "$source" .cpp)"
     binary="$STAGE/$name"
@@ -124,6 +122,16 @@ for source in "${TESTS[@]}"; do
         failed+=("$name")
         continue
     fi
+    built+=("$name")
+done
+
+# Acquire the simulator for execution, after the compiler and linker finish.
+if [ "${#built[@]}" -gt 0 ]; then
+    ubq_ios_device_acquire run-ios-sync-conformance || exit 2
+    DEVICE="$UBQ_IOS_DEVICE"
+fi
+for name in "${built[@]}"; do
+    binary="$STAGE/$name"
     if out="$(xcrun simctl spawn "$DEVICE" "$binary" 2>&1)"; then
         printf '  ok    %s\n' "$name"
         pass=$((pass + 1))
