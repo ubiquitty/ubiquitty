@@ -161,8 +161,15 @@ done < <(grep -oE '"(--smoke[a-z0-9-]+)"' "$SRC" | grep -oE -- '--smoke[a-z0-9-]
 
 ubq_ios_device_acquire run-ios-smokes || exit 2
 DEVICE="$UBQ_IOS_DEVICE"
-xcrun simctl install "$DEVICE" "$APP" >/dev/null 2>&1 \
-    || { echo "run-ios-smokes: could not install $APP on $DEVICE_NAME" >&2; exit 2; }
+installOutput="$(xcrun simctl install "$DEVICE" "$APP" 2>&1)"
+installStatus=$?
+if [ "$installStatus" -ne 0 ]; then
+    echo "run-ios-smokes: could not install $APP on $DEVICE_NAME (exit $installStatus)" >&2
+    printf '%s\n' "$installOutput" >&2
+    xcrun simctl list runtimes >&2
+    /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist" >&2
+    exit 2
+fi
 
 echo "run-ios-smokes: $BUNDLE_ID on $DEVICE_NAME — ${#FLAGS[@]} tests, ${TIMEOUT}s each"
 warmupStart=$SECONDS

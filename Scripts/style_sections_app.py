@@ -77,7 +77,10 @@ SECTIONS = (
     {
         "title": 'every GTK smoke passes and prints an agreeing verdict (Scripts/check-linux-smokes.sh)',
         "after": 'every content gate reaches a new file (Scripts/check-gate-subjects.sh)',
-        "kind": "gate",
+        "kind": "deferred",
+        "to": '"Linux battery (frontend)"',
+        "why": 'the required linux-smokes stage runs every GTK smoke against the '
+               'frontend built in that job; a source or unit-test job has no GTK application',
         "gate": 'check-linux-smokes.sh',
         "command": ['./Scripts/check-linux-smokes.sh'],
         "ok": 'all',
@@ -88,7 +91,10 @@ SECTIONS = (
         "title": 'every macOS smoke, or the frontend files a skip left uncovered '
                  '(Scripts/check-macos-smokes.py)',
         "after": 'every GTK smoke passes and prints an agreeing verdict (Scripts/check-linux-smokes.sh)',
-        "kind": "gate",
+        "kind": "deferred",
+        "to": '"Apple battery (macos)"',
+        "why": 'the required macos-smokes stage invokes this same gate against '
+               'the application built in that job',
         "gate": 'check-macos-smokes.py',
         "command": ['python3', './Scripts/check-macos-smokes.py'],
         "ok": 'all',

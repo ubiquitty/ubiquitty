@@ -37,6 +37,25 @@ INPUTS = {
 }
 
 
+class PlatformSmokeOwnership(unittest.TestCase):
+    def test_deferred_smokes_have_required_jobs_that_run_their_subject(self):
+        spec = importlib.util.spec_from_file_location("app_style", ROOT / "Scripts/style_sections_app.py")
+        table = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(table)
+        rows = {row.get("gate"): row for row in table.SECTIONS}
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        battery = (CORE_ROOT / "Scripts/ci_batteries.py").read_text()
+        for gate, stage, job in (("check-linux-smokes.sh", "linux-smokes", "Linux battery (frontend)"),
+                                  ("check-macos-smokes.py", "macos-smokes", "Apple battery (macos)")):
+            with self.subTest(gate=gate):
+                self.assertEqual(rows[gate]["kind"], "deferred")
+                self.assertEqual(rows[gate]["to"], '"' + job + '"')
+                self.assertIn("--only " + stage, workflow)
+                self.assertIn('Stage("' + stage + '"', battery)
+        self.assertIn("Scripts/check-macos-smokes.py", battery)
+        self.assertIn("Scripts/run-linux-smokes.sh", battery)
+
+
 class GTKGateInputs(unittest.TestCase):
     def setUp(self):
         spec = importlib.util.spec_from_file_location("gate_scopes", CORE_ROOT / "Scripts/check-gate-scopes.py")
