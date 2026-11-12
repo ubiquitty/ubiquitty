@@ -1037,10 +1037,9 @@ final class TerminalSessionModel: TerminalSurfaceObserver {
         guard let surface else { return }
         let snapshot = surface.drive.readSnapshot()
         let color = UIColor(
-            red: CGFloat(snapshot.defaultBackgroundRed),
+            terminalRed: CGFloat(snapshot.defaultBackgroundRed),
             green: CGFloat(snapshot.defaultBackgroundGreen),
-            blue: CGFloat(snapshot.defaultBackgroundBlue),
-            alpha: 1
+            blue: CGFloat(snapshot.defaultBackgroundBlue)
         )
         if !color.isEqual(groundColor) {
             groundColor = color
@@ -4119,7 +4118,24 @@ extension UIColor {
     ///
     /// - Parameter tint: The tint Core folded.
     convenience init(ground tint: Ubiquitty.Runtime.ChromeTint) {
-        self.init(red: CGFloat(tint.red), green: CGFloat(tint.green), blue: CGFloat(tint.blue), alpha: 1)
+        self.init(terminalRed: CGFloat(tint.red), green: CGFloat(tint.green), blue: CGFloat(tint.blue))
+    }
+
+    /// Terminal channels read in the configured presentation colour space.
+    ///
+    /// - Parameters:
+    ///   - terminalRed: The red channel.
+    ///   - green: The green channel.
+    ///   - blue: The blue channel.
+    convenience init(terminalRed: CGFloat, green: CGFloat, blue: CGFloat) {
+        let usesDisplayP3 =
+            Ubiquitty.Preferences.Effective.imagePresentationColorSpace(Ubiquitty.Preferences.values().pointee)
+            == Ubiquitty.Image.PresentationColorSpace.DisplayP3
+        if usesDisplayP3 {
+            self.init(displayP3Red: terminalRed, green: green, blue: blue, alpha: 1)
+        } else {
+            self.init(red: terminalRed, green: green, blue: blue, alpha: 1)
+        }
     }
 }
 

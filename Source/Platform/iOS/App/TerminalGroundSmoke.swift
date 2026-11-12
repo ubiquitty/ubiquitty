@@ -67,17 +67,32 @@ enum TerminalGroundSmokeEntry {
 enum TerminalFirstFrameGroundSmokeEntry {
     @MainActor
     static func run() -> Bool {
-        let theme = "Gruvbox Light"
         let original = String(Ubiquitty.Preferences.liveDocument().pointee)
         defer { _ = Ubiquitty.Preferences.configureOwnDocument(std.string(original)) }
+        for colorSpace in ["srgb", "display-p3"] {
+            guard firstFrameUsesThemeGround(colorSpace: colorSpace) else { return false }
+        }
+        return true
+    }
+
+    /// Checks the launch, surface and host grounds in one colour space.
+    ///
+    /// - Parameter colorSpace: Core's presentation colour-space token.
+    /// - Returns: Whether the first composite and chrome agree with the theme.
+    @MainActor
+    private static func firstFrameUsesThemeGround(colorSpace: String) -> Bool {
+        let theme = "Gruvbox Light"
         _ = Ubiquitty.Preferences.configureOwnDocument(
-            std.string("[appearance]\nfollow_system = false\ntheme = \"\(theme)\"\n")
+            std.string("[appearance]\nfollow_system = false\ntheme = \"\(theme)\"\ncolor_space = \"\(colorSpace)\"\n")
         )
         let index = theme.withCString { Ubiquitty.Themes.indexForName($0) }
         guard let background = Ubiquitty.Themes.get(index)?.pointee.defaultBackground else {
             return failed("\(theme) is not a theme Core knows")
         }
-        let expected = [background.red, background.green, background.blue]
+        let expected = bytes(
+            of: TerminalColor(red: background.red, green: background.green, blue: background.blue)
+                .platformColor(usesDisplayP3: colorSpace == "display-p3")
+        )
 
         // The screen's ground before the pane is built: what its first frame
         // paints behind every edge.
@@ -107,6 +122,9 @@ enum TerminalFirstFrameGroundSmokeEntry {
         guard let surface = model.surfaceForDrawing(), surface.window === window else {
             return failed("the pane's surface is not in the window")
         }
+        guard isClose(bytes(of: surface.chromeBackgroundColor()), expected) else {
+            return failed("the surface's chrome disagrees with its \(colorSpace) theme ground")
+        }
         guard let first = firstComposite(of: surface) else {
             return failed("nothing under the pane carries a ground")
         }
@@ -115,6 +133,21 @@ enum TerminalFirstFrameGroundSmokeEntry {
         }
         guard isClose(bytes(of: model.groundColor), expected) else {
             return failed("adopting the pane moved the ground to \(bytes(of: model.groundColor))")
+        }
+        let programGround = bytes(
+            of: TerminalColor(red: 0x80, green: 0x40, blue: 0xC0)
+                .platformColor(usesDisplayP3: colorSpace == "display-p3")
+        )
+        surface.feed(Data("\u{1b}]11;#8040c0\u{7}".utf8))
+        let deadline = Date().addingTimeInterval(3)
+        while !isClose(bytes(of: model.groundColor), programGround), Date() < deadline {
+            surface.serviceIngestEvents()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        guard isClose(bytes(of: model.groundColor), programGround),
+            isClose(bytes(of: surface.chromeBackgroundColor()), programGround)
+        else {
+            return failed("a program's ground disagrees with the \(colorSpace) chrome")
         }
         return true
     }
