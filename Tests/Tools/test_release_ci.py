@@ -21,6 +21,20 @@ SPEC.loader.exec_module(RELEASE)
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_notarization_requires_one_complete_credential_set(self):
+        common = {name: "fixture" for name in RELEASE.SECRETS}
+        self.assertTrue(RELEASE.missing_credentials(common))
+        for group in RELEASE.NOTARY_CREDENTIALS:
+            complete = dict(common, **{name: "fixture" for name in group})
+            self.assertEqual(RELEASE.missing_credentials(complete), [])
+            for name in group:
+                partial = complete.copy()
+                del partial[name]
+                with self.subTest(missing=name):
+                    self.assertTrue(RELEASE.missing_credentials(partial))
+            del complete["SPARKLE_ED_PRIVATE_KEY"]
+            self.assertIn("SPARKLE_ED_PRIVATE_KEY", RELEASE.missing_credentials(complete))
+
     def test_tags_are_stable_versions_without_shell_or_path_syntax(self):
         self.assertEqual(RELEASE.version("v0.4.0"), "0.4.0")
         for tag in ("0.4.0", "v0.04.0", "v0.4.0-rc1", "v0.4.0/other", "v0.4.0\n", "$(id)"):

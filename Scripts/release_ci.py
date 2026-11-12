@@ -26,10 +26,21 @@ KIT_PATH = Path("Libraries/ubiquitty-kit")
 SECRETS = (
     "RELEASE_TOOLS_TOKEN", "SPARKLE_ED_PRIVATE_KEY", "MACOS_CERT_P12_BASE64",
     "MACOS_CERT_PASSWORD", "MACOS_DEVELOPER_ID", "MACOS_PROVISIONING_PROFILE_BASE64",
-    "NOTARY_APPLE_ID", "NOTARY_TEAM_ID", "NOTARY_APP_PASSWORD",
     "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
     "PGO_LINUX_X86_64_IMAGE", "PGO_LINUX_ARM64_IMAGE",
 )
+NOTARY_CREDENTIALS = (
+    ("NOTARY_KEY_P8", "NOTARY_KEY_ID", "NOTARY_ISSUER_ID"),
+    ("NOTARY_APPLE_ID", "NOTARY_TEAM_ID", "NOTARY_APP_PASSWORD"),
+)
+
+
+def missing_credentials(environment):
+    missing = [name for name in SECRETS if not environment.get(name)]
+    if not any(all(environment.get(name) for name in group) for group in NOTARY_CREDENTIALS):
+        missing.append("one complete notarization credential set: "
+                       + " or ".join("/".join(group) for group in NOTARY_CREDENTIALS))
+    return missing
 
 
 def git(root, *arguments):
@@ -179,7 +190,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "credentials":
-            missing = [name for name in SECRETS if not os.environ.get(name)]
+            missing = missing_credentials(os.environ)
             if missing:
                 raise ValueError("configure release secrets/variables: " + ", ".join(missing))
         elif args.command == "validate":

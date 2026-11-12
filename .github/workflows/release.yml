@@ -19,6 +19,7 @@ name: Release
 #                            TEAMID.org.ubiquitty.Ubiquitty with Keychain Sharing;
 #                            a Developer ID build refuses to sign without it.
 #   NOTARY_APPLE_ID / NOTARY_TEAM_ID / NOTARY_APP_PASSWORD  notarytool creds.
+#   NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER_ID  alternative Team API key.
 #   CLOUDFLARE_API_TOKEN     an API token that can edit R2 objects in the account.
 #   CLOUDFLARE_ACCOUNT_ID    the account holding the bucket ubiquitty-releases.
 # The public download must pass Gatekeeper, so the private macOS publisher
@@ -85,6 +86,9 @@ jobs:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
           NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           PGO_LINUX_X86_64_IMAGE: ${{ vars.PGO_LINUX_X86_64_IMAGE }}
@@ -236,17 +240,28 @@ jobs:
           printf '%s' "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/ubiquitty.provisionprofile"
           echo "UBIQUITTY_PROVISIONING_PROFILE=$RUNNER_TEMP/ubiquitty.provisionprofile" >> "$GITHUB_ENV"
 
-      - name: Store notarization credentials (optional)
+      - name: Store notarization credentials
         env:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
           NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
-        if: ${{ env.NOTARY_APPLE_ID != '' && env.UBIQUITTY_DEVELOPER_ID != '' }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
-          xcrun notarytool store-credentials ubiquitty-notary \
-            --apple-id "$NOTARY_APPLE_ID" \
-            --team-id "$NOTARY_TEAM_ID" \
-            --password "$NOTARY_APP_PASSWORD"
+          umask 077
+          if [ -n "$NOTARY_KEY_P8" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER_ID" ]; then
+            printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
+            xcrun notarytool store-credentials ubiquitty-notary \
+              --key "$RUNNER_TEMP/notary-key.p8" \
+              --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER_ID"
+          else
+            xcrun notarytool store-credentials ubiquitty-notary \
+              --apple-id "$NOTARY_APPLE_ID" \
+              --team-id "$NOTARY_TEAM_ID" \
+              --password "$NOTARY_APP_PASSWORD"
+          fi
           echo "UBIQUITTY_NOTARY_PROFILE=ubiquitty-notary" >> "$GITHUB_ENV"
 
       # Wrangler, which uploads to R2, needs Node.js 22 or later.
@@ -300,7 +315,7 @@ jobs:
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/build.keychain" 2>/dev/null || true
-          rm -f -- "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/sparkle_ed_key.txt" "$RUNNER_TEMP/ubiquitty.provisionprofile"
+          rm -f -- "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/sparkle_ed_key.txt" "$RUNNER_TEMP/ubiquitty.provisionprofile" "$RUNNER_TEMP/notary-key.p8"
 
 
   release-linux:
