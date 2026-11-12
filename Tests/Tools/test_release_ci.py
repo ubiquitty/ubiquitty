@@ -21,29 +21,6 @@ SPEC.loader.exec_module(RELEASE)
 
 
 class ReleaseTests(unittest.TestCase):
-    def test_notarization_requires_one_complete_credential_set(self):
-        common = {name: "fixture" for name in RELEASE.SECRETS}
-        common["RELEASE_TOOLS_SSH_KEY"] = "fixture"
-        self.assertTrue(RELEASE.missing_credentials(common))
-        for group in RELEASE.NOTARY_CREDENTIALS:
-            complete = dict(common, **{name: "fixture" for name in group})
-            self.assertEqual(RELEASE.missing_credentials(complete), [])
-            for name in group:
-                partial = complete.copy()
-                del partial[name]
-                with self.subTest(missing=name):
-                    self.assertTrue(RELEASE.missing_credentials(partial))
-            del complete["SPARKLE_ED_PRIVATE_KEY"]
-            self.assertIn("SPARKLE_ED_PRIVATE_KEY", RELEASE.missing_credentials(complete))
-
-    def test_private_tools_require_a_reader_credential(self):
-        common = {name: "fixture" for name in RELEASE.SECRETS}
-        common.update({name: "fixture" for name in RELEASE.NOTARY_CREDENTIALS[0]})
-        self.assertTrue(RELEASE.missing_credentials(common))
-        for name in RELEASE.TOOLS_CREDENTIALS:
-            with self.subTest(credential=name):
-                self.assertEqual(RELEASE.missing_credentials(dict(common, **{name: "fixture"})), [])
-
     def test_tags_are_stable_versions_without_shell_or_path_syntax(self):
         self.assertEqual(RELEASE.version("v0.4.0"), "0.4.0")
         for tag in ("0.4.0", "v0.04.0", "v0.4.0-rc1", "v0.4.0/other", "v0.4.0\n", "$(id)"):
@@ -125,17 +102,20 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIn("Ubiquitty.app/Ubiquitty", archive.getnames())
                 self.assertFalse(any("private-object" in name for name in archive.getnames()))
 
-    def test_publication_needs_every_platform_and_verifies_before_pointers(self):
+    def test_ci_prepares_every_platform_without_signing_or_publishing(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        finalize = workflow.split("  finalize:\n", 1)[1]
-        needs = finalize.split("needs:", 1)[1].splitlines()[0]
+        prepare = workflow.split("  prepare:\n", 1)[1]
+        needs = prepare.split("needs:", 1)[1].splitlines()[0]
         for job in ("release", "release-linux", "release-ubq", "verify-ubq", "web", "ios", "source-packages"):
             self.assertIn(job, needs)
-        self.assertLess(finalize.index('"$UBQ_RELEASE_CI" verify'), finalize.index("publish-macos-r2.py pointers"))
-        self.assertLess(finalize.index('"$UBQ_RELEASE_CI" verify'), finalize.index("--draft=false"))
+        action = (ROOT / ".github/actions/release-source/action.yml").read_text()
+        for text in (workflow, action):
+            for forbidden in ("secrets.", "contents: write", "packages: write", "notarytool", "security import",
+                              "release-macos.sh", "publish-", "gh release", "--upload", "self-hosted"):
+                self.assertNotIn(forbidden, text)
         self.assertIn("tags: ['v*.*.*']", workflow)
-        self.assertNotIn("self-hosted", workflow)
-        self.assertNotIn("--upload", workflow)
+        self.assertIn('UBIQUITTY_SIGN_IDENTITY: ad-hoc', workflow)
+        self.assertIn('name: release-preparation', prepare)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,25 @@ class PreparationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "conflicting"):
                 preparation.collect(inputs, root / "different", "v0.4.0")
 
+    def test_wrong_run_repository_and_inconsistent_composition_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, refs = self.fixture(root)
+            output = root / "prepared"
+            preparation.collect(inputs, output, "v0.4.0")
+            path = output / "preparation.json"
+            manifest = json.loads(path.read_text())
+            manifest["run"]["repository"] = "other/repository"
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "another repository"):
+                preparation.verify(output, "v0.4.0", refs)
+            manifest["run"]["repository"] = "ubiquitty/ubiquitty"
+            (output / "composition.json").write_text(json.dumps({"tag": "v0.3.4"}))
+            manifest["assets"]["composition.json"] = preparation.digest(output / "composition.json")
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "composition"):
+                preparation.verify(output, "v0.4.0", refs)
+
     def test_archive_traversal_and_escaping_links_are_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / "app.zip"

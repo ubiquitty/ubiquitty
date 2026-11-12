@@ -4,28 +4,10 @@
 name: Release
 
 # An annotated App tag binds the exact tagged Core and Kit pins. Build the
-# supported downloads in parallel, verify the complete inventory, then publish
-# GitHub and R2/Sparkle pointers. TestFlight remains a separate release channel.
-# See Docs/release-ci.md for credentials and immutable PGO image preparation.
+# supported downloads in parallel and preserve verified unsigned artifacts.
+# Signing and GitHub/R2 publication run on the maintainer's Mac.
+# See Docs/release-ci.md for local publication and immutable PGO images.
 #
-# Secrets:
-#   UBIQUITTY_RELEASE_TOOLS_SSH_KEY  read-only deploy key for private tools.
-#   UBIQUITTY_RELEASE_TOKEN  alternative read-only token for private tools.
-#   SPARKLE_ED_PRIVATE_KEY   the ed25519 private key exported by
-#                            `generate_keys -x key.txt`; file contents pasted in.
-#   MACOS_CERT_P12_BASE64    Developer ID Application cert + key, base64 of a .p12.
-#   MACOS_CERT_PASSWORD      password for that .p12.
-#   MACOS_DEVELOPER_ID       e.g. "Developer ID Application: Name (TEAMID)".
-#   MACOS_PROVISIONING_PROFILE_BASE64  base64 of the Developer ID profile for
-#                            TEAMID.org.ubiquitty.Ubiquitty with Keychain Sharing;
-#                            a Developer ID build refuses to sign without it.
-#   NOTARY_APPLE_ID / NOTARY_TEAM_ID / NOTARY_APP_PASSWORD  notarytool creds.
-#   NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER_ID  alternative Team API key.
-#   CLOUDFLARE_API_TOKEN     an API token that can edit R2 objects in the account.
-#   CLOUDFLARE_ACCOUNT_ID    the account holding the bucket ubiquitty-releases.
-# The public download must pass Gatekeeper, so the private macOS publisher
-# refuses a build without the Developer ID and notary secrets.
-
 on:
   push:
     tags: ['v*.*.*']
@@ -36,9 +18,8 @@ on:
         required: true
         type: string
 
-# Read-only unless a job says otherwise. The preflights and the host builds run
-# the test suite, Homebrew, Docker and downloaded tools, and none of them needs
-# to write; the jobs that publish name what they write.
+# CI only prepares artifacts. Signing identities and publication credentials
+# stay on the maintainer's Mac; every job has read-only repository access.
 permissions:
   contents: read
 
@@ -71,32 +52,10 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Require matching tags, clean pins, versions and green CI
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 "$UBQ_RELEASE_CI" validate --tag "$PRODUCT_TAG"
-      - name: Check publishing credential names before building
-        env:
-          RELEASE_TOOLS_TOKEN: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          RELEASE_TOOLS_SSH_KEY: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-          MACOS_DEVELOPER_ID: ${{ secrets.MACOS_DEVELOPER_ID }}
-          MACOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MACOS_PROVISIONING_PROFILE_BASE64 }}
-          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
-          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
-          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
-          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
-          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          PGO_LINUX_X86_64_IMAGE: ${{ vars.PGO_LINUX_X86_64_IMAGE }}
-          PGO_LINUX_ARM64_IMAGE: ${{ vars.PGO_LINUX_ARM64_IMAGE }}
-        run: python3 "$UBQ_RELEASE_CI" credentials
 
   host-linux:
     needs: preflight
@@ -117,8 +76,6 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Resolve the build root
         run: echo "UBQ_BUILD_ROOT=$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)" >> "$GITHUB_ENV"
       - name: Cache static-host dependencies
@@ -136,56 +93,25 @@ jobs:
           retention-days: 1
 
   release:
+    name: Prepare macOS app
+    needs: [preflight, host-linux]
+    runs-on: xcode-27
     timeout-minutes: 180
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-    name: macOS (Sparkle)
-    needs: [preflight, host-linux]
-    runs-on: xcode-27
-    permissions:
-      contents: write   # create the draft release and upload its assets
     steps:
-      # gh reads the token from GH_TOKEN in the steps that publish.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ runner.workspace }}/ccache
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-macos-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: release-ccache-${{ runner.os }}-${{ runner.arch }}-macos-
-
-      - name: Resolve the build root
-        run: echo "UBQ_BUILD_ROOT=$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)" >> "$GITHUB_ENV"
-
-      - name: Derive version from tag
-        id: ver
-        run: echo "version=${PRODUCT_TAG#v}" >> "$GITHUB_OUTPUT"
-
-      # The build derives the version from the tag, and VERSION holds the same
-      # number for a tree without the repository. The configure refuses a tagged
-      # commit whose VERSION disagrees; this says so before anything is built.
-      - name: Verify tag matches VERSION
-        run: |
-          file_version="$(tr -d '[:space:]' < VERSION)"
-          if [ "${{ steps.ver.outputs.version }}" != "$file_version" ]; then
-            echo "::error::Release tag v${{ steps.ver.outputs.version }} disagrees with the VERSION file ($file_version). Tag a commit whose VERSION holds the number." >&2
-            exit 1
-          fi
-          echo "Tag and VERSION agree: $file_version"
-
-      - name: Install ninja
-        run: brew install ninja
-
-      # Stage the prebuilt Linux host binaries where build-macos.sh bundles them
-      # into Contents/Resources ($UBQ_BUILD_ROOT/host-cross/). The download flattens each
-      # artifact into its own dir, so collect them into one.
       - name: Fetch Linux host binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -194,134 +120,27 @@ jobs:
       - name: Collect Linux host binaries
         run: |
           mkdir -p "$UBQ_BUILD_ROOT/host-cross"
-          # Bundled as data (streamed over ssh + chmod'd on the remote), so leave
-          # them non-executable — an unambiguous sealed resource for notarization.
-          find "$RUNNER_TEMP/host-cross-artifacts" -type f -name 'ubiquitty-host-linux-*' \
-            -exec cp {} "$UBQ_BUILD_ROOT/host-cross/" \;
-          test -s "$UBQ_BUILD_ROOT/host-cross/ubiquitty-host-linux-x86_64"
-          test -s "$UBQ_BUILD_ROOT/host-cross/ubiquitty-host-linux-arm64"
-
-      - name: Export EdDSA private key
+          for arch in x86_64 arm64; do
+            find "$RUNNER_TEMP/host-cross-artifacts" -type f -name "ubiquitty-host-linux-$arch" -exec cp {} "$UBQ_BUILD_ROOT/host-cross/" \;
+            test -s "$UBQ_BUILD_ROOT/host-cross/ubiquitty-host-linux-$arch"
+          done
+      - name: Build the release-policy app with ad-hoc signatures
         env:
-          ED_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          UBIQUITTY_SIGN_IDENTITY: ad-hoc
+          UBIQUITTY_RELEASE_SIGNING: "ON"
+          UBQ_BUILD_JOBS: 4
         run: |
-          if [ -z "$ED_KEY" ]; then
-            echo "::error::SPARKLE_ED_PRIVATE_KEY secret is required to sign updates." >&2
-            exit 1
-          fi
-          printf '%s' "$ED_KEY" > "$RUNNER_TEMP/sparkle_ed_key.txt"
-          echo "UBIQUITTY_SPARKLE_ED_KEY_FILE=$RUNNER_TEMP/sparkle_ed_key.txt" >> "$GITHUB_ENV"
-
-      - name: Import Developer ID certificate (optional)
-        env:
-          CERT_P12: ${{ secrets.MACOS_CERT_P12_BASE64 }}
-          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-          DEVELOPER_ID: ${{ secrets.MACOS_DEVELOPER_ID }}
-        if: ${{ env.CERT_P12 != '' }}
+          bash Scripts/fetch-sparkle.sh
+          bash Scripts/build-macos.sh --release
+      - name: Package the prepared Mac app
         run: |
-          KEYCHAIN="$RUNNER_TEMP/build.keychain"
-          PASSWORD="$(uuidgen)"
-          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
-            -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASSWORD" "$KEYCHAIN"
-          # The search-path list must expand into separate arguments.
-          # shellcheck disable=SC2046
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
-          echo "UBIQUITTY_DEVELOPER_ID=$DEVELOPER_ID" >> "$GITHUB_ENV"
-
-      - name: Install the provisioning profile
-        env:
-          PROFILE_BASE64: ${{ secrets.MACOS_PROVISIONING_PROFILE_BASE64 }}
-        if: ${{ env.UBIQUITTY_DEVELOPER_ID != '' }}
-        run: |
-          if [ -z "$PROFILE_BASE64" ]; then
-            echo "::error::MACOS_PROVISIONING_PROFILE_BASE64 secret is required to sign with the Developer ID." >&2
-            exit 1
-          fi
-          printf '%s' "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/ubiquitty.provisionprofile"
-          echo "UBIQUITTY_PROVISIONING_PROFILE=$RUNNER_TEMP/ubiquitty.provisionprofile" >> "$GITHUB_ENV"
-
-      - name: Store notarization credentials
-        env:
-          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
-          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
-          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
-          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
-          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
-        run: |
-          umask 077
-          if [ -n "$NOTARY_KEY_P8" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER_ID" ]; then
-            printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
-            xcrun notarytool store-credentials ubiquitty-notary \
-              --key "$RUNNER_TEMP/notary-key.p8" \
-              --key-id "$NOTARY_KEY_ID" \
-              --issuer "$NOTARY_ISSUER_ID"
-          else
-            xcrun notarytool store-credentials ubiquitty-notary \
-              --apple-id "$NOTARY_APPLE_ID" \
-              --team-id "$NOTARY_TEAM_ID" \
-              --password "$NOTARY_APP_PASSWORD"
-          fi
-          echo "UBIQUITTY_NOTARY_PROFILE=ubiquitty-notary" >> "$GITHUB_ENV"
-
-      # Wrangler, which uploads to R2, needs Node.js 22 or later.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+          python3 "$GITHUB_WORKSPACE/Scripts/release_preparation.py" macos --tag "$PRODUCT_TAG" \
+            --app "$UBQ_BUILD_ROOT/macos/Source/Platform/macOS/Ubiquitty.app" --directory "$UBQ_BUILD_ROOT/dist"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          node-version: 24
-
-      # The draft holds back the three R2 pointers and keeps the GitHub release
-      # a draft; finalize moves the pointers and publishes the release. The
-      # hosts it uploads, to R2 and to the release, are copied out of the
-      # archive, so they are the bytes the app pushes.
-      - name: Build, sign, appcast, and publish (draft)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          UBIQUITTY_RELEASE_DRAFT: "1"   # finalize flips it public once all legs pass
-        run: ../.release-tools/release/Scripts/release-macos.sh "${PRODUCT_TAG#v}" --publish --github-release
-
-      # Hand the R2 pointers to the finalize job, which writes them only
-      # after every platform leg succeeds.
-      - name: Upload the release pointers
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-pointers
-          path: |
-            ${{ env.UBQ_BUILD_ROOT }}/dist/appcast.xml
-            ${{ env.UBQ_BUILD_ROOT }}/dist/latest.json
-            ${{ env.UBQ_BUILD_ROOT }}/dist/host/latest.json
+          name: macos-unsigned
+          path: ${{ env.UBQ_BUILD_ROOT }}/dist/*-macos-unsigned.zip
           if-no-files-found: error
-          retention-days: 1
-
-      - name: Preserve the exact Linux hosts extracted from the Mac archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-hosts
-          path: ${{ env.UBQ_BUILD_ROOT }}/dist/host/ubiquitty-host-linux-*
-          if-no-files-found: error
-          retention-days: 1
-      - name: Preserve the notarized archive and published hosts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: macos-release
-          path: |
-            ${{ env.UBQ_BUILD_ROOT }}/dist/Ubiquitty-*.zip
-            ${{ env.UBQ_BUILD_ROOT }}/dist/host/ubiquitty-host-*
-            ${{ env.UBQ_BUILD_ROOT }}/dist/host/SHA256SUMS
-          if-no-files-found: error
-
-      - name: Remove temporary signing material
-        if: always()
-        run: |
-          security delete-keychain "$RUNNER_TEMP/build.keychain" 2>/dev/null || true
-          rm -f -- "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/sparkle_ed_key.txt" "$RUNNER_TEMP/ubiquitty.provisionprofile" "$RUNNER_TEMP/notary-key.p8"
-
 
   release-linux:
     timeout-minutes: 150
@@ -337,7 +156,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write   # upload the AppImage and its .zsync to the draft
+      contents: read
       packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -346,8 +165,6 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -444,8 +261,6 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Resolve the build root
         run: echo "UBQ_BUILD_ROOT=$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)" >> "$GITHUB_ENV"
       - name: Build the static command-line client
@@ -471,8 +286,6 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -518,8 +331,6 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -551,13 +362,13 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - name: Validate notices and build the recursive source and editor archives
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-licenses.py --release
           python3 "$UBQ_RELEASE_CI" sources --tag "$PRODUCT_TAG" --directory "$UBQ_BUILD_ROOT/dist"
-          python3 ../.release-tools/release/Scripts/release_sources.py record > "$UBQ_BUILD_ROOT/dist/composition.json"
+          python3 "$UBQ_RELEASE_CI" validate --tag "$PRODUCT_TAG" > "$UBQ_BUILD_ROOT/dist/composition.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: client-release-source-editors
@@ -566,7 +377,7 @@ jobs:
 
   verify-ubq:
     name: Verify packaged CLI (${{ matrix.arch }})
-    needs: [release, release-ubq]
+    needs: [host-linux, release-ubq]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
@@ -584,141 +395,44 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ubq-release-${{ matrix.arch }}
           path: ${{ runner.temp }}/ubq-client
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-hosts
+          name: ubiquitty-host-linux-${{ matrix.arch }}
           path: ${{ runner.temp }}/ubq-host
       - name: Check version and MCP against the exact published host
         run: |
           binary="$RUNNER_TEMP/ubq-client/ubq-linux-${{ matrix.arch }}"
           host="$RUNNER_TEMP/ubq-host/ubiquitty-host-linux-${{ matrix.arch }}"
           chmod +x "$binary" "$host"
-          python3 ../.release-tools/release/Scripts/check-ubq-release-version.py "$binary" "${PRODUCT_TAG#v}"
+          python3 Scripts/check-ubq-release-version.py "$binary" "${PRODUCT_TAG#v}"
           UBQ_BIN="$binary" UBIQUITTY_HOST_BIN="$host" UBIQUITTY_HOME="$RUNNER_TEMP/ubq-mcp-home" \
             bash Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Agent/mcp_smoke.sh
 
-  finalize:
-    name: Publish verified release
-    timeout-minutes: 30
-    # Point the website's download and the update feed at the release, then
-    # flip the draft release public, only after both platform legs succeeded,
-    # so a failed build never leaves a half-published release.
+  prepare:
+    name: Verify complete release preparation
     needs: [release, release-linux, release-ubq, verify-ubq, web, ios, source-packages]
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write   # flip the draft release public
+    timeout-minutes: 30
     steps:
-      # The R2 publisher comes from the pinned private tools checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/release-source
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          tag: ${{ env.PRODUCT_TAG }}
-          tools-token: ${{ secrets.UBIQUITTY_RELEASE_TOKEN }}
-          tools-ssh-key: ${{ secrets.UBIQUITTY_RELEASE_TOOLS_SSH_KEY }}
-
-      # Wrangler, which writes to R2, needs Node.js 22 or later.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-
-      - name: Download the release pointers
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-pointers
-          path: ${{ runner.temp }}/release-pointers
-
-      - name: Download both Linux architectures
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: linux-release-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/linux-release
-
-      - name: Upload and verify both Linux architectures
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          path: ${{ runner.temp }}/prepared-inputs
+      - name: Verify every platform and record its checksums
+        working-directory: .
         run: |
-          python3 ../.release-tools/release/Scripts/publish-linux-r2.py manifest "$RUNNER_TEMP/linux-release" "${PRODUCT_TAG#v}" "$(git rev-parse HEAD)"
-          python3 ../.release-tools/release/Scripts/publish-linux-r2.py files "$RUNNER_TEMP/linux-release"
-
-      - name: Download both command-line clients
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+          python3 Scripts/release_preparation.py collect --tag "$PRODUCT_TAG" \
+            --inputs "$RUNNER_TEMP/prepared-inputs" --directory "$RUNNER_TEMP/release-preparation"
+          python3 Scripts/release_preparation.py verify --tag "$PRODUCT_TAG" --directory "$RUNNER_TEMP/release-preparation"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          pattern: ubq-release-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/ubq-release
-
-      - name: Upload and verify the command-line clients and notices
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          python3 ../.release-tools/release/Scripts/ubq-notices.py "$UBIQUITTY_SOURCE_ROOT" "$RUNNER_TEMP/ubq-release"
-          python3 ../.release-tools/release/Scripts/publish-ubq-r2.py manifest "$RUNNER_TEMP/ubq-release" "${PRODUCT_TAG#v}" "$(git rev-parse HEAD)"
-          python3 ../.release-tools/release/Scripts/publish-ubq-r2.py files "$RUNNER_TEMP/ubq-release"
-
-      - name: Attach the release checksums and command-line clients
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp "$RUNNER_TEMP/linux-release/SHA256SUMS" "$RUNNER_TEMP/SHA256SUMS-appimage"
-          cp "$RUNNER_TEMP/ubq-release/SHA256SUMS" "$RUNNER_TEMP/SHA256SUMS-ubq"
-          cp "$RUNNER_TEMP/ubq-release/NOTICE" "$RUNNER_TEMP/ubq-NOTICE"
-          gh release upload "$PRODUCT_TAG" --repo "$GH_REPO" --clobber \
-            "$RUNNER_TEMP/SHA256SUMS-appimage" "$RUNNER_TEMP/SHA256SUMS-ubq" "$RUNNER_TEMP/ubq-NOTICE" \
-            "$RUNNER_TEMP/ubq-release/ubq-linux-x86_64" "$RUNNER_TEMP/ubq-release/ubq-linux-arm64"
-
-      - name: Fetch the exact signed archive and all host bytes
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: macos-release
-          path: ${{ runner.temp }}/macos-release
-      - name: Fetch browser, iOS and source packages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: client-release-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/client-release
-      - name: Verify all release assets before moving any update pointer
-        run: |
-          python3 "$UBQ_RELEASE_CI" assemble --tag "$PRODUCT_TAG" --directory "$RUNNER_TEMP/release-assets"
-          python3 "$UBQ_RELEASE_CI" verify --tag "$PRODUCT_TAG" --directory "$RUNNER_TEMP/release-assets"
-      - name: Attach the complete verified artifact set
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          shopt -s failglob
-          gh release upload "$PRODUCT_TAG" --repo "$GH_REPO" --clobber "$RUNNER_TEMP/release-assets"/*
-
-      # Checks that the archive, deltas and hosts the pointers name are in R2,
-      # then writes appcast.xml, latest.json and host/latest.json, each read
-      # back. The artifact keeps the dist layout, so the host pointer is
-      # release-pointers/host/latest.json.
-      - name: Point the downloads and the update feed at the release
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          python3 ../.release-tools/release/Scripts/publish-macos-r2.py pointers "$RUNNER_TEMP/release-pointers"
-          python3 ../.release-tools/release/Scripts/publish-macos-r2.py host-pointer "$RUNNER_TEMP/release-pointers"
-          python3 ../.release-tools/release/Scripts/publish-linux-r2.py pointer "$RUNNER_TEMP/linux-release"
-          python3 ../.release-tools/release/Scripts/publish-ubq-r2.py pointer "$RUNNER_TEMP/ubq-release"
-
-      # The URLs the app's manual install commands name, as the website now
-      # answers them.
-      - name: Check the published host downloads
-        run: python3 ../.release-tools/release/Tests/Tools/test_published_host_downloads.py --version "${PRODUCT_TAG#v}"
-
-      - name: Publish the draft release (all legs green)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$PRODUCT_TAG" --repo "$GH_REPO" --draft=false --latest
+          name: release-preparation
+          path: ${{ runner.temp }}/release-preparation/*
+          if-no-files-found: error
+          retention-days: 14

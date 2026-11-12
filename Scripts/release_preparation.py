@@ -66,7 +66,8 @@ def collect(inputs, directory, tag):
     manifest = {"schema": SCHEMA, "tag": tag, "version": named_version,
                 "repositories": composition["repositories"],
                 "run": {"repository": os.environ.get("GITHUB_REPOSITORY", "ubiquitty/ubiquitty"),
-                        "id": os.environ.get("GITHUB_RUN_ID", "")},
+                        "id": os.environ.get("GITHUB_RUN_ID", ""),
+                        "head": os.environ.get("GITHUB_SHA", "")},
                 "assets": {name: digest(directory / name) for name in sorted(wanted)}}
     (directory / "preparation.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
@@ -87,6 +88,9 @@ def verify(directory, tag, repositories=None):
     for name, expected in manifest["assets"].items():
         if digest(directory / name) != expected:
             raise ValueError("prepared artifact checksum differs: " + name)
+    composition = json.loads((directory / "composition.json").read_text())
+    if composition != {"tag": tag, "version": named_version, "repositories": manifest["repositories"]}:
+        raise ValueError("prepared source composition differs from its manifest")
     return manifest
 
 
@@ -111,8 +115,15 @@ def package_macos(app, output, tag):
 
 def inspect_macos_archive(archive):
     with zipfile.ZipFile(archive) as bundle:
-        for member in bundle.infolist():
+        members = bundle.infolist()
+        links = {PurePosixPath(member.filename) for member in members
+                 if (member.external_attr >> 16) & 0o170000 == 0o120000}
+        seen = set()
+        for member in members:
             path = PurePosixPath(member.filename)
+            if path in seen or any(parent in links for parent in path.parents):
+                raise ValueError("Mac archive has duplicate members or writes through a symbolic link")
+            seen.add(path)
             if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] not in {"Ubiquitty.app", "__MACOSX"}:
                 raise ValueError("Mac archive has an unsafe member")
             if (member.external_attr >> 16) & 0o170000 == 0o120000:

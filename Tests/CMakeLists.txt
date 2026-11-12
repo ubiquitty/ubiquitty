@@ -31,3 +31,9 @@ add_test(NAME test_ios_sync_driver
 ubiquitty_set_test_entry_properties(test_ios_sync_driver)
 
 ubiquitty_finish_host_tests()
+
+foreach(release_test release_ci release_preparation)
+    add_test(NAME test_${release_test}
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/Tests/Tools/test_${release_test}.py")
+    ubiquitty_set_test_entry_properties(test_${release_test})
+endforeach()
