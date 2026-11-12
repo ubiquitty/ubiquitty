@@ -478,7 +478,10 @@ final class TerminalGestureUITests: XCTestCase {
         app.buttons["Terminate"].tap()
         XCTAssertTrue(app.staticTexts["2 Tabs"].waitForExistence(timeout: 5), "the closed tab's card stayed")
 
-        second.press(forDuration: 0.5, thenDragTo: first)
+        // Native reordering chooses before or after from the drop position.
+        // The card's midpoint does not specify an earlier insertion.
+        second.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.5, thenDragTo: first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)))
         XCTAssertTrue(
             waitUntil(timeout: 5) { second.label.hasPrefix("Tab 1 of 2") },
             "dragging the tab earlier did not move its card: \(second.label)"
@@ -3609,7 +3612,9 @@ final class TerminalGestureUITests: XCTestCase {
     private func chooseTheme(_ name: String, over surface: XCUIElement) {
         openConnectionDetails()
         let details = app.navigationBars["Connection Details"]
-        assertTheSheetKeepsTheSystemScheme(titledBy: details)
+        let title = details.staticTexts["Connection Details"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "the sheet's title is missing")
+        assertTheSheetKeepsTheSystemScheme(titledBy: title)
         let picker = app.buttons["terminal-host-theme"].firstMatch
         revealInTheForm(picker)
         picker.tap()
@@ -3627,14 +3632,14 @@ final class TerminalGestureUITests: XCTestCase {
     /// title's ink is black in the light scheme and white in the dark one.
     /// The ink is whichever extreme along the title's middle row lies further
     /// from the sheet's surface beside it.
-    private func assertTheSheetKeepsTheSystemScheme(titledBy bar: XCUIElement) {
+    private func assertTheSheetKeepsTheSystemScheme(titledBy title: XCUIElement) {
         // The sheet rises into place; a picture taken while it moves reads
         // the ground through a sheet that is not there yet.
         Thread.sleep(forTimeInterval: 1)
         let pixels = ScreenPixels(XCUIScreen.main.screenshot(), screen: app.windows.firstMatch.frame)
-        let frame = bar.frame
-        let surface = pixels.luminance(at: CGPoint(x: frame.minX + 24, y: frame.midY))
-        let row = stride(from: frame.midX - 40, through: frame.midX + 40, by: 0.5)
+        let frame = title.frame
+        let surface = pixels.luminance(at: CGPoint(x: frame.minX - 12, y: frame.midY))
+        let row = stride(from: frame.minX + 1, through: frame.maxX - 1, by: 0.5)
             .map { pixels.luminance(at: CGPoint(x: $0, y: frame.midY)) }
         let darkest = row.min() ?? .nan
         let lightest = row.max() ?? .nan
