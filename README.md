@@ -7,25 +7,18 @@
 
 <h1 align="center">Ubiquitty</h1>
 
-**A terminal and multiplexer for humans and agents working together.**
+**A terminal and multiplexer you can share with your agents.**
 
-| You are building | Reach for | Repository |
-|---|---|---|
-| The Ubiquitty apps themselves | the macOS, iOS, Linux and web frontends | [`ubiquitty`](https://github.com/ubiquitty/ubiquitty) |
-| A terminal view to drop into a macOS or iOS app | UbiquittyKit's `TerminalSurface` (Metal) | [`ubiquitty-kit`](https://github.com/ubiquitty/kit) |
-| A terminal view in a Linux app, or a software-rendered surface | the Vulkan, FreeType and software renderers and the GTK platform layer | [`ubiquitty-kit`](https://github.com/ubiquitty/kit) |
-| A renderer drawing into a texture or layer your app owns | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | [`ubiquitty-kit`](https://github.com/ubiquitty/kit) |
-| Your own UI that draws the terminal itself: a GPU UI toolkit, a game engine, or an editor with its own text system | libubiquitty's public C++ umbrella header and render model | [`ubiquitty-core`](https://github.com/ubiquitty/core) |
-| The same from C++, linking Core in your own CMake graph | the C++ session facade and Core's headers | [`ubiquitty-core`](https://github.com/ubiquitty/core) |
-| Persistent sessions, a session daemon, attach and reattach across machines | the multiplexer: `ubiquitty-host`, Sync, the `ubq` command and the agent | [`ubiquitty-core`](https://github.com/ubiquitty/core) |
+Keep your shells running when you disconnect. Read proportional prose beside
+aligned terminal code. Use the Mac app, a browser, your phone, or the Emacs
+and Neovim plugins. Agents get CLI and MCP access to the same live terminal,
+with permissions and consent enforced by the host.
 
-Ubiquitty is three repositories. Each depends only on the ones below it:
-[`ubiquitty`](https://github.com/ubiquitty/ubiquitty) →
-[`ubiquitty-kit`](https://github.com/ubiquitty/kit) →
-[`ubiquitty-core`](https://github.com/ubiquitty/core). This is the top one: the apps.
-It carries the Kit as the submodule `Libraries/ubiquitty-kit`, and Core comes with
-the Kit, as the Kit's own submodule: the one Core this checkout builds is
-`Libraries/ubiquitty-kit/Libraries/ubiquitty-core`.
+[Download](https://ubiquitty.org/#downloads) · [Features](https://ubiquitty.org/features/) · [Embed a terminal view](https://github.com/ubiquitty/kit) · [Build with Core](https://github.com/ubiquitty/core)
+
+**100% conformance: 4,532 / 4,532 applicable cases passed, versus about 66% for the next-best tested engine in our recorded comparison.**
+
+**The fastest parser in our comparative benchmarks, as of 7 November 2026.** [Conformance scope](https://github.com/ubiquitty/ubiquitty#conformance) · [Benchmark methods](https://github.com/ubiquitty/ubiquitty#benchmarks)
 
 ![A translucent Ubiquitty window over the desktop wallpaper, attached to a host session on a Linux machine and split in two panes: OpenCode answering in rich text, in proportional type with commands in monospace, beside a deployment monitor drawing a canary rollout's latency and error-rate graphs; the title bar names the host, hub, with its homelab tag, its badge counts one agent attached to the session, and the tabs show OpenCode, an idle Codex and a Claude Code waiting for a sign-in](Docs/images/opencode-proportional.png)
 
@@ -44,20 +37,12 @@ process and terminal state; each client draws its own view.
 
 > **The multiplexer and remote sessions are experimental** and still taking shape, while
 > the terminal itself is full-featured: it has the highest score in our conformance
-> comparison, passing all 4,529 applicable cases. Don't run `ubiquitty-host` on production
+> comparison, passing all 4,532 applicable cases. Don't run `ubiquitty-host` on production
 > servers or other important infrastructure yet.
 
 [Install](#install) · [Rendering examples](#screenshots) ·
 [Conformance](#conformance) · [Parser benchmarks](#benchmarks) ·
 [Remote sessions and agents](Docs/guides/remote-sessions-and-agents.md)
-
-**100% full-suite conformance: 4,529 / 4,529 applicable cases passed,
-versus about 65% for the next-best tested engine in our recorded comparison.**
-**Fastest parser among the engines and workloads in our tests.**
-[Conformance scope](#conformance) · [Benchmark methods](#benchmarks).
-
-The 65.31% result is from a recorded `libghostty-vt` run on 27 October 2026,
-before subsequent Ghostty fixes; it is not a score for its current release.
 
 | Advantage | What you get |
 |---|---|
@@ -97,6 +82,26 @@ downloads from clients built from source.
 
 The portable Core also builds independently as
 [`libUbiquittyCore`](https://github.com/ubiquitty/core/blob/main/Docs/libubiquittycore.md).
+
+## Apps, Kit and Core
+
+| You are building | Reach for | Repository |
+|---|---|---|
+| The Ubiquitty apps themselves | the macOS, iOS, Linux and web frontends | [`ubiquitty`](https://github.com/ubiquitty/ubiquitty) |
+| A terminal view to drop into a macOS or iOS app | UbiquittyKit's `TerminalView` or SwiftUI `Terminal` (Metal) | [`ubiquitty-kit`](https://github.com/ubiquitty/kit) |
+| A terminal view in a Linux app, or a software-rendered surface | the Vulkan, FreeType and software renderers and the GTK platform layer | [`ubiquitty-kit`](https://github.com/ubiquitty/kit) |
+| A renderer drawing into a texture or layer your app owns | UbiquittyRenderKit (Metal) or the Vulkan renderer's exportable frames | [`ubiquitty-kit`](https://github.com/ubiquitty/kit) |
+| Your own UI that draws the terminal itself: a GPU UI toolkit, a game engine, or an editor with its own text system | libubiquitty's public C++ umbrella header and render model | [`ubiquitty-core`](https://github.com/ubiquitty/core) |
+| The same from C++, linking Core in your own CMake graph | the C++ session facade and Core's headers | [`ubiquitty-core`](https://github.com/ubiquitty/core) |
+| Persistent sessions, a session daemon, attach and reattach across machines | the multiplexer: `ubiquitty-host`, Sync, the `ubq` command and the agent | [`ubiquitty-core`](https://github.com/ubiquitty/core) |
+
+Ubiquitty is three repositories. Each depends only on the ones below it:
+[`ubiquitty`](https://github.com/ubiquitty/ubiquitty) →
+[`ubiquitty-kit`](https://github.com/ubiquitty/kit) →
+[`ubiquitty-core`](https://github.com/ubiquitty/core). This is the top one: the apps.
+It carries the Kit as the submodule `Libraries/ubiquitty-kit`, and Core comes with
+the Kit, as the Kit's own submodule: the one Core this checkout builds is
+`Libraries/ubiquitty-kit/Libraries/ubiquitty-core`.
 
 ## Install
 
@@ -211,15 +216,23 @@ The Apple renderer reuses unchanged grid pixels, shifts retained content during
 scrolling, and composes the cursor separately.
 [Renderer architecture](https://github.com/ubiquitty/kit/blob/main/Docs/swift-renderer.md).
 
+Legacy terminal software renders correctly, including double-height text,
+national character sets, protected cells and DEC rectangular screen editing.
+
 **Broad escape-sequence coverage.** Beyond truecolor, OSC 8 links, styled
 underlines, ligatures, bracketed paste, and mouse modes, Ubiquitty covers the
-kitty graphics protocol, Sixel, and OSC 1337 inline images, Tektronix 4014
+Kitty keyboard protocol, animated Kitty graphics, Sixel, and OSC 1337 inline images, Tektronix 4014
 vectors, tmux Control Mode (`-CC`) in the macOS app, DEC double-width /
 double-height lines, UAX #29 grapheme clustering, and the rarer corners of the
 DEC and ECMA-48 SGR surface.
 
 - [ECMA-48 conformance audit →](https://github.com/ubiquitty/core/blob/main/Docs/ecma48_conformance.md)
 - [Feature test matrix →](https://github.com/ubiquitty/core/blob/main/Docs/feature_test_matrix.md)
+
+Extended DECPS adds eight musical channels, waveform voices, WAV samples,
+envelopes, filters, reverb and tracker effects. Programs can use it for
+instruments, sequencers and game audio; the Mac app supplies playback.
+[Sound protocol](https://ubiquitty.org/features/sound/).
 
 **Host effects have named capabilities.** Anything that can print
 bytes can set your title, read your clipboard, move your window, reprogram a
@@ -269,12 +282,11 @@ pasting.
 
 ## Conformance
 
-**Full-suite result: 4,529 / 4,529 applicable cases passed (100%).**
+**Full-suite result: 4,532 / 4,532 applicable cases passed (100%).**
 
 The next-best tested engine in our [recorded comparison](https://github.com/ubiquitty/core#correctness-and-performance),
-Ghostty's `libghostty-vt`, passed **2,958 / 4,529 cases (65.31%)**.
-That run was recorded on 27 October 2026, before subsequent Ghostty fixes;
-it is not a score for its current release.
+Ghostty's `libghostty-vt` main (`cf3a8a659`), passed **3,004 / 4,532 cases (66.3%)** in our tests on
+**12 November 2026**.
 
 The comparison checks terminal behavior against ECMA-48, DEC STD 070, the VT
 manuals, and the originating specifications for extensions. Documented xterm
