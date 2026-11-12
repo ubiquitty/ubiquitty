@@ -8,6 +8,16 @@ ubiquitty_add_host_tests(
     ROOT ${CMAKE_SOURCE_DIR} SOURCES ${UBQ_DEPENDENT_TESTS}
     INCLUDE_DIRECTORIES ${UBIQUITTY_CORE_SOURCE_DIR}/Source ${UBIQUITTY_CORE_SOURCE_DIR}/Tests)
 
+# Each Web shard renders complete frames. Keep the hosted Mac's fixed
+# deadline free of competing test processes and shell compilation.
+math(EXPR _ubq_web_last_shard "${test_web_terminal_SHARDS} - 1")
+foreach(_ubq_web_shard RANGE 0 ${_ubq_web_last_shard})
+    set_property(TEST test_web_terminal.${_ubq_web_shard} APPEND PROPERTY ENVIRONMENT UBQ_TEST_VERBOSE=1)
+    if(APPLE)
+        set_tests_properties(test_web_terminal.${_ubq_web_shard} PROPERTIES RUN_SERIAL TRUE)
+    endif()
+endforeach()
+
 ubiquitty_default_shell_driver(_ubq_app_shell_driver)
 # This Apple-only stanza reports the same unavailable status as before the
 # app acquired its own test tree; the metadata belongs beside its owner.
