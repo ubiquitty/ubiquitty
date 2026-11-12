@@ -481,7 +481,7 @@ final class TerminalGestureUITests: XCTestCase {
         // Native reordering chooses before or after from the drop position.
         // The card's midpoint does not specify an earlier insertion.
         second.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            .press(forDuration: 0.5, thenDragTo: first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)))
+            .press(forDuration: 0.5, thenDragTo: first.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.15)))
         XCTAssertTrue(
             waitUntil(timeout: 5) { second.label.hasPrefix("Tab 1 of 2") },
             "dragging the tab earlier did not move its card: \(second.label)"
