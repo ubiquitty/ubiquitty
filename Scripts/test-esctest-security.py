@@ -124,6 +124,20 @@ pathlib.Path(os.environ["ESC_FIXTURE_REPORT"]).write_text(json.dumps({
         self.assertEqual(report["arguments"][-2:], ["--include", "DECRQM"])
         self.assertIn("normal policy", (self.root / "BuildEsctest" / "esctest-provenance.txt").read_text())
 
+    def test_macos_finds_its_app_with_the_nested_core_build_helper(self):
+        core = self.root / "Libraries/ubiquitty-kit/Libraries/ubiquitty-core"
+        (core / "Scripts").mkdir(parents=True)
+        (self.scripts / "build-root.sh").rename(core / "Scripts/build-root.sh")
+        self.environment["UBIQUITTY_CORE_SOURCE_DIR"] = str(core)
+        bundle = self.build / "macos/Source/Platform/macOS/Ubiquitty.app"
+        shutil.copytree(self.app, bundle)
+        completed = subprocess.run(
+            ["bash", str(self.scripts / "run-esctest.sh"), "--esctest", str(self.suite)],
+            env=self.environment, capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertTrue(self.report.is_file())
+
     def test_macos_opt_in_is_isolated_and_clipboard_read_only(self):
         report = self.successful_report("macos", "--allow-clipboard-read")
         self.assertNotEqual(report["configuration"], str(self.user_document))
