@@ -58,7 +58,7 @@ deadlines keep continuous output from indefinitely postponing presentation.
 Parser throughput, frame delivery, input latency and energy are evaluated
 separately; see [Benchmarks](#benchmarks).
 
-**One terminal session, wherever the work runs.** The portable C++23 Core is
+**One terminal session, wherever the work runs.** The portable Core is
 both the terminal engine and the multiplexer. Native clients, headless tools and
 agents attach to the same authoritative session. Rendering stays local while
 the host owns the processes and terminal state. An agent requesting access to
