@@ -82,8 +82,9 @@ available in that registry before the first tagged build. The images are kept
 in the corresponding native trainers' Docker stores. Their expected configuration
 digests are recorded in Core's matching `.trained-toolchain` files.
 
-The release job selects the trainer's Docker image store: classic on x86_64,
-containerd on ARM64. It then pulls the immutable image and compares Docker's
+The release job uses the trainers' containerd image store on both architectures.
+Its repository token authenticates the registry pull with read-only package
+access. It then compares Docker's
 image identity with the committed profile provenance before assigning the CI
 recipe's local name. Docker's stores report different identities for an image;
 [the image-store configuration](https://docs.docker.com/engine/storage/containerd/)
