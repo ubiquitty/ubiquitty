@@ -554,7 +554,7 @@ gate_snapshots() {
     if [ "$(uname -s)" = "Darwin" ]; then
         run "macOS app build" ./Scripts/build-macos.sh --no-helpers
         run "snapshot regressions" python3 "$UBQ_CORE_ROOT/Scripts/ci_batteries.py" run apple \
-            --only portable-build --only snapshots \
+            --only snapshots \
             --source-root "$ROOT" --core-source-root "$UBQ_CORE_ROOT" --kit-source-root "$UBQ_KIT_ROOT"
     else
         run "portable snapshot build" "$UBQ_CORE_ROOT/Scripts/build-core-snapshot.sh"

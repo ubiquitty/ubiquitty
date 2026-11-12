@@ -316,7 +316,7 @@ class ComposedSnapshotRouting(unittest.TestCase):
             (root / "Scripts").mkdir(parents=True)
             (root / "Scripts/repository.txt").write_text(role + "\n")
             (root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.13)\n")
-        for name in ("ci_batteries.py", "gate_framework.py", "gate_report.py", "ubq_roots.py", "build_root.py"):
+        for name in ("ci_batteries.py", "gate_framework.py", "gate_report.py", "ubq_roots.py", "build_root.py", "clang-format-pin"):
             shutil.copyfile(CORE_ROOT / "Scripts" / name, self.core / "Scripts" / name)
         self.calls = self.directory / "calls.jsonl"
         tool = '''#!/usr/bin/env python3
@@ -469,21 +469,21 @@ printf 'RESULT:%s|%s|%s\\n' "${FAILED[*]-}" "${SKIPPED[*]-}" "${ELSEWHERE[*]-}"
                     finally:
                         path.write_text(original)
 
-    def test_full_darwin_uses_the_official_battery_and_all_native_catalogs(self):
+    def test_full_darwin_uses_the_official_battery_for_app_catalogs(self):
         module = Path(self.environment["UBQ_BUILD_ROOT"]) / "web-dist/ubiquitty.wasm"
         module.parent.mkdir(parents=True)
         module.write_bytes(b"fixture")
         checked, calls, result = self.execute("gate_snapshots")
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-        self.assertEqual(self.backends(calls), ["portable", "macos", "swift", "web"])
+        self.assertEqual(self.backends(calls), ["macos", "web"])
         self.assert_roots(calls)
         self.assertEqual([call["arguments"] for call in calls if call["tool"] == "build-macos.sh"], [["--no-helpers"]])
-        self.assertEqual([call["tool"] for call in calls[:2]], ["build-macos.sh", "build-core-snapshot.sh"])
+        self.assertNotIn("build-core-snapshot.sh", [call["tool"] for call in calls])
         records = list((self.directory / "ci/apple").glob("battery-*.json"))
         self.assertEqual(len(records), 1)
         stages = json.loads(records[0].read_text())
         self.assertEqual([(stage["key"], stage["state"]) for stage in stages],
-                         [("portable-build", "completed"), ("snapshots", "completed")])
+                         [("snapshots", "completed")])
         self.assertEqual(result, ["", "", ""])
 
     def test_full_linux_keeps_portable_and_optional_web_without_apple_backends(self):

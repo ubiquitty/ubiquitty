@@ -36,6 +36,9 @@ endforeach()
 set(test_macos_file_read_EXTRA_SOURCES Source/Platform/POSIX/GatedFileRead.cpp
                                        Source/Platform/POSIX/SystemPAL.cpp)
 
+# The 240 bridge cases exceed one entry's budget on hosted Macs. The harness
+# partitions the complete registry, keeping the existing per-entry timeout.
+set(test_web_terminal_SHARDS 4)
 set(test_web_terminal_EXTRA_SOURCES    ${CMAKE_SOURCE_DIR}/Source/Platform/Web/WebTerminal.cpp
                                        ${CMAKE_SOURCE_DIR}/Source/Platform/Web/WebRichText.cpp
                                        ${CMAKE_SOURCE_DIR}/Source/Platform/Web/WebFontRasterizer.cpp
