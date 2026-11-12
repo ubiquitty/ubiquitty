@@ -204,7 +204,7 @@ failed_flags=()
 CONTAINER="$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE_ID" data 2>/dev/null)"
 [ -d "$CONTAINER/tmp" ] || { echo "run-ios-smokes: no data container for $BUNDLE_ID on $DEVICE_NAME" >&2; exit 2; }
 REPORT="$CONTAINER/tmp/smoke-report.txt"
-launchMarker="$(mktemp -t run-ios-smokes)"
+launchMarker="$(mktemp "${TMPDIR:-/tmp}/run-ios-smokes.XXXXXX")"
 for flag in "${FLAGS[@]}"; do
     # simctl launch answers for the LAUNCH, not for the process, so the verdict
     # is the smoke's own line in its report file. Each smoke writes one and
