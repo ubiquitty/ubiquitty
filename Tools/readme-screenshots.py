@@ -26,9 +26,6 @@ import subprocess
 import sys
 import tomllib
 
-from showcase import tui as T
-from showcase.sections.boxdraw import _bar
-from showcase.sections.compat import TEK_ENTER, _tek_vectors
 import readme_demo_home
 
 
@@ -38,6 +35,11 @@ import library_scripts  # noqa: E402
 
 # Core's checkout, as Scripts/library_scripts.py resolves it.
 CORE_ROOT = Path(library_scripts.CORE_ROOT)
+sys.path.insert(0, str(CORE_ROOT / "Tools"))
+from showcase import tui as T  # noqa: E402
+from showcase.sections.boxdraw import _bar  # noqa: E402
+from showcase.sections.compat import TEK_ENTER, _tek_vectors  # noqa: E402
+
 with (CORE_ROOT / "Source/Core/Themes/builtin-themes.toml").open("rb") as source:
     NOIR = next(theme for theme in tomllib.load(source)["themes"] if theme["name"] == "Noir")
 
@@ -536,7 +538,7 @@ def main():
                     f'theme = "{theme}"\n')
         if name == "tektronix":
             settings += ('[tek]\nglow_vectors = true\ncolor_mode = 1\n'
-                         f'beam_color = "{NOIR["ansi"][2]}"\nbackground_color = "{NOIR["bg"]}"\n')
+                         'beam_color = "#66dd94"\nbackground_color = "#051603"\n')
         config.write_text(settings, encoding="utf-8")
         arguments = ["--snapshot", str(output / (name + ".png")), "--snapshot-backend", "macos",
                      "--feed-file", str(feed), "--config", str(config),

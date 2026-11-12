@@ -361,11 +361,12 @@ The terminal-rendering examples below use Noir.
 *Rendering examples from the polish demo: underline styles and skip-ink,
 SGR superscripts/subscripts, and mathematical brackets assembled across rows.*
 
-![Tektronix 4014 vector graphics and alpha text: a labeled wireframe cube, latitude/longitude globe, and sine-wave mesh in Noir](Docs/images/tektronix.png)
+![Tektronix 4014 vector graphics and alpha text: a labeled wireframe cube, latitude/longitude globe, and sine-wave mesh in mint-green phosphor](Docs/images/tektronix.png)
 
 *Tektronix 4014 vector graphics and alpha text: a labeled cube, a
-latitude/longitude globe, and a sine-wave mesh, with vector glow and Noir's
-green on its dark background. The labels are drawn by the terminal too.*
+latitude/longitude globe, and a sine-wave mesh, with mint-green phosphor and a
+soft, compact halo on a dark storage-tube background. The labels are drawn by
+the terminal too.*
 
 ![The Mandelbrot set rendered inline through the Kitty graphics protocol](Docs/images/inline-image.png)
 
