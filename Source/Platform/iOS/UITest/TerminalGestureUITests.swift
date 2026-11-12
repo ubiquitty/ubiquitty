@@ -1498,8 +1498,10 @@ final class TerminalGestureUITests: XCTestCase {
         }
         hostRow.swipeLeft()
         app.buttons["Edit"].firstMatch.tap()
+        let workspaces = app.switches["Use Workspaces"]
+        revealInTheForm(workspaces)
         XCTAssertTrue(
-            app.switches["Use Workspaces"].waitForExistence(timeout: 5),
+            workspaces.waitForExistence(timeout: 5),
             "the host editor offers no way to ask for QUIC"
         )
     }
@@ -3588,6 +3590,11 @@ final class TerminalGestureUITests: XCTestCase {
             "the system overflow menu is not on screen:\n" + app.debugDescription
         )
         systemMenu.tap()
+        let paste = app.buttons["Paste"]
+        XCTAssertTrue(
+            waitUntil(timeout: 5) { paste.exists && paste.isHittable },
+            "the overflow menu did not finish presenting:\n" + app.debugDescription
+        )
     }
 
     private func openConnectionDetails() {
