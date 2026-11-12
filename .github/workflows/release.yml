@@ -343,6 +343,25 @@ jobs:
 
       - name: Free unused hosted SDK space
         run: sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup
+      # The training image identity is read by Docker. Hub uses the classic
+      # image store; OrbStack's native ARM trainer uses containerd. Choose the
+      # same store before pulling so the exact image keeps that identity.
+      - name: Match the PGO training image store
+        env:
+          CONTAINERD_IMAGE_STORE: ${{ matrix.architecture == 'aarch64' && 'true' || 'false' }}
+        run: |
+          sudo --preserve-env=CONTAINERD_IMAGE_STORE python3 - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          path = Path('/etc/docker/daemon.json')
+          configuration = json.loads(path.read_text()) if path.exists() else {}
+          configuration.setdefault('features', {})['containerd-snapshotter'] = os.environ['CONTAINERD_IMAGE_STORE'] == 'true'
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(configuration))
+          PYTHON
+          sudo systemctl restart docker
+          docker info --format '{{json .DriverStatus}}'
       - name: Load the immutable PGO training image
         env:
           RELEASE_PGO_IMAGE: ${{ matrix.architecture == 'x86_64' && vars.PGO_LINUX_X86_64_IMAGE || vars.PGO_LINUX_ARM64_IMAGE }}

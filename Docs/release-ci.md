@@ -75,9 +75,12 @@ available in that registry before the first tagged build. The x86 image is on
 hub; the ARM image is in this Mac's OrbStack. Their expected configuration
 digests are recorded in Core's matching `.trained-toolchain` files.
 
-The release job pulls the selected immutable image and compares its image
-configuration digest with the committed profile provenance before assigning the
-CI recipe's local name. The existing compiler, recipe and profile checks still
+The release job selects the trainer's Docker image store: classic on x86_64,
+containerd on ARM64. It then pulls the immutable image and compares Docker's
+image identity with the committed profile provenance before assigning the CI
+recipe's local name. Docker's stores report different identities for an image;
+[the image-store configuration](https://docs.docker.com/engine/storage/containerd/)
+is set on the disposable release runner before any container starts. The existing compiler, recipe and profile checks still
 run. Rebuilding a similar image or using an ordinary hosted-CI image is
 insufficient: it can have a different compiler or image identity. Publishing
 these two existing images is a one-time preparation action, not a retrain.
