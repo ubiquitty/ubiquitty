@@ -14819,27 +14819,32 @@ int smokeWindowChrome(const char* outputDirectory)
             g_usleep(1000);
         } while (g_get_monotonic_time() < deadline);
     };
-    // Why a window produced no frame, or empty when it did. A window is given
-    // its size on a frame-clock tick, which on a loaded machine can come after
-    // the settle above, so the capture waits for the size, bounded, rather
-    // than reading a window that has not been laid out yet.
+    // Layout can give a window its size before GTK has produced its render
+    // node. Wait for both on the frame clock, bounded, before taking a picture.
     const auto capture = [&](GtkWidget* widget, const char* name) -> std::string {
         const gint64 deadline = g_get_monotonic_time() + 5'000'000;
-        while ((gtk_widget_get_width(widget) <= 0 || gtk_widget_get_height(widget) <= 0) && g_get_monotonic_time() < deadline) {
+        GdkPaintable* paintable = gtk_widget_paintable_new(widget);
+        GskRenderNode* node = nullptr;
+        int width = 0;
+        int height = 0;
+        do {
+            width = gtk_widget_get_width(widget);
+            height = gtk_widget_get_height(widget);
+            if (gtk_widget_get_mapped(widget) && width > 0 && height > 0) {
+                GtkSnapshot* snapshot = gtk_snapshot_new();
+                gdk_paintable_snapshot(paintable, GDK_SNAPSHOT(snapshot), width, height);
+                node = gtk_snapshot_free_to_node(snapshot);
+                if (node)
+                    break;
+            }
             g_main_context_iteration(nullptr, FALSE);
             g_usleep(1000);
-        }
-        const int width = gtk_widget_get_width(widget);
-        const int height = gtk_widget_get_height(widget);
+        } while (g_get_monotonic_time() < deadline);
+        g_object_unref(paintable);
         if (width <= 0 || height <= 0)
             return "it was given no size within 5 s";
-        GdkPaintable* paintable = gtk_widget_paintable_new(widget);
-        GtkSnapshot* snapshot = gtk_snapshot_new();
-        gdk_paintable_snapshot(paintable, GDK_SNAPSHOT(snapshot), width, height);
-        g_object_unref(paintable);
-        GskRenderNode* node = gtk_snapshot_free_to_node(snapshot);
         if (!node)
-            return "its snapshot made no render node";
+            return "its snapshot made no render node within 5 s";
         const graphene_rect_t bounds = GRAPHENE_RECT_INIT(0, 0, static_cast<float>(width), static_cast<float>(height));
         GdkTexture* texture = gsk_renderer_render_texture(gtk_native_get_renderer(GTK_NATIVE(widget)), node, &bounds);
         gsk_render_node_unref(node);

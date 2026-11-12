@@ -87,6 +87,11 @@ final class TerminalGestureUITests: XCTestCase {
         // A failed assertion leaves the app on whatever screen it was on, and
         // the next case starts from there. Each case relaunches instead.
         continueAfterFailure = false
+        // The simulator keeps its orientation across app launches and smoke
+        // runs. Each case starts in the phone layout it makes assertions about.
+        MainActor.assumeIsolated {
+            XCUIDevice.shared.orientation = .portrait
+        }
     }
 
     // MARK: - The screen tour
@@ -2545,12 +2550,19 @@ final class TerminalGestureUITests: XCTestCase {
         if !row.waitForExistence(timeout: 5) {
             addHost(named: Self.slowHostName, workspace: "", address: "192.0.2.1", prefersQUIC: false)
         }
+        let started = ContinuousClock.now
         row.tap()
         let step = app.descendants(matching: .any).matching(identifier: "terminal-connecting-step").firstMatch
         XCTAssertTrue(step.waitForExistence(timeout: 10), "connecting showed no step. On screen:\n" + app.debugDescription)
         XCTAssertTrue(step.label.hasSuffix("…"), "the step is not a status in progress: \(step.label)")
         let cancel = app.buttons["terminal-connecting-cancel"]
-        XCTAssertFalse(cancel.exists, "Cancel was offered before the connection had taken a while")
+        // Automation can wait for idle longer than the three-second delay.
+        // Only an observation made before that delay can judge it premature.
+        let isCancelVisible = cancel.exists
+        XCTAssertFalse(
+            isCancelVisible && started.duration(to: .now) < .seconds(3),
+            "Cancel was offered before the connection had taken a while"
+        )
         XCTAssertTrue(cancel.waitForExistence(timeout: 8), "a slow connection never offered Cancel")
         keepConnectShot("50-connecting", in: shots)
         cancel.tap()

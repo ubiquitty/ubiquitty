@@ -450,6 +450,25 @@ done
 # lines, and the runner's restart after a crash or a hang.
 grep -E ": error: -\[|Restarting after unexpected exit" "$LOG" 2>/dev/null | sed 's/^[[:space:]]*/        /'
 
+# Keep each failed case's actions and multiline accessibility diagnostics in
+# the job log. The error's first line alone drops the tree that explains why
+# a control was missing, and hosted runners retain no local build directory.
+/usr/bin/python3 - "$LOG" <<'PY'
+import sys
+
+case = []
+with open(sys.argv[1]) as log:
+    for line in log:
+        if line.startswith("Test Case '") and " started" in line:
+            case = []
+        case.append(line)
+        if line.startswith("Test Case '") and " failed" in line:
+            print("".join(case), end="")
+            case = []
+        elif line.startswith("Test Case '") and (" passed" in line or " skipped" in line):
+            case = []
+PY
+
 echo "run-ios-ui-tests: $passed passed, $failed failed, $skipped skipped ($expected selected, $declaredCases declared)"
 
 if [ "$rc" -eq 124 ]; then
