@@ -478,10 +478,15 @@ final class TerminalGestureUITests: XCTestCase {
         app.buttons["Terminate"].tap()
         XCTAssertTrue(app.staticTexts["2 Tabs"].waitForExistence(timeout: 5), "the closed tab's card stayed")
 
-        // Native reordering chooses before or after from the drop position.
+        // Wait for the native lift and insertion placeholder before releasing.
         // The card's midpoint does not specify an earlier insertion.
         second.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            .press(forDuration: 0.5, thenDragTo: first.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.15)))
+            .press(
+                forDuration: 1.0,
+                thenDragTo: first.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.15)),
+                withVelocity: XCUIGestureVelocity(150),
+                thenHoldForDuration: 1.0
+            )
         XCTAssertTrue(
             waitUntil(timeout: 5) { second.label.hasPrefix("Tab 1 of 2") },
             "dragging the tab earlier did not move its card: \(second.label)"
