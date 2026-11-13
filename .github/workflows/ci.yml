@@ -342,7 +342,8 @@ jobs:
       # A job's env cannot read the runner context, so this step sets the cache
       # beside the checkout from the runner's own variables; every later step
       # reads it.
-      - name: Compiler cache
+      - name: Compiler cache and build root
+        id: roots
         run: |
           command -v ccache >/dev/null 2>&1 || brew install ccache
           {
@@ -350,6 +351,16 @@ jobs:
             echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             echo "CCACHE_MAXSIZE=2G"
           } >> "$GITHUB_ENV"
+          echo "build=$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)" >> "$GITHUB_OUTPUT"
+          echo "quic_toolchain=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Restore QUIC dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ steps.roots.outputs.build }}/quic-deps
+            !${{ steps.roots.outputs.build }}/quic-deps/**/src/*/build
+          key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.roots.outputs.quic_toolchain }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/macos-deployment-target.txt', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/cmake/UbiquittyPreProject.cmake') }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.roots.outputs.quic_toolchain }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/macos-deployment-target.txt', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/cmake/UbiquittyPreProject.cmake') }}-apple-${{ matrix.group }}-
       - name: Restore the compiler cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -420,6 +431,15 @@ jobs:
         if: always()
         run: |
           if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi
+      - name: Save QUIC dependencies
+        if: always() && steps.roots.outputs.build != ''
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ steps.roots.outputs.build }}/quic-deps
+            !${{ steps.roots.outputs.build }}/quic-deps/**/src/*/build
+          key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.roots.outputs.quic_toolchain }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/macos-deployment-target.txt', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/cmake/UbiquittyPreProject.cmake') }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Save the compiler cache
         if: always()
         continue-on-error: true

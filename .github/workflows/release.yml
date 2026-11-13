@@ -106,6 +106,17 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
+      - name: QUIC dependency cache identity
+        id: quic
+        run: echo "quic_toolchain=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Restore QUIC dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ env.UBQ_BUILD_ROOT }}/quic-deps
+            !${{ env.UBQ_BUILD_ROOT }}/quic-deps/**/src/*/build
+          key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-macos-
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -136,6 +147,15 @@ jobs:
         run: |
           python3 "$GITHUB_WORKSPACE/Scripts/release_preparation.py" macos --tag "$PRODUCT_TAG" \
             --app "$UBQ_BUILD_ROOT/macos/Source/Platform/macOS/Ubiquitty.app" --directory "$UBQ_BUILD_ROOT/dist"
+      - name: Save QUIC dependencies
+        if: always() && env.UBQ_BUILD_ROOT != ''
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ env.UBQ_BUILD_ROOT }}/quic-deps
+            !${{ env.UBQ_BUILD_ROOT }}/quic-deps/**/src/*/build
+          key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-macos-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-unsigned
@@ -331,6 +351,17 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
+      - name: QUIC dependency cache identity
+        id: quic
+        run: echo "quic_toolchain=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Restore QUIC dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ env.UBQ_BUILD_ROOT }}/quic-deps
+            !${{ env.UBQ_BUILD_ROOT }}/quic-deps/**/src/*/build
+          key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-ios-${{ matrix.sdk }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-ios-${{ matrix.sdk }}-
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -344,6 +375,15 @@ jobs:
         run: ./Scripts/build-ios.sh --sdk "${{ matrix.sdk }}"
       - name: Package without a TestFlight upload
         run: python3 "$UBQ_RELEASE_CI" ios --sdk "${{ matrix.sdk }}" --tag "$PRODUCT_TAG" --directory "$UBQ_BUILD_ROOT/dist"
+      - name: Save QUIC dependencies
+        if: always() && env.UBQ_BUILD_ROOT != ''
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ env.UBQ_BUILD_ROOT }}/quic-deps
+            !${{ env.UBQ_BUILD_ROOT }}/quic-deps/**/src/*/build
+          key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-ios-${{ matrix.sdk }}-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: client-release-ios-${{ matrix.sdk }}
