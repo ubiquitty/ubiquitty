@@ -102,7 +102,11 @@ local counted = vim.wait(seconds * 1000, function()
     local now = sync.status(buffer)
     return now ~= nil and now.input_sent > 0 and now.input_written == now.input_sent
 end, 50)
-local described = (sync.status(buffer) or {}).echo ~= nil
+-- A resize checkpoint can clear the previous context before its following
+-- update supplies the current one. Wait for that update as for the screen.
+local described = vim.wait(seconds * 1000, function()
+    return (sync.status(buffer) or {}).echo ~= nil
+end, 50)
 
 local status = sync.status(buffer) or {}
 say(string.format("neovim_live_check: input sent %s, written %s, discarded %s",

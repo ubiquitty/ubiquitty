@@ -385,6 +385,8 @@ if wanted neovim_live; then
         SKIPPED=$((SKIPPED + 1))
     else
         RAN=$((RAN + 1))
+        nvim --headless -u NONE --noplugin -i NONE \
+            -l "$ROOT/Tests/Platform/neovim_live_wait_test.lua" "$ROOT/Tests/Platform/neovim_live_check.lua" || exit 1
         if HOST_BINARY="$(ubq_host_binary "$OUT/neovim-live-host-build.log")"; then
             nvim --headless -l "$ROOT/Tests/Platform/neovim_live_check.lua" "$HOST_BINARY" 10 || exit 1
         else
