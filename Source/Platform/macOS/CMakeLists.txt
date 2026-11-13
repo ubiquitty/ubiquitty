@@ -14,8 +14,6 @@ include(${UBIQUITTY_KIT_SOURCE_DIR}/Scripts/cmake/TypedPasteboard.cmake)
 # UBIQUITTY_FRONTEND=macOS.
 #
 
-cmake_minimum_required(VERSION 3.13)
-
 find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(METAL_FRAMEWORK Metal REQUIRED)
@@ -611,14 +609,10 @@ endif()
 #
 # Dynamic exclusivity stays ON here, where it is a safety property and no
 # per-frame seam runs; the render kit alone turns it off for its whole module.
-# Whole-module is set as the target property rather than spelled as a flag,
-# and the difference is not cosmetic. As a raw flag, CMake still declares one
-# object per source while the compiler writes them all in one invocation with
-# timestamps spread across it — so the earliest object is older than the newest
-# source, ninja calls the archive dirty on a tree where nothing moved, and every
-# build relinks the module, the executable, the metallib and the helpers. The
-# property tells CMake to expect one object, which is what makes a no-op build a
-# no-op. Xcode takes the mode as its build setting instead
+# The target property lets CMake plan whole-module compilation separately from
+# linking under CMP0157 NEW. The app's objects are refreshed together, so a
+# no-op build does not re-enter the Swift driver.
+# Xcode takes the mode as its build setting instead
 # (Scripts/cmake/UbiquittyKit.cmake spells why, for every Swift target), and
 # Scripts/check-xcode-workspace.py reads the generated project for it.
 if(CMAKE_GENERATOR MATCHES "Xcode")
