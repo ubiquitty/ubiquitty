@@ -120,7 +120,7 @@ jobs:
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/ccache
+          path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-macos-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: release-ccache-${{ runner.os }}-${{ runner.arch }}-macos-
       - name: Fetch Linux host binaries
@@ -188,7 +188,7 @@ jobs:
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/ccache
+          path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-appimage-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: release-ccache-${{ runner.os }}-${{ runner.arch }}-appimage-${{ matrix.architecture }}-
 
@@ -248,8 +248,11 @@ jobs:
           UBIQUITTY_PGO: REQUIRE
           UBQ_BUILD_JOBS: 4
         run: |
-          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh sh -c \
-            'PATH="${UBQ_PGO_LLVM:+$UBQ_PGO_LLVM:}$PATH" CC=clang CXX=clang++ exec ./Scripts/package-linux-appimage.sh'
+          container_build="$(cat <<'UBQ_APPIMAGE_BUILD'
+          PATH="${UBQ_PGO_LLVM:+$UBQ_PGO_LLVM:}$PATH" CC=clang CXX=clang++ exec ./Scripts/package-linux-appimage.sh
+          UBQ_APPIMAGE_BUILD
+          )"
+          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh sh -c "$container_build"
 
       - name: Preserve the Linux publication files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -309,7 +312,7 @@ jobs:
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/ccache
+          path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-web-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: release-ccache-${{ runner.os }}-${{ runner.arch }}-web-
       - name: Use the battery build root
@@ -365,7 +368,7 @@ jobs:
       - name: Compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/ccache
+          path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-ios-${{ matrix.sdk }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: release-ccache-${{ runner.os }}-${{ runner.arch }}-ios-${{ matrix.sdk }}-
       - name: Build the device or simulator development app

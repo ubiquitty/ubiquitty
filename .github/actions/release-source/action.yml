@@ -20,12 +20,15 @@ runs:
     - name: Resolve build tools
       shell: bash
       working-directory: product
+      env:
+        RELEASE_SOURCE_TAG: ${{ inputs.tag }}
       run: |
         set -euo pipefail
         if [ "$RUNNER_OS" = macOS ]; then
           command -v cmake >/dev/null || brew install cmake
           command -v ninja >/dev/null || brew install ninja
           command -v ccache >/dev/null || brew install ccache
+          command -v go >/dev/null || brew install go
         else
           sudo apt-get update -qq
           sudo apt-get install -y cmake ninja-build ccache pkg-config
@@ -33,10 +36,16 @@ runs:
         export UBQ_VERSION_TREE="$PWD"
         unset UBIQUITTY_BUILD_VERSION UBIQUITTY_BUILD_IDENTITY
         version_helper="$PWD/Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-version.sh"
+        build_version="$("$version_helper" version)"
+        build_identity="$("$version_helper" identity)"
+        if [ "$build_version" != "${RELEASE_SOURCE_TAG#v}" ] || [ -z "$build_identity" ]; then
+          echo "release-source: version and identity must describe the checked-out release tag" >&2
+          exit 1
+        fi
         {
           echo "UBQ_VERSION_TREE=$UBQ_VERSION_TREE"
-          echo "UBIQUITTY_BUILD_VERSION=$($version_helper version)"
-          echo "UBIQUITTY_BUILD_IDENTITY=$($version_helper identity)"
+          echo "UBIQUITTY_BUILD_VERSION=$build_version"
+          echo "UBIQUITTY_BUILD_IDENTITY=$build_identity"
           echo "UBQ_BUILD_ROOT=$RUNNER_WORKSPACE/build-release"
           echo "UBQ_RELEASE_CI=$GITHUB_WORKSPACE/Scripts/release_ci.py"
           echo "CCACHE_DIR=$RUNNER_WORKSPACE/ccache"

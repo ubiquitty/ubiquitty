@@ -8,8 +8,11 @@ from contextlib import redirect_stdout
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -21,6 +24,55 @@ SPEC.loader.exec_module(RELEASE)
 
 
 class ReleaseTests(unittest.TestCase):
+    def release_source_bootstrap(self, version="0.4.0", identity="01234567", failed_field=""):
+        action = (ROOT / ".github/actions/release-source/action.yml").read_text()
+        script = textwrap.dedent(action.split("      run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            product = directory / "product"
+            tools = directory / "bin"
+            tools.mkdir()
+            helper = product / "Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-version.sh"
+            helper.parent.mkdir(parents=True)
+            helper.write_text('#!/bin/sh\n'
+                              '[ "$1" != "$FAILED_FIELD" ] || exit 23\n'
+                              'case "$1" in\n'
+                              'version) printf "%s\\n" "$FIXTURE_VERSION" ;;\n'
+                              'identity) printf "%s\\n" "$FIXTURE_IDENTITY" ;;\n'
+                              'esac\n')
+            helper.chmod(0o755)
+            for name in ("cmake", "ninja", "ccache", "brew"):
+                tool = tools / name
+                tool.write_text('#!/bin/sh\n' + ('printf "%s\\n" "$*" >> "$BREW_LOG"\n' if name == "brew" else 'exit 0\n'))
+                tool.chmod(0o755)
+            output = directory / "environment"
+            brew_log = directory / "brew.log"
+            environment = {**os.environ, "PATH": str(tools), "RUNNER_OS": "macOS",
+                           "RUNNER_WORKSPACE": str(directory), "RUNNER_TEMP": str(directory),
+                           "GITHUB_WORKSPACE": str(directory), "GITHUB_ENV": str(output),
+                           "RELEASE_SOURCE_TAG": "v0.4.0", "BREW_LOG": str(brew_log),
+                           "FIXTURE_VERSION": version, "FIXTURE_IDENTITY": identity,
+                           "FAILED_FIELD": failed_field}
+            checked = subprocess.run(["/bin/bash", "-c", script], cwd=product, env=environment,
+                                     text=True, capture_output=True, timeout=10)
+            return (checked, output.read_text() if output.exists() else "",
+                    brew_log.read_text() if brew_log.exists() else "")
+
+    def test_release_source_installs_go_and_exports_verified_metadata(self):
+        checked, environment, installed = self.release_source_bootstrap()
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(installed, "install go\n")
+        self.assertIn("UBIQUITTY_BUILD_VERSION=0.4.0\n", environment)
+        self.assertIn("UBIQUITTY_BUILD_IDENTITY=01234567\n", environment)
+
+    def test_failed_or_empty_version_queries_cannot_export_release_metadata(self):
+        for options in ({"failed_field": "version"}, {"failed_field": "identity"},
+                        {"version": ""}, {"identity": ""}, {"version": "0.4.1"}):
+            with self.subTest(options=options):
+                checked, environment, _ = self.release_source_bootstrap(**options)
+                self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                self.assertEqual(environment, "")
+
     def test_tags_are_stable_versions_without_shell_or_path_syntax(self):
         self.assertEqual(RELEASE.version("v0.4.0"), "0.4.0")
         for tag in ("0.4.0", "v0.04.0", "v0.4.0-rc1", "v0.4.0/other", "v0.4.0\n", "$(id)"):
