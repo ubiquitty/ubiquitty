@@ -124,7 +124,9 @@ pathlib.Path(os.environ["ESC_FIXTURE_REPORT"]).write_text(json.dumps({
         report = self.successful_report("macos", "--", "--include", "DECRQM")
         self.assertEqual(report["configuration"], str(self.user_document))
         self.assertEqual(report["arguments"][2], str(self.scripts / "esctest-observer.py"))
-        self.assertEqual(report["arguments"][3], str(self.suite / "esctest" / "esctest.py"))
+        self.assertEqual(report["arguments"][3], "--ubiquitty-target")
+        self.assertEqual(report["arguments"][4], str(self.suite / "esctest" / "esctest.py"))
+        self.assertIn("--xterm-reverse-wrap=383", report["arguments"])
         self.assertEqual(report["arguments"][-2:], ["--include", "DECRQM"])
         self.assertIn("normal policy", (self.root / "BuildEsctest" / "esctest-provenance.txt").read_text())
 
@@ -226,6 +228,116 @@ class EsctestObserverTests(unittest.TestCase):
         self.adapter.install_single_page_observer(utility, self.commands)
         utility.GetChecksumOfRect(rectangle)
         self.assertEqual(self.requests, [(17, 3, rectangle)])
+
+    def target_fixture(self, responses=()):
+        events = []
+
+        class Modes:
+            def doPermanentlyResetDecTest(self, mode):
+                events.append(("permanent", mode))
+
+            def doModifiableDecTest(self, mode):
+                events.append(("modifiable", mode))
+
+        class Colors:
+            pass
+
+        Modes.__name__ = "DECRQMTests"
+        Colors.__name__ = "ResetSpecialColorTests"
+        for name in ("Single", "Single2", "Multiple", "Multiple2"):
+            setattr(Colors, "test_ResetSpecialColor_" + name, lambda self: None)
+        commands = SimpleNamespace(**{name: index for index, name in enumerate((
+            "DECARM", "DECCRTSM", "DECHCCM", "DECHEM", "DECKBUM", "DECKPM",
+            "DECNCSM", "DECNULM", "DECPCCM", "DECRLCM", "DECRLM", "DECVCCM",
+        ))})
+        commands.RIS = lambda: events.append("RIS")
+        commands.Allow80To132 = 40
+        commands.DECSET = lambda mode: events.append(("set", mode))
+        commands.ChangeSpecialColor = lambda *args: events.append(("4", args))
+        commands.ChangeSpecialColor2 = lambda *args: events.append(("5", args))
+        commands.ResetSpecialColor = lambda *args: events.append(("105", args))
+        replies = iter(responses)
+        utility = SimpleNamespace(GetIndexedColors=lambda: 256, AssertEQ=self.assertEqual)
+        namespace = {"tests": SimpleNamespace(tests=[Modes, Colors]),
+                     "reset": lambda: events.append("reset"),
+                     "escio": SimpleNamespace(ReadOSC=lambda alias: next(replies))}
+        self.adapter.install_target(namespace, commands, utility)
+        return namespace, commands, Modes, Colors, events
+
+    def test_target_checks_both_states_of_supported_dec_modes(self):
+        namespace, commands, modes, colors, events = self.target_fixture()
+        modes().doPermanentlyResetDecTest(commands.DECHCCM)
+        modes().doPermanentlyResetDecTest(999)
+        self.assertEqual(events, [("modifiable", commands.DECHCCM), ("permanent", 999)])
+
+    def test_target_propagates_a_mode_that_does_not_change(self):
+        namespace, commands, modes, colors, events = self.target_fixture()
+        def fail(self, mode):
+            raise AssertionError("mode did not change after DECSET")
+        modes.doModifiableDecTest = fail
+        with self.assertRaisesRegex(AssertionError, "mode did not change"):
+            modes().doPermanentlyResetDecTest(commands.DECHCCM)
+
+    def test_target_fixture_clears_prior_case_before_upstream_reset(self):
+        namespace, commands, modes, colors, events = self.target_fixture()
+        namespace["reset"]()
+        self.assertEqual(events, ["RIS", "reset", ("set", 40)])
+
+    def test_special_reset_checks_every_alias_and_index(self):
+        for alias, suffix in (("4", ""), ("5", "2")):
+            offset = 256 if alias == "4" else 0
+            for count, name in ((1, "Single"), (2, "Multiple")):
+                with self.subTest(alias=alias, count=count):
+                    values = ("aaaa/bbbb/cccc", "dddd/eeee/ffff")[:count]
+                    replies = [f";{offset + i};rgb:{value}" for i, value in enumerate(values)]
+                    namespace, commands, modes, colors, events = self.target_fixture(replies + replies)
+                    getattr(colors(), "test_ResetSpecialColor_" + name + suffix)()
+                    self.assertIn(("105", tuple(str(i) for i in range(count))), events)
+                    self.assertEqual(sum(event[0] == alias for event in events), count * 3)
+
+    def test_special_reset_detects_a_changed_color(self):
+        good = ";256;rgb:aaaa/bbbb/cccc"
+        namespace, commands, modes, colors, events = self.target_fixture([good, ";256;rgb:0000/0000/0000"])
+        with self.assertRaises(AssertionError):
+            colors().test_ResetSpecialColor_Single()
+
+    def test_only_implemented_features_lose_expected_failure_classification(self):
+        def classified(*args, **kwargs):
+            return lambda function: lambda: "expected failure"
+        utility = SimpleNamespace(knownBug=classified, optionRequired=classified)
+        def broken():
+            raise AssertionError("real failure")
+        with self.adapter.implemented_features(utility):
+            broken.__qualname__ = "DECSEDTests.test_DECSED_doesNotRespectISOProtect"
+            with self.assertRaisesRegex(AssertionError, "real failure"):
+                utility.knownBug(terminal="xterm", reason="fixture")(broken)()
+            self.assertEqual(utility.knownBug(terminal="iTerm2", reason="fixture")(broken)(), "expected failure")
+            broken.__qualname__ = "Unsupported.test_case"
+            self.assertEqual(utility.knownBug(terminal="xterm", reason="fixture")(broken)(), "expected failure")
+            broken.__qualname__ = "ManipulateSelectionDataTests.test_clipboard"
+            self.assertEqual(utility.optionRequired(terminal="xterm", option="xtermWinopsEnabled")(broken)(), "expected failure")
+        self.assertIs(utility.knownBug, classified)
+        self.assertIs(utility.optionRequired, classified)
+
+    def test_target_requires_the_pinned_entry_point(self):
+        with tempfile.TemporaryDirectory() as directory:
+            suite = Path(directory) / "suite.py"
+            suite.write_text("raise AssertionError('must not execute')")
+            with self.assertRaisesRegex(RuntimeError, "entry point changed"):
+                self.adapter.run_target(suite, None, None)
+
+    def test_target_invokes_main_once_after_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            suite = Path(directory) / "suite.py"
+            suite.write_text("calls = []\ndef main(): calls.append('main')\nmain()\n")
+            utility = SimpleNamespace(knownBug=lambda: None, optionRequired=lambda: None)
+            recorded = []
+            def install(namespace, commands, utility):
+                self.assertEqual(namespace["calls"], [])
+                recorded.append(namespace)
+            self.adapter.install_target = install
+            self.adapter.run_target(suite, None, utility)
+            self.assertEqual(recorded[0]["calls"], ["main"])
 
     def test_bootstrap_preserves_suite_import_order_and_arguments(self):
         with tempfile.TemporaryDirectory(prefix="ubq-esctest-bootstrap-") as directory:
