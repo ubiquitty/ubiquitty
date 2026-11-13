@@ -13,8 +13,6 @@
 # taken-from   498 tests passed, 36 known bugs, 6 TESTS FAILED
 # runs         3
 #
-DECRQMTests.test_DECRQM_DEC_DECARM
-DECRQMTests.test_DECRQM_DEC_DECNCSM
 ResetSpecialColorTests.test_ResetSpecialColor_Dynamic
 
 # FLAKY — failed in some runs and not others, on ONE binary. Excluded

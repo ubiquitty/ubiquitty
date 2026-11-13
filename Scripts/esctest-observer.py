@@ -7,6 +7,7 @@
 import ast
 import functools
 import importlib
+import os
 import runpy
 from contextlib import contextmanager
 from pathlib import Path
@@ -176,6 +177,9 @@ def main():
         run_target(suite, commands, utility)
     else:
         runpy.run_path(str(suite), run_name="__main__")
+    completion = os.environ.get("UBQ_ESCTEST_COMPLETION_FILE")
+    if completion:
+        Path(completion).write_text("complete\n")
 
 
 if __name__ == "__main__":

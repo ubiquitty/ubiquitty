@@ -71,6 +71,10 @@ pathlib.Path(os.environ["ESC_FIXTURE_REPORT"]).write_text(json.dumps({
 }))
 log = next(argument.split("=", 1)[1] for argument in sys.argv if argument.startswith("--logfile="))
 pathlib.Path(log).write_text("1 tests passed\\n")
+if os.environ.get("ESC_FIXTURE_STAYS_RESIDENT"):
+    import time
+    pathlib.Path(os.environ["UBQ_ESCTEST_COMPLETION_FILE"]).write_text("complete\\n")
+    time.sleep(60)
 ''')
         self.build = self.root / "build"
         self.container = self.build / "linux-container"
@@ -150,6 +154,11 @@ pathlib.Path(os.environ["ESC_FIXTURE_REPORT"]).write_text(json.dumps({
         self.assert_clipboard_only(report)
         self.assertNotIn("--allow-clipboard-read", report["arguments"])
         self.assertIn(report["configuration"], (self.root / "BuildEsctest" / "esctest-provenance.txt").read_text())
+
+    def test_macos_closes_its_resident_app_only_after_suite_completion(self):
+        self.environment["ESC_FIXTURE_STAYS_RESIDENT"] = "1"
+        self.successful_report("macos")
+        self.assertEqual(list((self.root / "BuildEsctest").glob("completion.*")), [])
 
     def test_macos_malformed_opt_in_does_not_launch(self):
         completed = self.run_wrapper("macos", "--allow-clipboard-read=all")
@@ -359,12 +368,23 @@ class EsctestObserverTests(unittest.TestCase):
                 "assert escutil.GetChecksumOfRect('rectangle') == 1\n"
                 "assert esccmd.DECRQCRA(9, 0, 'rectangle') == 0\n"
             )
+            completion = root / "completion"
+            environment = dict(os.environ, UBQ_ESCTEST_COMPLETION_FILE=str(completion))
             result = subprocess.run(
                 [sys.executable, str(Path(__file__).with_name("esctest-observer.py")),
                  str(suite), "--include", "fixture"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, env=environment,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(completion.read_text(), "complete\n")
+            completion.unlink()
+            suite.write_text("raise AssertionError('wrong cell')\n")
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("esctest-observer.py")), str(suite)],
+                capture_output=True, text=True, timeout=10, env=environment,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(completion.exists())
 
 
 if __name__ == "__main__":

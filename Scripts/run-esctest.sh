@@ -159,6 +159,7 @@ recordFact() {
     recordFact suite-commit "$suiteCommit"
     recordFact interpreter "$interpreter ($("$interpreter" -V 2>&1))"
     recordFact expected-terminal "$terminalName"
+    recordFact target-contract "${terminalName/xterm/ubiquitty (Tests/Esctest/README.md)}"
     recordFact screen-observer 'explicit page one; direct suite commands unchanged'
     recordFact consent-posture "$consentPosture"
     recordFact test-configuration "$testConfiguration"
@@ -171,8 +172,16 @@ printf '\nesctest2 runs inside %s in a window of its own; leave that window alon
 
 rm -f "$suiteLog"
 
-suiteCommand=("$interpreter" "$repoRoot/Scripts/esctest-observer.py" "$suiteMain" --expected-terminal="$terminalName" --logfile="$suiteLog" --no-print-logs)
-"$executable" -e "${suiteCommand[@]}" ${forwarded+"${forwarded[@]}"} &
+targetArguments=()
+suiteArguments=()
+if [[ "$terminalName" = xterm ]]; then
+    targetArguments=(--ubiquitty-target)
+    suiteArguments=(--xterm-reverse-wrap=383)
+fi
+suiteCommand=("$interpreter" "$repoRoot/Scripts/esctest-observer.py" ${targetArguments[@]+"${targetArguments[@]}"} "$suiteMain" --expected-terminal="$terminalName" --logfile="$suiteLog" --no-print-logs ${suiteArguments[@]+"${suiteArguments[@]}"})
+completionFile="$(mktemp "$resultsDir/completion.XXXXXX")"
+rm -f "$completionFile"
+UBQ_ESCTEST_COMPLETION_FILE="$completionFile" "$executable" -e "${suiteCommand[@]}" ${forwarded+"${forwarded[@]}"} &
 launcherPid=$!
 
 # The suite must prove it started, and the proof has to be something the
@@ -208,7 +217,23 @@ EOF
     sleep 1
 done
 
-while kill -0 "$launcherPid" 2>/dev/null; do sleep 2; done
+# A macOS app can remain resident after its last child exits. The adapter
+# writes this receipt only after the suite's shutdown has returned, so closing
+# this one launcher cannot truncate a test or interfere with another app.
+finishDeadline=$((SECONDS + 1800))
+while kill -0 "$launcherPid" 2>/dev/null; do
+    if [[ -s "$completionFile" ]]; then
+        kill -TERM "$launcherPid" 2>/dev/null || true
+        wait "$launcherPid" 2>/dev/null || true
+        break
+    fi
+    if [[ "$SECONDS" -ge "$finishDeadline" ]]; then
+        kill -TERM "$launcherPid" 2>/dev/null || true
+        refuse "error: esctest did not finish within 1800 seconds"
+    fi
+    sleep 2
+done
+rm -f "$completionFile"
 
 echo
 if ! grep -q "tests passed" "$suiteLog" 2>/dev/null; then
