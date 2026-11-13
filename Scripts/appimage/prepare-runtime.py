@@ -14,9 +14,9 @@ import tarfile
 import urllib.request
 
 RUNTIME = "fedfad51acc2860b2916a1eef32ba4a500ff31ef"
-APORTS = "8cba6412ff603a65b555a05dff15b3486e37e562"
+APORTS = "d3332621d44c2c4cf52e52217b16674db190212c"
 BASE = "alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd"
-PACKAGES = ("musl-1.2.5-r12", "zlib-1.3.2-r1", "zstd-libs-1.5.6-r2", "mimalloc2-2.1.7-r0")
+PACKAGES = ("musl-1.2.5-r12", "zlib-1.4-r0", "zstd-libs-1.5.6-r2", "mimalloc2-2.1.7-r0")
 
 
 def checkout(path, repository, revision):
@@ -91,7 +91,8 @@ def archive(root):
     installed = (root / "installed-packages.txt").read_text().splitlines()
     for package in PACKAGES:
         if not any(line.startswith(package + " ") for line in installed):
-            raise ValueError(f"runtime package changed; update its matching sources before release: {package}")
+            raise ValueError(f"runtime package changed; update its matching sources before release: {package}; "
+                             f"installed packages: {', '.join(installed)}")
     def include(member):
         parts = Path(member.name).parts
         return None if ".git" in parts or parts[:2] == ("source", "out") else member

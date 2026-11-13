@@ -62,6 +62,7 @@ jobs:
     timeout-minutes: 30
     name: Linux host (${{ matrix.arch }})
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: x86_64
@@ -325,8 +326,11 @@ jobs:
             python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py run linux \
             --source-root "$PWD" --only setup --only wasm-tools --only web-build
       - name: Package the complete browser distribution
+        env:
+          UBQ_CI_LINUX_IMAGE: "true"
         run: |
-          python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/license_notices.py \
+          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$PWD" \
+            python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/license_notices.py \
             --source "$PWD" --kit "$PWD/Libraries/ubiquitty-kit" \
             --core "$PWD/Libraries/ubiquitty-kit/Libraries/ubiquitty-core" --copy "$UBQ_BUILD_ROOT/web-dist"
           python3 "$UBQ_RELEASE_CI" web --tag "$PRODUCT_TAG" --directory "$UBQ_BUILD_ROOT/dist"
