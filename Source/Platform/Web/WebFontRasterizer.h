@@ -425,8 +425,8 @@ struct WebFontHost {
     int (*drawGlyph)(const char* family, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut) = nullptr;
     int (*drawCluster)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut) = nullptr;
     int (*drawColorCluster)(const char* family, const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut) = nullptr;
-    int (*measureProportional)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, double* advancesOut) = nullptr;
-    int (*drawProportional)(const char* family, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut) = nullptr;
+    int (*measureProportional)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, double* advancesOut) = nullptr;
+    int (*drawProportional)(const char* family, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int isItalic, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut) = nullptr;
     int (*shapeRun)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int bandHeight, int baseline, double* advancesOut, std::uint8_t* contextualFormsOut) = nullptr;
     int (*drawShapedRun)(const char* family, const std::uint32_t* codePoints, const double* naturalPensX, const double* placedPensX, int count, int pixelSize, int cssWeight, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut) = nullptr;
 };

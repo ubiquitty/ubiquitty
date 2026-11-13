@@ -163,29 +163,31 @@ int fakeProbeCluster(const char* family, std::span<const std::uint32_t> codePoin
 // A proportional engine whose advances differ per code point. A stand-in that
 // answered one width for every character would pass for a monospace face, and
 // the placement under test would be indistinguishable from the grid's.
-int fakeMeasureProportional(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, double* advancesOut)
+int fakeMeasureProportional(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, double* advancesOut)
 {
     engineLog.lastFamily = family;
     engineLog.lastPixelSize = pixelSize;
     engineLog.lastCSSWeight = cssWeight;
+    engineLog.lastIsItalic = isItalic;
     engineLog.proportionalMeasureCalls++;
     for (int index = 0; index < count; ++index) {
         // 'i' narrow, 'W' wide, everything else in between — enough that a run
         // measured per code point and a run measured as a block differ.
         const std::uint32_t codePoint = codePoints[index];
         const double fraction = codePoint == 'i' ? 0.25 : (codePoint == 'W' ? 0.9 : 0.5);
-        advancesOut[index] = static_cast<double>(pixelSize) * fraction;
+        advancesOut[index] = static_cast<double>(pixelSize) * (fraction + (isItalic ? 0.125 : 0.0));
     }
     return count;
 }
 
 int fakeDrawProportional(const char* family, const std::uint32_t*, const double* offsetsX, const double* offsetsY, int count, int pixelSize,
-    double horizontalScale, int cssWeight, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut)
+    double horizontalScale, int cssWeight, int isItalic, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut)
 {
     engineLog.lastFamily = family;
     engineLog.lastPixelSize = pixelSize;
     engineLog.lastProportionalHorizontalScale = horizontalScale;
     engineLog.lastCSSWeight = cssWeight;
+    engineLog.lastIsItalic = isItalic;
     engineLog.lastBaseline = baseline;
     engineLog.proportionalDrawCalls++;
     engineLog.lastProportionalCount = count;
@@ -834,6 +836,40 @@ TEST(testProportionalPreferencesReachBothMeasurementAndRaster)
     CHECK(rasterizer.rasteriseProportionalRun(glyphs, Rendering::FontFace::Regular, 64, 32, coverage));
     CHECK(engineLog.lastFamily == "Configured Proportional");
     CHECK_EQ(engineLog.lastPixelSize, 24.0);
+}
+
+TEST(testProportionalItalicUsesTheSameFaceForMetricsAndInk)
+{
+    installFakeEngine();
+    Rendering::UnifontRasterizer fallback;
+    WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+    const std::uint32_t run[] = { 'x' };
+    std::array<Ubiquitty::ProportionalShapedGlyph, 1> glyphs;
+    std::array<std::uint8_t, 64 * 64> coverage;
+    for (const auto face : { Rendering::FontFace::Regular, Rendering::FontFace::Italic,
+             Rendering::FontFace::Bold, Rendering::FontFace::BoldItalic, Rendering::FontFace::Regular }) {
+        const int italic = Rendering::isItalic(face);
+        const int weight = face == Rendering::FontFace::Bold || face == Rendering::FontFace::BoldItalic ? 700 : 400;
+        REQUIRE(rasterizer.shapeProportionalRun(run, face, glyphs) == 1);
+        CHECK_EQ(engineLog.lastIsItalic, italic);
+        CHECK_EQ(engineLog.lastCSSWeight, weight);
+        CHECK_EQ(glyphs[0].advanceInPixels, enginePixelSize * (italic ? 0.625f : 0.5f));
+        CHECK(rasterizer.rasteriseProportionalRun(glyphs, face, 64, 64, coverage));
+        CHECK_EQ(engineLog.lastIsItalic, italic);
+        CHECK_EQ(engineLog.lastCSSWeight, weight);
+
+        Rendering::SizedMaster doubled;
+        doubled.scale = 2;
+        CHECK(rasterizer.rasteriseSizedProportionalRun(glyphs, face, doubled, 64, 64, coverage));
+        CHECK_EQ(engineLog.lastIsItalic, italic);
+        CHECK_EQ(engineLog.lastCSSWeight, weight);
+        CHECK_EQ(engineLog.lastPixelSize, enginePixelSize * 2);
+
+        // The primary-font layout uses this same browser measuring seam.
+        REQUIRE(rasterizer.shapePrimaryRun(run, face, 0, glyphs) == 1);
+        CHECK_EQ(engineLog.lastIsItalic, italic);
+        CHECK_EQ(glyphs[0].advanceInPixels, enginePixelSize * (italic ? 0.625f : 0.5f));
+    }
 }
 
 TEST(testProportionalRasterCarriesTheCallersPlacement)

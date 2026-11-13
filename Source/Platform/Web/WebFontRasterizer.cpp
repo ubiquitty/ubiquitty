@@ -315,12 +315,12 @@ EM_JS(int, webFontDrawCluster, (const char* familyPtr, const std::uint32_t* code
 // across the whole run and measured across it, but cannot be reported here as
 // one glyph over two clusters. Advances are per code point and sum to the run.
 // clang-format off
-EM_JS(int, webFontMeasureProportional, (const char* familyPtr, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, double* advancesOut), {
+EM_JS(int, webFontMeasureProportional, (const char* familyPtr, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, double* advancesOut), {
     const family = UTF8ToString(familyPtr);
     if (!family || !Module.ubiquittyFontContext || count <= 0)
         return 0;
     const context = Module.ubiquittyFontContext;
-    context.font = `${cssWeight} ${pixelSize}px ${family}`;
+    context.font = `${isItalic ? "italic " : ""}${cssWeight} ${pixelSize}px ${family}`;
     if (!context.font.includes(`${pixelSize}px`))
         return 0;
     context.textBaseline = 'alphabetic';
@@ -345,7 +345,7 @@ EM_JS(int, webFontMeasureProportional, (const char* familyPtr, const std::uint32
 // the browser decided rather than where the layout did, which is a different
 // picture the moment a cell boundary rounds.
 // clang-format off
-EM_JS(int, webFontDrawProportional, (const char* familyPtr, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut), {
+EM_JS(int, webFontDrawProportional, (const char* familyPtr, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int isItalic, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut), {
     const family = UTF8ToString(familyPtr);
     if (!family || !Module.ubiquittyFontContext || count <= 0 || stripWidth <= 0 || stripHeight <= 0)
         return 0;
@@ -355,7 +355,7 @@ EM_JS(int, webFontDrawProportional, (const char* familyPtr, const std::uint32_t*
         canvas.width = Math.max(canvas.width, stripWidth);
         canvas.height = Math.max(canvas.height, stripHeight);
     }
-    context.font = `${cssWeight} ${pixelSize}px ${family}`;
+    context.font = `${isItalic ? "italic " : ""}${cssWeight} ${pixelSize}px ${family}`;
     if (!context.font.includes(`${pixelSize}px`))
         return 0;
     // Every property the draw depends on is set here, none inherited: this
@@ -627,14 +627,14 @@ int webFontDrawColorCluster(const char* family, const std::uint32_t* codePoints,
 {
     return s_webFontHost.drawColorCluster ? s_webFontHost.drawColorCluster(family, codePoints, count, slotInPixels, pixelsOut) : 0;
 }
-int webFontMeasureProportional(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, double* advancesOut)
+int webFontMeasureProportional(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, double* advancesOut)
 {
-    return s_webFontHost.measureProportional ? s_webFontHost.measureProportional(family, codePoints, count, pixelSize, cssWeight, advancesOut) : 0;
+    return s_webFontHost.measureProportional ? s_webFontHost.measureProportional(family, codePoints, count, pixelSize, cssWeight, isItalic, advancesOut) : 0;
 }
-int webFontDrawProportional(const char* family, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut)
+int webFontDrawProportional(const char* family, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int isItalic, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut)
 {
     return s_webFontHost.drawProportional
-        ? s_webFontHost.drawProportional(family, codePoints, offsetsX, offsetsY, count, pixelSize, horizontalScale, cssWeight, baseline, stripWidth, stripHeight, coverageOut)
+        ? s_webFontHost.drawProportional(family, codePoints, offsetsX, offsetsY, count, pixelSize, horizontalScale, cssWeight, isItalic, baseline, stripWidth, stripHeight, coverageOut)
         : 0;
 }
 int webFontShapeRun(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int bandHeight, int baseline, double* advancesOut, std::uint8_t* contextualFormsOut)
@@ -656,8 +656,8 @@ int webFontMeasure(int, int, int, double*, int*, int*, int*) { return 0; }
 int webFontDrawGlyph(const char*, int, double, double, double, int, int, double, double, int, int, int, std::uint8_t*) { return 0; }
 int webFontDrawCluster(const char*, const std::uint32_t*, int, int, int, int, int, int, int, int, std::uint8_t*) { return 0; }
 int webFontDrawColorCluster(const char*, const std::uint32_t*, int, int, std::uint8_t*) { return 0; }
-int webFontMeasureProportional(const char*, const std::uint32_t*, int, int, int, double*) { return 0; }
-int webFontDrawProportional(const char*, const std::uint32_t*, const double*, const double*, int, int, double, int, int, int, int, std::uint8_t*) { return 0; }
+int webFontMeasureProportional(const char*, const std::uint32_t*, int, int, int, int, double*) { return 0; }
+int webFontDrawProportional(const char*, const std::uint32_t*, const double*, const double*, int, int, double, int, int, int, int, int, std::uint8_t*) { return 0; }
 int webFontShapeRun(const char*, const std::uint32_t*, int, int, int, int, int, double*, std::uint8_t*) { return 0; }
 int webFontDrawShapedRun(const char*, const std::uint32_t*, const double*, const double*, int, int, int, int, int, int, std::uint8_t*) { return 0; }
 #endif
@@ -824,7 +824,7 @@ int WebFontRasterizer::shapeTextRun(std::span<const std::uint32_t> codePoints, s
         // form, so there is nothing to compare, and the run a strip draws from
         // stays the one shaped before it.
         double advance = 0.0;
-        if (webFontMeasureProportional(m_primaryFamily.c_str(), codePoints.data(), 1, m_pixelSize, cssWeight, &advance) != 1)
+        if (webFontMeasureProportional(m_primaryFamily.c_str(), codePoints.data(), 1, m_pixelSize, cssWeight, 0, &advance) != 1)
             return 0;
         ShapedGlyph& glyph = glyphsOut[0];
         glyph = {};
@@ -917,7 +917,7 @@ int WebFontRasterizer::shapeProportionalRun(std::span<const std::uint32_t> codeP
 
     m_proportionalAdvances.assign(codePoints.size(), 0.0);
     if (webFontMeasureProportional(proportionalFamily, codePoints.data(), static_cast<int>(codePoints.size()), m_proportionalPixelSize > 0 ? m_proportionalPixelSize : m_pixelSize,
-            cssWeight, m_proportionalAdvances.data())
+            cssWeight, Rendering::isItalic(face), m_proportionalAdvances.data())
         != static_cast<int>(codePoints.size()))
         return 0;
 
@@ -944,7 +944,7 @@ int WebFontRasterizer::shapePrimaryRun(std::span<const std::uint32_t> codePoints
     const int cssWeight = cssWeightFor(face, weight, m_userAxes, m_weights);
     m_proportionalAdvances.assign(codePoints.size(), 0.0);
     if (webFontMeasureProportional(m_primaryFamily.c_str(), codePoints.data(), static_cast<int>(codePoints.size()), m_pixelSize,
-            cssWeight, m_proportionalAdvances.data())
+            cssWeight, Rendering::isItalic(face), m_proportionalAdvances.data())
         != static_cast<int>(codePoints.size()))
         return 0;
     for (std::size_t index = 0; index < codePoints.size(); ++index) {
@@ -989,7 +989,7 @@ bool WebFontRasterizer::rasteriseProportionalRun(std::span<const Ubiquitty::Prop
     // nothing.
     const int baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), stripHeightInPixels);
     return webFontDrawProportional(proportionalFamily, m_proportionalCodePoints.data(), m_proportionalOffsetsX.data(),
-               m_proportionalOffsetsY.data(), static_cast<int>(glyphs.size()), m_proportionalPixelSize > 0 ? m_proportionalPixelSize : m_pixelSize, 1.0, cssWeight, baseline,
+               m_proportionalOffsetsY.data(), static_cast<int>(glyphs.size()), m_proportionalPixelSize > 0 ? m_proportionalPixelSize : m_pixelSize, 1.0, cssWeight, Rendering::isItalic(face), baseline,
                stripWidthInPixels, stripHeightInPixels, coverageOut.data())
         != 0;
 }
@@ -1020,7 +1020,7 @@ bool WebFontRasterizer::rasteriseSizedProportionalRun(std::span<const Ubiquitty:
     const int scale = master.scale.whole();
     const int baseline = std::min(scale * static_cast<int>(m_metrics.baselineFromTop), stripHeightInPixels);
     return webFontDrawProportional(proportionalFamily, m_proportionalCodePoints.data(), m_proportionalOffsetsX.data(),
-               m_proportionalOffsetsY.data(), static_cast<int>(glyphs.size()), (m_proportionalPixelSize > 0 ? m_proportionalPixelSize : m_pixelSize) * scale, master.horizontalScale, cssWeight, baseline,
+               m_proportionalOffsetsY.data(), static_cast<int>(glyphs.size()), (m_proportionalPixelSize > 0 ? m_proportionalPixelSize : m_pixelSize) * scale, master.horizontalScale, cssWeight, Rendering::isItalic(face), baseline,
                stripWidthInPixels, stripHeightInPixels, coverageOut.data())
         != 0;
 }
@@ -1087,7 +1087,7 @@ bool WebFontRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::FontF
     const bool isCursiveForm = (codePoint >= 0xFB50 && codePoint <= 0xFDFF) || (codePoint >= 0xFE70 && codePoint <= 0xFEFC);
     if (isCursiveForm) {
         double advance = 0.0;
-        if (webFontMeasureProportional(family.c_str(), &codePoint, 1, m_pixelSize, cssWeight, &advance) == 1 && advance > 0.0)
+        if (webFontMeasureProportional(family.c_str(), &codePoint, 1, m_pixelSize, cssWeight, Rendering::isItalic(face), &advance) == 1 && advance > 0.0)
             horizontalScale = static_cast<double>(slotWidth) / advance;
     }
     if (webFontDrawGlyph(family.c_str(), static_cast<int>(codePoint), m_pixelSize, horizontalScale, 1.0, cssWeight, Rendering::isItalic(face) ? 1 : 0,
@@ -1164,7 +1164,7 @@ bool WebFontRasterizer::rasterizeSizedMaster(std::uint32_t codePoint, Rendering:
         // leaves the glyph's advance the slot's, so only the shift places it.
         double advanceInPixels = static_cast<double>(slotWidth);
         double measured = 0.0;
-        if (webFontMeasureProportional(family.c_str(), &codePoint, 1, m_pixelSize, cssWeight, &measured) == 1 && measured > 0.0)
+        if (webFontMeasureProportional(family.c_str(), &codePoint, 1, m_pixelSize, cssWeight, Rendering::isItalic(face), &measured) == 1 && measured > 0.0)
             advanceInPixels = measured * scale.value() * master.horizontalScale;
         const Rendering::SubpixelPhase pen = Rendering::sizedMasterPen(slotWidth, advanceInPixels, master);
         const double penX = (static_cast<double>(pen.snappedPenX) + static_cast<double>(pen.phase) / Rendering::sizedMasterPenGrid) / master.horizontalScale;
