@@ -3556,6 +3556,7 @@ TEST(testTheLinkLookupFollowsTheViewport)
 TEST(testBeamCompositesIntoTheFrame)
 {
     WebTerminal terminal(24, 80, 1);
+    terminal.setPresentationTime(0);
     terminal.feed("hello");
 
     const std::vector<std::uint8_t> plainImage = terminal.render();
@@ -3631,6 +3632,7 @@ TEST(aWideGlyphDrawsFromItsOwnPage)
 TEST(aThemeChosenInBeamRepaintsTheTerminal)
 {
     WebTerminal terminal(6, 20, 1);
+    terminal.setPresentationTime(0);
     const char text[] = "hello";
     terminal.feed(text);
 
@@ -3676,6 +3678,7 @@ TEST(theSelectionStaysInsideTheDrawnPalette)
     // Short enough that the height cap bites and far fewer rows are drawn than
     // there are themes to show.
     WebTerminal terminal(14, 80, 1);
+    terminal.setPresentationTime(0);
     CHECK(terminal.toggleBeam());
     for (const char ch : std::string("choose theme"))
         terminal.feedBeamKey(static_cast<std::uint32_t>(ch), 0, 0, static_cast<std::uint32_t>(ch));
@@ -4002,6 +4005,7 @@ TEST(theQueriesAUserActuallyTypesFindTheTheme)
     // nothing.
     {
         WebTerminal terminal(24, 80, 1);
+        terminal.setPresentationTime(0);
         terminal.feed("hello");
         const std::vector<std::uint8_t> before = terminal.render();
         const auto rows = rowsFor(terminal, "gruvbox");
@@ -4162,6 +4166,7 @@ TEST(pointerLockIsVisibleAndReportsDeltas)
 // macOS wired in, which is when it would be expensive to be wrong.
 TEST(testBeamSurfaceDecidesWhoDrawsThePalette)
 {
+    // Pixel comparisons hold the cursor's blink phase while changing the palette.
     // Native available and native asked for: the frontend draws it, so nothing
     // reaches the grid. The session still opens — the setting picks the surface,
     // not whether the palette exists.
@@ -4171,6 +4176,7 @@ TEST(testBeamSurfaceDecidesWhoDrawsThePalette)
         terminal.setNativeBeam(Ubiquitty::Preferences::NativeBeam::Available);
         terminal.setBeamSurface(Ubiquitty::Preferences::BeamSurface::Native);
 
+        terminal.setPresentationTime(0);
         const std::vector<std::uint8_t> plainImage = terminal.render();
         CHECK(terminal.toggleBeam());
         CHECK_MSG(terminal.isBeamOpen(), "the session opens whoever draws it");
@@ -4185,6 +4191,7 @@ TEST(testBeamSurfaceDecidesWhoDrawsThePalette)
         terminal.setNativeBeam(Ubiquitty::Preferences::NativeBeam::Available);
         terminal.setBeamSurface(Ubiquitty::Preferences::BeamSurface::InTerminal);
 
+        terminal.setPresentationTime(0);
         const std::vector<std::uint8_t> plainImage = terminal.render();
         CHECK(terminal.toggleBeam());
         CHECK_MSG(terminal.render() != plainImage, "in-terminal draws in the grid on a native-capable build");
@@ -4197,6 +4204,7 @@ TEST(testBeamSurfaceDecidesWhoDrawsThePalette)
         terminal.feed("hello");
         terminal.setBeamSurface(Ubiquitty::Preferences::BeamSurface::Native);
 
+        terminal.setPresentationTime(0);
         const std::vector<std::uint8_t> plainImage = terminal.render();
         CHECK(terminal.toggleBeam());
         CHECK_MSG(terminal.render() != plainImage, "a native request falls back rather than opening nothing");
