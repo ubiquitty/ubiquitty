@@ -116,6 +116,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("tags: ['v*.*.*']", workflow)
         self.assertIn('UBIQUITTY_SIGN_IDENTITY: ad-hoc', workflow)
         self.assertIn('name: release-preparation', prepare)
+        for job in ("preflight", "source-packages"):
+            definition = workflow.split("  " + job + ":\n", 1)[1].split("    steps:", 1)[0]
+            self.assertIn("checks: read", definition)
 
 
 if __name__ == "__main__":
