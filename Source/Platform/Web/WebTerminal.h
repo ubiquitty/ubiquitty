@@ -935,6 +935,12 @@ public:
     /// - Parameter milliseconds: Absolute display time, in milliseconds.
     void setPresentationTime(std::uint32_t milliseconds);
 
+    /// Returns when a real-time cursor needs its next presentation.
+    ///
+    /// - Returns: The tick delay, or zero for a steady, hidden, unfocused or
+    ///   externally clocked cursor.
+    [[nodiscard]] std::uint32_t cursorTicksUntilAlphaChange() const;
+
     /// Reads program metadata without capturing the grid or draining events.
     ///
     /// Raw title and directory, decoded OSC 7501 records with their inherited

@@ -685,9 +685,13 @@ if (!lastSocket) {
     return match ? Number(match[1]) : -1;
   };
   const cycle = async () => {
+    const before = socketsOpened;
     if (lastSocket) { lastSocket.readyState = 3; if (lastSocket.onclose) lastSocket.onclose({ code: 1006 }); }
     const announced = delayFromStatus();
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    // A backoff above 900ms still owns the closed socket at that point.
+    // Wait for its replacement before closing the next connection.
+    for (let attempt = 0; attempt < 120 && socketsOpened === before; ++attempt)
+      await new Promise((resolve) => setTimeout(resolve, 50));
     return announced;
   };
 
@@ -711,10 +715,8 @@ if (!lastSocket) {
 // is applied against a baseline that no longer matches and patches the wrong
 // cells. A standalone page (no ?attach=) is the terminal and must still echo.
 //
-// The observable is a PAINT. A local feed repaints to show the character, so
-// counting paints across a keystroke separates "swallowed" from "echoed"
-// without needing to read the grid. Measured against a quiet baseline first,
-// because a background repaint would otherwise read as an echo.
+// Compare the captured grid. Cursor blink repaints an unchanged mirror, so a
+// paint count cannot distinguish a local echo from presentation alone.
 {
   const keydown = listeners.get('ime:keydown');
   if (!keydown) {
@@ -732,11 +734,7 @@ if (!lastSocket) {
     // and the check passes against the bug.
     refuseOpen = true;
 
-    const quiet = paints;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const drift = paints - quiet; // repaints that happen with no input at all
-
-    const before = paints;
+    const before = JSON.stringify(window.ubiquitty.capture().rows);
     if (lastSocket) { lastSocket.readyState = 3; if (lastSocket.onclose) lastSocket.onclose({ code: 1006 }); }
     keydown({
       key: 'a', code: 'KeyA', keyCode: 65,
@@ -745,10 +743,8 @@ if (!lastSocket) {
       preventDefault() {}, stopPropagation() {},
     });
     await new Promise((resolve) => setTimeout(resolve, 300));
-    const echoed = paints - before;
-
-    if (echoed > drift)
-      failures.push(`a detached attached-client echoed a keystroke locally (${echoed} paint(s) against a ${drift}-paint quiet baseline) — that forks the mirror the host is about to patch`);
+    if (JSON.stringify(window.ubiquitty.capture().rows) !== before)
+      failures.push('a detached attached-client echoed a keystroke into the mirrored grid');
   }
 }
 

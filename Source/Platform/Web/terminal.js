@@ -305,6 +305,17 @@ async function main(module) {
       displayIdleTimer = setTimeout(() => { displayIdleTimer = 0; paint(); }, Math.max(1, ticks) * 1000 / 60);
     }
   }
+  const cursorTicksUntilAlphaChange = module.cwrap('ubiquittyWebCursorTicksUntilAlphaChange', 'number', []);
+  let cursorRepaintTimer = 0;
+  function bookCursorRepaint() {
+    const ticks = document.visibilityState === 'hidden' ? 0 : cursorTicksUntilAlphaChange();
+    if (ticks <= 0) {
+      clearTimeout(cursorRepaintTimer);
+      cursorRepaintTimer = 0;
+    } else if (!cursorRepaintTimer) {
+      cursorRepaintTimer = setTimeout(() => { cursorRepaintTimer = 0; paint(); }, (ticks + 1) * 1000 / 60);
+    }
+  }
   const hintTicksUntilExpiry = module.cwrap('ubiquittyWebHintTicksUntilExpiry', 'number', []);
   // Which words a lesson uses for the modifiers is decided by the keyboard
   // in front of the reader: a Mac prints ⌘ on the key, a Windows keyboard a
@@ -1322,6 +1333,7 @@ async function main(module) {
   function paint() {
     if (isSearchOpen) queueSearchPump();
     bookDisplayIdle();
+    bookCursorRepaint();
     pumpClipboard();
     // Per frame: the mode is set by an escape sequence off the host stream, and
     // there is no other moment the page reliably sees it change.

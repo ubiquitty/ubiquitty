@@ -599,17 +599,28 @@ TEST(testColorClusterPath)
     CHECK(engineLog.lastProbePresentation == Rendering::Font::Presentation::Emoji);
     CHECK(!engineLog.lastProbeRequiresOwnFace);
     CHECK(engineLog.lastFamily.find("Noto Color Emoji") != std::string::npos);
+    // A colour-pass call is already resolved by Core, including SGR 76's
+    // override of a text selector and a text-default bare pictograph.
     const std::uint32_t forcedText[] = { 0x26A0, 0xFE0E };
-    (void)rasterizer.rasterizeColorCluster(forcedText, 2, 32, pixels.data());
-    CHECK(engineLog.lastProbeCluster == std::vector<std::uint32_t>({ 0x26A0, 0xFE0E }));
-    CHECK(engineLog.lastProbePresentation == Rendering::Font::Presentation::Text);
-    CHECK(engineLog.lastFamily.find("Noto Color Emoji") == std::string::npos);
+    CHECK(rasterizer.rasterizeColorCluster(forcedText, 2, 32, pixels.data()));
+    CHECK(engineLog.lastProbeCluster == std::vector<std::uint32_t>({ 0x26A0, 0xFE0F }));
+    CHECK(engineLog.lastProbePresentation == Rendering::Font::Presentation::Emoji);
+    CHECK(engineLog.lastFamily.find("Noto Color Emoji") != std::string::npos);
+    const std::uint32_t barePictograph[] = { 0x26A0 };
+    CHECK(rasterizer.rasterizeColorCluster(barePictograph, 1, 32, pixels.data()));
+    CHECK(engineLog.lastProbeCluster == std::vector<std::uint32_t>({ 0x26A0, 0xFE0F }));
+    CHECK(engineLog.lastProbePresentation == Rendering::Font::Presentation::Emoji);
 
     const std::uint32_t keycap[] = { '1', 0xFE0F, 0x20E3 };
     CHECK(rasterizer.rasterizeColorCluster(keycap, 3, 32, pixels.data()));
     CHECK(engineLog.lastProbeCluster == std::vector<std::uint32_t>({ '1', 0xFE0F, 0x20E3 }));
     CHECK(engineLog.lastProbePresentation == Rendering::Font::Presentation::Emoji);
     CHECK(engineLog.lastFamily.find("Noto Color Emoji") != std::string::npos);
+
+    std::array<std::uint8_t, 16 * 32> textCoverage;
+    CHECK(rasterizer.rasterizeGlyph(0x2B50, Rendering::FontFace::Regular, 400, 16, 32, textCoverage.data()));
+    CHECK(engineLog.lastProbePresentation == Rendering::Font::Presentation::Text);
+    CHECK(engineLog.lastFamily.find("Noto Color Emoji") == std::string::npos);
 
     // Degenerate arguments refuse before the seam.
     CHECK(!rasterizer.rasterizeColorCluster(nullptr, 1, 32, pixels.data()));

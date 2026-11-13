@@ -1676,6 +1676,8 @@ UBIQUITTY_WEB_EXPORT void ubiquittyWebAdvanceGraphicsClock(int elapsedMillisecon
         terminal->advanceGraphicsClock(static_cast<std::uint32_t>(elapsedMilliseconds));
 }
 
+UBIQUITTY_WEB_EXPORT int ubiquittyWebCursorTicksUntilAlphaChange() { return terminal ? static_cast<int>(terminal->cursorTicksUntilAlphaChange()) : 0; }
+
 UBIQUITTY_WEB_EXPORT void ubiquittyWebSetPresentationTime(int milliseconds)
 {
     if (terminal && milliseconds >= 0)

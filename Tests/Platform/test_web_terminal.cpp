@@ -1074,6 +1074,7 @@ TEST(testCursorReachesTheOverlayPass)
     WebTerminal terminal(4, 20, 1);
     const char bar[] = "\033[5 q"; // DECSCUSR: a bar cursor is an overlay quad
     terminal.feed(bar);
+    terminal.setPresentationTime(0);
     CHECK(terminal.buildFrame());
     CHECK_MSG(terminal.overlayInstanceCount() > 0, "a non-block cursor is an overlay instance");
     CHECK(terminal.overlayInstances() != nullptr);
@@ -6823,6 +6824,37 @@ TEST(testScriptedGlyphsReachTheBrowserInstanceStream)
     CHECK(glyphs[1].atlasBottomRight.x > glyphs[1].atlasTopLeft.x);
     // Only the scripted cells leave the ordinary cell pass.
     CHECK_EQ(terminal.cellInstanceCount(), 24);
+}
+
+TEST(testDisplayTimeResolvesCursorBlinkForBothRenderPaths)
+{
+    WebTerminal terminal(2, 8, 1);
+    terminal.setFocus(Ubiquitty::Modes::FocusState::Focused);
+    terminal.feed("\x1b[1 q");
+    CHECK(terminal.cursorTicksUntilAlphaChange() > 0u);
+    terminal.setPresentationTime(0);
+    CHECK(terminal.buildFrame());
+    const auto visible = terminal.render();
+    const auto visibleCells = terminal.cellInstanceCount();
+    const auto visibleOverlays = terminal.overlayInstanceCount();
+    std::vector<Ubiquitty::Rendering::CellInstance> cells(terminal.cellInstances(), terminal.cellInstances() + visibleCells);
+    std::vector<Ubiquitty::Rendering::OverlayInstance> overlays(terminal.overlayInstances(), terminal.overlayInstances() + visibleOverlays);
+    terminal.setPresentationTime(850);
+    CHECK(terminal.buildFrame());
+    bool didChangeGPU = terminal.cellInstanceCount() != visibleCells || terminal.overlayInstanceCount() != visibleOverlays;
+    for (int index = 0; index < std::min(visibleCells, terminal.cellInstanceCount()); ++index) {
+        didChangeGPU |= std::memcmp(&cells[index].background, &terminal.cellInstances()[index].background, sizeof(cells[index].background)) != 0;
+        didChangeGPU |= std::memcmp(&cells[index].foreground, &terminal.cellInstances()[index].foreground, sizeof(cells[index].foreground)) != 0;
+    }
+    for (int index = 0; index < std::min(visibleOverlays, terminal.overlayInstanceCount()); ++index)
+        didChangeGPU |= std::memcmp(&overlays[index].color, &terminal.overlayInstances()[index].color, sizeof(overlays[index].color)) != 0;
+    CHECK(didChangeGPU);
+    CHECK(terminal.render() != visible);
+    CHECK_EQ(terminal.cursorTicksUntilAlphaChange(), 0u);
+    terminal.feed("\x1b[2 q");
+    CHECK(terminal.buildFrame());
+    CHECK_EQ(terminal.cellInstanceCount(), visibleCells);
+    CHECK(terminal.render() == visible);
 }
 
 TEST(testExplicitDisplayTimeResolvesTextBlinkInBothRenderPaths)

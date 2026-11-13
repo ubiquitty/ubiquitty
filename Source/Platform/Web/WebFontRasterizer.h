@@ -338,9 +338,10 @@ private:
     ///   - count: How many code points.
     ///   - face: The style the pen asked for.
     ///   - weight: The variable weight the pen asked for.
+    ///   - presentation: The presentation Core selected for this raster pass.
     /// - Returns: A CSS font-family list to draw with, empty when the policy
     ///   found no family and the caller should take its fallback.
-    std::string familyForCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight);
+    std::string familyForCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, Rendering::Font::Presentation presentation);
 
     /// Maps the seam's style to Core's.
     ///

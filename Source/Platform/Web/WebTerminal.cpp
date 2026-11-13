@@ -24,6 +24,7 @@
 #include "Core/Cell.h"
 #include "Core/CellPen.h"
 #include "Core/Codec/JSON.h"
+#include "Core/Cursor/RenderState.h"
 #include "Core/Input/Keybindings.h"
 #include "Core/Input/PointerInput.h"
 #include "Core/Keys/Keymap.h"
@@ -492,7 +493,12 @@ void WebTerminal::applyConfiguredFrameStyle(Rendering::TerminalSnapshotOptions& 
     options.style.shouldEnhanceTextContrast = m_configuration.shouldEnhanceTextContrast;
     options.style.backgroundOpacity = static_cast<float>(m_configuration.backgroundOpacity);
     options.shouldResolveBlink = true;
-    options.blinkTicks = m_presentationTicks.value_or(PAL::monotonicTicks().count);
+    options.blinkTicks = m_presentationTicks ? *m_presentationTicks : PAL::monotonicTicks().count;
+    auto cursor = Cursor::appearanceInputs(&m_terminal);
+    // A replay clock begins at zero; wall-clock activity is outside its timeline.
+    if (m_presentationTicks)
+        cursor.lastActivityTick = 0;
+    options.cursorMixAlpha = Cursor::resolveAppearance(cursor, options.blinkTicks).blinkAlpha;
 }
 
 void WebTerminal::updatePresentation()
@@ -2440,6 +2446,13 @@ const char* WebTerminal::captureProgramState()
 void WebTerminal::advanceGraphicsClock(std::uint32_t elapsedMilliseconds)
 {
     Image::advanceFrames(&m_terminal, elapsedMilliseconds);
+}
+
+std::uint32_t WebTerminal::cursorTicksUntilAlphaChange() const
+{
+    if (m_presentationTicks || !m_isFocused || !m_terminal.modes.isCursorVisible)
+        return 0;
+    return Cursor::ticksUntilAlphaChange(&m_terminal, PAL::monotonicTicks().count);
 }
 
 void WebTerminal::setPresentationTime(std::uint32_t milliseconds)

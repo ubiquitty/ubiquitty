@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "Platform/Web/WebFontRasterizer.h"
+#include "Core/ClusterPool.h"
 
 #include "Core/Rendering/CellLayout.h"
 #include "Core/Rendering/FontMetrics.h"
@@ -997,7 +998,7 @@ bool WebFontRasterizer::rasteriseSizedProportionalRun(std::span<const Ubiquitty:
         != 0;
 }
 
-std::string WebFontRasterizer::familyForCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight)
+std::string WebFontRasterizer::familyForCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, Rendering::Font::Presentation presentation)
 {
     using namespace Rendering::Font;
 
@@ -1005,7 +1006,7 @@ std::string WebFontRasterizer::familyForCluster(const std::uint32_t* codePoints,
     FontRequest request;
     request.codePoints = std::span<const std::uint32_t>(codePoints, static_cast<std::size_t>(count));
     request.script = classifyScript(codePoints[0]);
-    request.presentation = presentationForCluster(request.codePoints);
+    request.presentation = presentation;
     request.style = styleForFace(face);
     request.variableWeight = static_cast<std::uint8_t>(weight > 255 ? 255 : weight);
     // Routing asks which face suits the glyph, not how a terminal places it,
@@ -1029,7 +1030,7 @@ bool WebFontRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::FontF
     // Which family draws this is Core's decision, resolved here rather than at
     // the seam: `GlyphRasterizer` passes a code point and no font, exactly as
     // macOS's rasterise methods do before calling copyFontForCodePoint.
-    const std::string family = familyForCluster(&codePoint, 1, face, weight);
+    const std::string family = familyForCluster(&codePoint, 1, face, weight, Rendering::Font::Presentation::Text);
     if (family.empty())
         return m_fallback.rasterizeGlyph(codePoint, face, weight, slotWidth, slotHeight, coverageOut);
 
@@ -1063,7 +1064,7 @@ bool WebFontRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int co
 {
     if (!m_isAvailable || !codePoints || count <= 0 || slotWidth <= 0 || slotHeight <= 0 || !coverageOut)
         return m_fallback.rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
-    const std::string family = familyForCluster(codePoints, count, face, weight);
+    const std::string family = familyForCluster(codePoints, count, face, weight, Rendering::Font::Presentation::Text);
     const int baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), slotHeight);
     if (!family.empty() && webFontDrawCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeightFor(face, weight, m_userAxes, m_weights), Rendering::isItalic(face) ? 1 : 0, baseline, slotWidth, slotHeight, coverageOut))
         return true;
@@ -1074,10 +1075,22 @@ bool WebFontRasterizer::rasterizeColorCluster(const std::uint32_t* codePoints, i
 {
     if (!m_isAvailable || !codePoints || count <= 0 || slotInPixels <= 0 || !pixelsOut)
         return false;
-    const std::string family = familyForCluster(codePoints, count, Rendering::FontFace::Regular, 400);
+    if (count > clusterPoolMaximumCodePoints)
+        return false;
+    // Core selected the colour pass from the stored cell presentation. Give
+    // the browser a matching selector even when SGR overrides a text selector.
+    std::array<std::uint32_t, clusterPoolMaximumCodePoints + 1> presented;
+    std::copy_n(codePoints, count, presented.begin());
+    for (int index = 0; index < count; ++index) {
+        if (presented[index] == Unicode::Width::variationSelector15)
+            presented[index] = Unicode::Width::variationSelector16;
+    }
+    if (count == 1 && Unicode::isExtendedPictographic(presented[0]) && !Unicode::Width::isEmojiPresentation(presented[0]))
+        presented[count++] = Unicode::Width::variationSelector16;
+    const std::string family = familyForCluster(presented.data(), count, Rendering::FontFace::Regular, 400, Rendering::Font::Presentation::Emoji);
     if (family.empty())
         return false;
-    return webFontDrawColorCluster(family.c_str(), codePoints, count, slotInPixels, pixelsOut) != 0;
+    return webFontDrawColorCluster(family.c_str(), presented.data(), count, slotInPixels, pixelsOut) != 0;
 }
 
 bool WebFontRasterizer::rasterizeSizedMaster(std::uint32_t codePoint, Rendering::FontFace face, std::uint32_t weight, const Rendering::SizedMaster& master, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
@@ -1104,7 +1117,7 @@ bool WebFontRasterizer::rasterizeSizedMaster(std::uint32_t codePoint, Rendering:
     const Rendering::RasterScale scale = master.scale;
     const double scaledSize = scale.isWhole() ? static_cast<double>(m_pixelSize * scale.whole()) : m_pixelSize * scale.value();
     const double baseline = std::min(Rendering::sizedMasterBaselineFromTop(static_cast<double>(static_cast<int>(m_metrics.baselineFromTop)), master), static_cast<double>(slotHeight));
-    const std::string family = familyForCluster(&codePoint, 1, face, weight);
+    const std::string family = familyForCluster(&codePoint, 1, face, weight, Rendering::Font::Presentation::Text);
     const int cssWeight = cssWeightFor(face, weight, m_userAxes, m_weights);
     if (!family.empty()) {
         // The advance the browser draws this glyph at, measured at the face's own
@@ -1128,7 +1141,7 @@ bool WebFontRasterizer::rasterizeTilingGlyph(std::uint32_t codePoint, Rendering:
 {
     const auto donor = Rendering::stemDonor(codePoint);
     const std::uint32_t drawn = donor ? donor : codePoint;
-    const auto family = familyForCluster(&drawn, 1, face, weight);
+    const auto family = familyForCluster(&drawn, 1, face, weight, Rendering::Font::Presentation::Text);
     if (family.empty())
         return false;
     double size = m_pixelSize * master.scale.value();
