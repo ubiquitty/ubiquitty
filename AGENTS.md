@@ -64,8 +64,8 @@ file it came from.
 ## Architecture and correctness
 
 Correctness takes priority over performance, and performance over convenience.
-The product is unpublished: replace obsolete contracts completely instead of
-adding compatibility paths for versions that have not shipped.
+Replace obsolete contracts completely instead of adding compatibility paths
+for versions that have not shipped.
 
 - Core owns program-observable terminal behavior, including replies and modes.
   Frontends own native presentation and input integration.
