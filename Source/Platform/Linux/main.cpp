@@ -2831,6 +2831,159 @@ bool isPerfLogEnabled()
     return enabled;
 }
 
+// A presented frame. A GtkPicture stretches a paintable to its allocation, so a
+// stale frame would be squeezed or stretched for as long as a resize waits for
+// its next frame. This paintable ignores the size it is asked to draw at: the
+// texture stays at its own size and origin, clipped to the allocation, until a
+// frame laid out for the new size replaces it.
+struct UbiquittyFramePaintable {
+    GObject parent;
+    GdkTexture* texture;
+    graphene_rect_t bounds; // device pixels
+    int intrinsicWidth;
+    int intrinsicHeight;
+    float deviceScale; // device pixels per logical pixel
+};
+
+struct UbiquittyFramePaintableClass {
+    GObjectClass parentClass;
+};
+
+void initializeFramePaintableInterface(GdkPaintableInterface*);
+
+G_DEFINE_TYPE_WITH_CODE(UbiquittyFramePaintable, ubiquitty_frame_paintable, G_TYPE_OBJECT,
+    G_IMPLEMENT_INTERFACE(GDK_TYPE_PAINTABLE, initializeFramePaintableInterface))
+
+void finalizeFramePaintable(GObject* object)
+{
+    g_clear_object(&static_cast<UbiquittyFramePaintable*>(static_cast<void*>(object))->texture);
+    G_OBJECT_CLASS(ubiquitty_frame_paintable_parent_class)->finalize(object);
+}
+
+void ubiquitty_frame_paintable_class_init(UbiquittyFramePaintableClass* frameClass)
+{
+    G_OBJECT_CLASS(frameClass)->finalize = finalizeFramePaintable;
+}
+
+void ubiquitty_frame_paintable_init(UbiquittyFramePaintable*) { }
+
+void snapshotFramePaintable(GdkPaintable* paintable, GdkSnapshot* snapshot, double width, double height)
+{
+    const auto* frame = static_cast<const UbiquittyFramePaintable*>(static_cast<const void*>(paintable));
+    const graphene_rect_t clip = GRAPHENE_RECT_INIT(0, 0, static_cast<float>(width), static_cast<float>(height));
+    gtk_snapshot_push_clip(GTK_SNAPSHOT(snapshot), &clip);
+    // The frame is laid out in device pixels, the allocation is in logical
+    // ones: converting by the display scale is the only scaling applied.
+    gtk_snapshot_save(GTK_SNAPSHOT(snapshot));
+    gtk_snapshot_scale(GTK_SNAPSHOT(snapshot), 1.0f / frame->deviceScale, 1.0f / frame->deviceScale);
+    gtk_snapshot_append_texture(GTK_SNAPSHOT(snapshot), frame->texture, &frame->bounds);
+    gtk_snapshot_restore(GTK_SNAPSHOT(snapshot));
+    gtk_snapshot_pop(GTK_SNAPSHOT(snapshot));
+}
+
+GdkPaintableFlags framePaintableFlags(GdkPaintable*)
+{
+    return static_cast<GdkPaintableFlags>(GDK_PAINTABLE_STATIC_SIZE | GDK_PAINTABLE_STATIC_CONTENTS);
+}
+
+int framePaintableWidth(GdkPaintable* paintable)
+{
+    return static_cast<const UbiquittyFramePaintable*>(static_cast<const void*>(paintable))->intrinsicWidth;
+}
+
+int framePaintableHeight(GdkPaintable* paintable)
+{
+    return static_cast<const UbiquittyFramePaintable*>(static_cast<const void*>(paintable))->intrinsicHeight;
+}
+
+void initializeFramePaintableInterface(GdkPaintableInterface* paintableInterface)
+{
+    paintableInterface->snapshot = snapshotFramePaintable;
+    paintableInterface->get_flags = framePaintableFlags;
+    paintableInterface->get_intrinsic_width = framePaintableWidth;
+    paintableInterface->get_intrinsic_height = framePaintableHeight;
+}
+
+// The frame as a paintable that owns a reference to its texture. Intrinsic
+// dimensions are logical pixels; the texture's bounds are device pixels.
+GdkPaintable* makeFramePaintable(GdkTexture* texture, const graphene_rect_t& bounds, int intrinsicWidth, int intrinsicHeight, float deviceScale)
+{
+    auto* frame = static_cast<UbiquittyFramePaintable*>(g_object_new(ubiquitty_frame_paintable_get_type(), nullptr));
+    frame->texture = GDK_TEXTURE(g_object_ref(texture));
+    frame->bounds = bounds;
+    frame->intrinsicWidth = intrinsicWidth;
+    frame->intrinsicHeight = intrinsicHeight;
+    frame->deviceScale = deviceScale;
+    return GDK_PAINTABLE(frame);
+}
+
+// Exercise the presentation node itself, without a Vulkan device or a window.
+// A stale frame keeps its origin and pixel size as the allocation changes.
+int smokeFramePaintable()
+{
+    if (!gtk_init_check()) {
+        g_printerr("smoke-frame-paintable: no GTK display\n");
+        return 1;
+    }
+    int failures = 0;
+    for (const int scale : { 1, 2 }) {
+        const int pixelWidth = 8 * scale;
+        const int pixelHeight = 4 * scale;
+        std::vector<std::uint8_t> pixels(static_cast<std::size_t>(pixelWidth * pixelHeight * 4));
+        for (int row = 0; row < pixelHeight; ++row) {
+            for (int column = 0; column < pixelWidth; ++column) {
+                const auto offset = static_cast<std::size_t>((row * pixelWidth + column) * 4);
+                pixels[offset] = column < 2 * scale ? 255 : 0;
+                pixels[offset + 2] = column < 2 * scale ? 0 : 255;
+                pixels[offset + 3] = 255;
+            }
+        }
+        GBytes* bytes = g_bytes_new(pixels.data(), pixels.size());
+        GdkTexture* texture = GDK_TEXTURE(gdk_memory_texture_new(pixelWidth, pixelHeight, GDK_MEMORY_R8G8B8A8, bytes, static_cast<std::size_t>(pixelWidth * 4)));
+        g_bytes_unref(bytes);
+        const graphene_rect_t bounds = GRAPHENE_RECT_INIT(2.0f * scale, 1.0f * scale, static_cast<float>(pixelWidth), static_cast<float>(pixelHeight));
+        GdkPaintable* paintable = makeFramePaintable(texture, bounds, 12, 6, static_cast<float>(scale));
+        g_object_unref(texture);
+        if (gdk_paintable_get_intrinsic_width(paintable) != 12 || gdk_paintable_get_intrinsic_height(paintable) != 6)
+            ++failures;
+        for (const auto& [width, height] : { std::pair { 4, 4 }, std::pair { 12, 6 }, std::pair { 16, 10 } }) {
+            GtkSnapshot* snapshot = gtk_snapshot_new();
+            gdk_paintable_snapshot(paintable, GDK_SNAPSHOT(snapshot), width, height);
+            GskRenderNode* node = gtk_snapshot_free_to_node(snapshot);
+            if (!node) {
+                ++failures;
+                continue;
+            }
+            cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+            cairo_t* context = cairo_create(surface);
+            gsk_render_node_draw(node, context);
+            cairo_destroy(context);
+            cairo_surface_flush(surface);
+            const unsigned char* output = cairo_image_surface_get_data(surface);
+            const int stride = cairo_image_surface_get_stride(surface);
+            bool matches = cairo_surface_status(surface) == CAIRO_STATUS_SUCCESS;
+            for (int row = 0; row < height; ++row) {
+                for (int column = 0; column < width; ++column) {
+                    const bool isInFrame = column >= 2 && column < 10 && row >= 1 && row < 5;
+                    const std::uint32_t expected = isInFrame ? (column < 4 ? 0xFFFF0000u : 0xFF0000FFu) : 0u;
+                    std::uint32_t actual = 0;
+                    std::memcpy(&actual, output + row * stride + column * 4, sizeof(actual));
+                    matches = matches && actual == expected;
+                }
+            }
+            cairo_surface_destroy(surface);
+            gsk_render_node_unref(node);
+            if (!matches) {
+                g_printerr("smoke-frame-paintable: scale %d, allocation %dx%d stretched, shifted or filled the frame\n", scale, width, height);
+                ++failures;
+            }
+        }
+        g_object_unref(paintable);
+    }
+    g_print("smoke-frame-paintable: %s (%d failures; 1x/2x shrink, same size and grow)\n", failures ? "FAIL" : "PASS", failures);
+    return failures ? 1 : 0;
+}
+
 // A texture over the frame's host pixels. GTK reads the bytes lazily, so they
 // outlive this frame: the pooled buffer rides inside the GBytes and comes back
 // to the pool when GTK lets the bytes go.
@@ -3104,18 +3257,13 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     }
     if (!texture)
         texture = makeMemoryFrameTexture(std::move(frameBuffer), width, height);
-    // The immutable node transforms the complete CPU or Vulkan picture once.
-    // No resampling/readback pass is added to either renderer, and GTK clips
-    // the image rather than stretching it to a different owner's grid.
-    GtkSnapshot* snapshot = gtk_snapshot_new();
-    const graphene_rect_t clip = GRAPHENE_RECT_INIT(0, 0, viewport.width, viewport.height);
-    gtk_snapshot_push_clip(snapshot, &clip);
+    // The frame is drawn at its own size and clipped to the picture's
+    // allocation, so a resize that has not yet produced its next frame shows the
+    // old one unscaled instead of stretched to a different owner's grid. No
+    // resampling/readback pass is added to either renderer.
     const graphene_rect_t bounds = GRAPHENE_RECT_INIT(pane.presentation.origin.x, pane.presentation.origin.y,
         width * pane.presentation.scale, height * pane.presentation.scale);
-    gtk_snapshot_append_texture(snapshot, texture, &bounds);
-    gtk_snapshot_pop(snapshot);
-    const graphene_size_t size = GRAPHENE_SIZE_INIT(viewport.width, viewport.height);
-    GdkPaintable* paintable = gtk_snapshot_free_to_paintable(snapshot, &size);
+    GdkPaintable* paintable = makeFramePaintable(texture, bounds, gtk_widget_get_width(picture), gtk_widget_get_height(picture), static_cast<float>(app().scale));
     gtk_picture_set_paintable(GTK_PICTURE(picture), paintable);
     g_object_unref(paintable);
     g_object_unref(texture);
@@ -16044,6 +16192,8 @@ int main(int argc, char** argv)
     // double-count in the registries they assert over.
     if (mode != "--smoke-tabs" && mode != "--smoke-splits")
         ensureDefaultPane();
+    if (mode == "--smoke-frame-paintable")
+        return smokeFramePaintable();
     if (mode == "--snapshot")
         return runSnapshot(argc, argv);
     if (mode == "--version") {
