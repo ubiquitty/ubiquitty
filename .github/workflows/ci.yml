@@ -75,8 +75,12 @@ jobs:
         id: reach
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_reach.py --source-root "$GITHUB_WORKSPACE"
+      - name: Documentation-only change; platform coverage deferred
+        if: steps.reach.outputs.documentation == 'true'
+        run: echo "Documentation preflight runs; platform batteries remain outside this push."
       # A sweep that stands down runs no gate, so it concludes as the run that
       # judged this tip did: a failed tip stays red, and the next sweep reads
       # this run's failure as the same verdict rather than its skips as a pass.
