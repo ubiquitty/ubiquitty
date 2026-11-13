@@ -278,6 +278,9 @@ if [ "$newlyPassing" != "0" ]; then
 fi
 if [ "$newlyFailing" != "0" ] || [ "$newlyPassing" != "0" ]; then
     echo "  baseline: $BASELINE" >&2
+    # Hosted runners are ephemeral; retain the assertions in the job log.
+    echo "check-esctest: full suite log: $LOG" >&2
+    cat "$LOG" >&2
     exit 1
 fi
 
