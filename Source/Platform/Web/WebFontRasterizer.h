@@ -422,8 +422,8 @@ namespace ForTest {
 struct WebFontHost {
     int (*primaryFamily)(char* familyOut, int capacity) = nullptr;
     int (*measure)(int pixelSize, int firstCharacter, int characterCount, double* advances, int* ascent, int* descent, int* xHeight) = nullptr;
-    int (*drawGlyph)(const char* family, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut) = nullptr;
-    int (*drawCluster)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut) = nullptr;
+    int (*drawGlyph)(const char* family, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut) = nullptr;
+    int (*drawCluster)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut) = nullptr;
     int (*drawColorCluster)(const char* family, const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut) = nullptr;
     int (*measureProportional)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, double* advancesOut) = nullptr;
     int (*drawProportional)(const char* family, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut) = nullptr;

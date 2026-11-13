@@ -50,6 +50,7 @@ struct EngineLog {
     int lastCSSWeight = 0;
     int lastIsItalic = 0;
     double lastPenX = 0;
+    int lastIsTextPictograph = 0;
     int colorCalls = 0;
     int clusterCalls = 0;
     std::vector<std::uint32_t> lastDrawnCluster;
@@ -108,8 +109,9 @@ int fakeProportionalMeasure(int pixelSize, int firstCharacter, int characterCoun
     return 1;
 }
 
-int fakeDrawGlyph(const char* family, int codePoint, double pixelSize, double horizontalScale, double, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+int fakeDrawGlyph(const char* family, int codePoint, double pixelSize, double horizontalScale, double, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut)
 {
+    engineLog.lastIsTextPictograph = isTextPictograph;
     engineLog.lastFamily = family;
     engineLog.lastPenX = penX;
     engineLog.lastPixelSize = pixelSize;
@@ -123,8 +125,9 @@ int fakeDrawGlyph(const char* family, int codePoint, double pixelSize, double ho
     return 1;
 }
 
-int fakeDrawCluster(const char*, const std::uint32_t* codePoints, int count, int, int, int, int, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+int fakeDrawCluster(const char*, const std::uint32_t* codePoints, int count, int, int, int, int, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut)
 {
+    engineLog.lastIsTextPictograph = isTextPictograph;
     ++engineLog.clusterCalls;
     engineLog.lastDrawnCluster.assign(codePoints, codePoints + count);
     std::memset(coverageOut, engineCoverageByte, static_cast<std::size_t>(slotWidth) * static_cast<std::size_t>(slotHeight));
@@ -626,6 +629,35 @@ TEST(testColorClusterPath)
     CHECK(!rasterizer.rasterizeColorCluster(nullptr, 1, 32, pixels.data()));
     CHECK(!rasterizer.rasterizeColorCluster(emoji, 0, 32, pixels.data()));
     CHECK(!rasterizer.rasterizeColorCluster(emoji, 1, 0, pixels.data()));
+}
+
+TEST(testTextPictographsUseCompleteOutlinesAndTextFontProbes)
+{
+    installFakeEngine();
+    Rendering::UnifontRasterizer fallback;
+    WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+    std::array<std::uint8_t, 32 * 64> coverage;
+    for (const std::uint32_t symbol : { 0x2602, 0x2600, 0x2708, 0x2764, 0x2B50 }) {
+        CHECK(rasterizer.rasterizeGlyph(symbol, Rendering::FontFace::Regular, 0, 8, 16, coverage.data()));
+        CHECK_EQ(engineLog.lastIsTextPictograph, 1);
+        CHECK(engineLog.lastProbeCluster == std::vector<std::uint32_t>({ symbol, 0xFE0E }));
+        CHECK(engineLog.lastProbePresentation == Rendering::Font::Presentation::Text);
+        CHECK_EQ(coverage[0], engineCoverageByte);
+
+        // Core can force text even when the input includes an emoji selector.
+        const std::uint32_t cluster[] = { symbol, 0xFE0F };
+        CHECK(rasterizer.rasterizeCluster(cluster, 2, Rendering::FontFace::Regular, 0, 8, 16, coverage.data()));
+        CHECK_EQ(engineLog.lastIsTextPictograph, 1);
+        CHECK(engineLog.lastProbeCluster == std::vector<std::uint32_t>({ symbol, 0xFE0E }));
+        CHECK(rasterizer.rasterizeGlyphScaled(symbol, Rendering::FontFace::Regular, 0, 2, 16, 32, coverage.data()));
+        CHECK_EQ(engineLog.lastIsTextPictograph, 1);
+    }
+    // Letter bearings and combining marks keep the ordinary shaping path.
+    CHECK(rasterizer.rasterizeGlyph('A', Rendering::FontFace::Italic, 0, 8, 16, coverage.data()));
+    CHECK_EQ(engineLog.lastIsTextPictograph, 0);
+    const std::uint32_t accented[] = { 'a', 0x301 };
+    CHECK(rasterizer.rasterizeCluster(accented, 2, Rendering::FontFace::Regular, 0, 8, 16, coverage.data()));
+    CHECK_EQ(engineLog.lastIsTextPictograph, 0);
 }
 
 TEST(testScaledRasterAsksTheEngineAtTheScaledSize)

@@ -117,6 +117,25 @@ EM_JS(int, webFontMeasure, (int pixelSize, int firstCharacter, int characterCoun
     // narrower question than the one being asked.
     if (!context || typeof context.getImageData !== 'function' || typeof context.measureText !== 'function')
         return 0;
+    // Text pictographs can come from a proportional symbol face, even when the
+    // grid font is monospace. Fit the complete outline into Core's text cell,
+    // preserving its aspect ratio. This runs only when filling an atlas slot.
+    Module.ubiquittyDrawTextPictograph = (text, baseline, width, height, across = 1, down = 1) => {
+        text = text.replace(/\uFE0F/g, "\uFE0E");
+        if (Array.from(text).length === 1) text += "\uFE0E";
+        const ink = context.measureText(text);
+        const inkWidth = ink.actualBoundingBoxLeft + ink.actualBoundingBoxRight;
+        let fit = inkWidth > 0 ? Math.min(1, width / (inkWidth * across)) : 1;
+        const inkHeight = ink.actualBoundingBoxAscent + ink.actualBoundingBoxDescent;
+        if (inkHeight > 0) fit = Math.min(fit, height / (inkHeight * down));
+        const scaleX = across * fit, scaleY = down * fit;
+        const x = (width - inkWidth * scaleX) / 2 + ink.actualBoundingBoxLeft * scaleX;
+        const y = Math.max(ink.actualBoundingBoxAscent * scaleY,
+            Math.min(baseline, height - ink.actualBoundingBoxDescent * scaleY));
+        context.setTransform(scaleX, 0, 0, scaleY, x, y);
+        context.fillText(text, 0, 0);
+        context.setTransform(1, 0, 0, 1, 0, 0);
+    };
     context.font = `${pixelSize}px ${family}`;
     // Read back rather than trust the write. The setter's silence is the failure
     // mode; the getter returns the value in force, so a specification that did
@@ -176,7 +195,7 @@ EM_JS(int, webFontMeasureGlyph, (const char* familyPtr, int codePoint, double pi
     return Number.isFinite(metrics.actualBoundingBoxAscent) ? 1 : 0;
 });
 
-EM_JS(int, webFontDrawGlyph, (const char* familyPtr, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut), {
+EM_JS(int, webFontDrawGlyph, (const char* familyPtr, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut), {
     const family = UTF8ToString(familyPtr);
     if (!family || !Module.ubiquittyFontContext)
         return 0;
@@ -223,14 +242,18 @@ EM_JS(int, webFontDrawGlyph, (const char* familyPtr, int codePoint, double pixel
     context.clearRect(0, 0, slotWidth, slotHeight);
     context.fillStyle = '#fff';
     const text = String.fromCodePoint(codePoint);
-    if (!context.measureText(text).width && codePoint !== 32)
+    if (!isTextPictograph && !context.measureText(text).width && codePoint !== 32)
         return 0;
     // A sized master's stretch across is the outline's, applied before the
     // fill rasterises it, never a resample of the drawn pixels. The pen is in
     // the unstretched space, so the stretch carries it too.
-    context.setTransform(horizontalScale, 0, 0, verticalScale, 0, 0);
-    context.fillText(text, penX, baseline / verticalScale);
-    context.setTransform(1, 0, 0, 1, 0, 0);
+    if (isTextPictograph) {
+        Module.ubiquittyDrawTextPictograph(text, baseline, slotWidth, slotHeight, horizontalScale, verticalScale);
+    } else {
+        context.setTransform(horizontalScale, 0, 0, verticalScale, 0, 0);
+        context.fillText(text, penX, baseline / verticalScale);
+        context.setTransform(1, 0, 0, 1, 0, 0);
+    }
     const pixels = context.getImageData(0, 0, slotWidth, slotHeight).data;
     // Alpha only: the fill is opaque white, so alpha is the coverage.
     for (let i = 0, at = coverageOut; i < slotWidth * slotHeight; ++i, ++at)
@@ -242,7 +265,7 @@ EM_JS(int, webFontDrawGlyph, (const char* familyPtr, int codePoint, double pixel
 // Rasterize a grapheme in one shaping operation; combining marks have no
 // independent advance and must be placed by the face against their base.
 // clang-format off
-EM_JS(int, webFontDrawCluster, (const char* familyPtr, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut), {
+EM_JS(int, webFontDrawCluster, (const char* familyPtr, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut), {
     const family = UTF8ToString(familyPtr);
     const canvas = Module.ubiquittyFontCanvas;
     const context = Module.ubiquittyFontContext;
@@ -263,10 +286,14 @@ EM_JS(int, webFontDrawCluster, (const char* familyPtr, const std::uint32_t* code
     context.fillStyle = "#fff";
     const base = HEAPU32[codePoints >> 2];
     const cursive = (base >= 0xFB50 && base <= 0xFDFF) || (base >= 0xFE70 && base <= 0xFEFC);
-    const advance = context.measureText(text).width;
-    if (cursive && advance > 0) context.scale(slotWidth / advance, 1);
-    context.fillText(text, 0, baseline);
-    context.setTransform(1, 0, 0, 1, 0, 0);
+    if (isTextPictograph) {
+        Module.ubiquittyDrawTextPictograph(text, baseline, slotWidth, slotHeight);
+    } else {
+        const advance = context.measureText(text).width;
+        if (cursive && advance > 0) context.scale(slotWidth / advance, 1);
+        context.fillText(text, 0, baseline);
+        context.setTransform(1, 0, 0, 1, 0, 0);
+    }
     const pixels = context.getImageData(0, 0, slotWidth, slotHeight).data;
     for (let index = 0; index < slotWidth * slotHeight; ++index)
         HEAPU8[coverageOut + index] = pixels[index * 4 + 3];
@@ -588,13 +615,13 @@ int webFontMeasure(int pixelSize, int firstCharacter, int characterCount, double
 {
     return s_webFontHost.measure ? s_webFontHost.measure(pixelSize, firstCharacter, characterCount, advances, ascent, descent, xHeight) : 0;
 }
-int webFontDrawGlyph(const char* family, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+int webFontDrawGlyph(const char* family, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut)
 {
-    return s_webFontHost.drawGlyph ? s_webFontHost.drawGlyph(family, codePoint, pixelSize, horizontalScale, verticalScale, cssWeight, isItalic, penX, baseline, slotWidth, slotHeight, coverageOut) : 0;
+    return s_webFontHost.drawGlyph ? s_webFontHost.drawGlyph(family, codePoint, pixelSize, horizontalScale, verticalScale, cssWeight, isItalic, penX, baseline, slotWidth, slotHeight, isTextPictograph, coverageOut) : 0;
 }
-int webFontDrawCluster(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+int webFontDrawCluster(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut)
 {
-    return s_webFontHost.drawCluster ? s_webFontHost.drawCluster(family, codePoints, count, pixelSize, cssWeight, isItalic, baseline, slotWidth, slotHeight, coverageOut) : 0;
+    return s_webFontHost.drawCluster ? s_webFontHost.drawCluster(family, codePoints, count, pixelSize, cssWeight, isItalic, baseline, slotWidth, slotHeight, isTextPictograph, coverageOut) : 0;
 }
 int webFontDrawColorCluster(const char* family, const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut)
 {
@@ -626,8 +653,8 @@ int webFontDrawShapedRun(const char* family, const std::uint32_t* codePoints, co
 int webFontPrimaryFamily(char*, int) { return 0; }
 int webFontMeasureGlyph(const char*, int, double, int, int, double*) { return 0; }
 int webFontMeasure(int, int, int, double*, int*, int*, int*) { return 0; }
-int webFontDrawGlyph(const char*, int, double, double, double, int, int, double, double, int, int, std::uint8_t*) { return 0; }
-int webFontDrawCluster(const char*, const std::uint32_t*, int, int, int, int, int, int, int, std::uint8_t*) { return 0; }
+int webFontDrawGlyph(const char*, int, double, double, double, int, int, double, double, int, int, int, std::uint8_t*) { return 0; }
+int webFontDrawCluster(const char*, const std::uint32_t*, int, int, int, int, int, int, int, int, std::uint8_t*) { return 0; }
 int webFontDrawColorCluster(const char*, const std::uint32_t*, int, int, std::uint8_t*) { return 0; }
 int webFontMeasureProportional(const char*, const std::uint32_t*, int, int, int, double*) { return 0; }
 int webFontDrawProportional(const char*, const std::uint32_t*, const double*, const double*, int, int, double, int, int, int, int, std::uint8_t*) { return 0; }
@@ -1005,6 +1032,18 @@ std::string WebFontRasterizer::familyForCluster(const std::uint32_t* codePoints,
     FontFallbackPolicy policy(m_inventory, { m_caches.han, m_caches.script, m_caches.generic, m_caches.emoji, m_caches.symbol, m_caches.rangeMap, m_caches.negative });
     FontRequest request;
     request.codePoints = std::span<const std::uint32_t>(codePoints, static_cast<std::size_t>(count));
+    // The browser must probe the same text form that the coverage draw uses.
+    // SGR can override an explicit emoji selector in the stored cluster.
+    std::array<std::uint32_t, clusterPoolMaximumCodePoints + 1> presented;
+    if (presentation == Presentation::Text && Unicode::isExtendedPictographic(codePoints[0])) {
+        if (count > clusterPoolMaximumCodePoints)
+            return {};
+        std::copy_n(codePoints, count, presented.begin());
+        std::replace(presented.begin(), presented.begin() + count, Unicode::Width::variationSelector16, Unicode::Width::variationSelector15);
+        if (count == 1)
+            presented[count++] = Unicode::Width::variationSelector15;
+        request.codePoints = std::span<const std::uint32_t>(presented.data(), static_cast<std::size_t>(count));
+    }
     request.script = classifyScript(codePoints[0]);
     request.presentation = presentation;
     request.style = styleForFace(face);
@@ -1052,7 +1091,7 @@ bool WebFontRasterizer::rasterizeGlyph(std::uint32_t codePoint, Rendering::FontF
             horizontalScale = static_cast<double>(slotWidth) / advance;
     }
     if (webFontDrawGlyph(family.c_str(), static_cast<int>(codePoint), m_pixelSize, horizontalScale, 1.0, cssWeight, Rendering::isItalic(face) ? 1 : 0,
-            0.0, baseline, slotWidth, slotHeight, coverageOut))
+            0.0, baseline, slotWidth, slotHeight, Unicode::isExtendedPictographic(codePoint), coverageOut))
         return true;
 
     // No glyph in the host's face. Box drawing, powerline separators and the
@@ -1066,7 +1105,7 @@ bool WebFontRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int co
         return m_fallback.rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
     const std::string family = familyForCluster(codePoints, count, face, weight, Rendering::Font::Presentation::Text);
     const int baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), slotHeight);
-    if (!family.empty() && webFontDrawCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeightFor(face, weight, m_userAxes, m_weights), Rendering::isItalic(face) ? 1 : 0, baseline, slotWidth, slotHeight, coverageOut))
+    if (!family.empty() && webFontDrawCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeightFor(face, weight, m_userAxes, m_weights), Rendering::isItalic(face) ? 1 : 0, baseline, slotWidth, slotHeight, Unicode::isExtendedPictographic(codePoints[0]), coverageOut))
         return true;
     return m_fallback.rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
 }
@@ -1130,7 +1169,7 @@ bool WebFontRasterizer::rasterizeSizedMaster(std::uint32_t codePoint, Rendering:
         const Rendering::SubpixelPhase pen = Rendering::sizedMasterPen(slotWidth, advanceInPixels, master);
         const double penX = (static_cast<double>(pen.snappedPenX) + static_cast<double>(pen.phase) / Rendering::sizedMasterPenGrid) / master.horizontalScale;
         if (webFontDrawGlyph(family.c_str(), static_cast<int>(codePoint), scaledSize, master.horizontalScale, 1.0, cssWeight, Rendering::isItalic(face) ? 1 : 0,
-                penX, baseline, slotWidth, slotHeight, coverageOut))
+                penX, baseline, slotWidth, slotHeight, Unicode::isExtendedPictographic(codePoint), coverageOut))
             return true;
     }
     return GlyphRasterizer::rasterizeSizedMaster(codePoint, face, weight, master, slotWidth, slotHeight, coverageOut);
@@ -1164,7 +1203,7 @@ bool WebFontRasterizer::rasterizeTilingGlyph(std::uint32_t codePoint, Rendering:
                                              : Rendering::sizedMasterBaselineFromTop(m_metrics.baselineFromTop, master);
     if (!webFontDrawGlyph(family.c_str(), static_cast<int>(drawn), size, master.horizontalScale,
             fit.isApplicable ? fit.verticalScale : 1.0, cssWeight, Rendering::isItalic(face),
-            marginX / master.horizontalScale, baseline, slotWidth, slotHeight, coverageOut))
+            marginX / master.horizontalScale, baseline, slotWidth, slotHeight, 0, coverageOut))
         return false;
     Rendering::TilingCoverage({ coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight },
         slotWidth, slotHeight, marginX, slotWidth - marginX, marginY, marginY + cellHeight)
