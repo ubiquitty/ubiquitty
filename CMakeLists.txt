@@ -3,6 +3,12 @@
 
 cmake_minimum_required(VERSION 3.13)
 
+# Honor each Swift target's compilation mode, including whole-module Debug.
+# This policy must be selected before Swift is first enabled.
+if(POLICY CMP0157)
+    cmake_policy(SET CMP0157 NEW)
+endif()
+
 # The checkouts this build reads besides its own tree: ubiquitty-core
 # (libubiquitty and the multiplexer) and ubiquitty-kit (the renderers and the
 # drop-in terminal views). Every path below names the checkout of the
@@ -201,7 +207,6 @@ endif()
 
 if(UBIQUITTY_FRONTEND STREQUAL "macOS")
 
-    cmake_minimum_required(VERSION 3.12)
     enable_language(Swift)
     add_subdirectory(Source/Platform/macOS)
 
