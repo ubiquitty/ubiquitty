@@ -123,6 +123,8 @@ pathlib.Path(os.environ["ESC_FIXTURE_REPORT"]).write_text(json.dumps({
     def test_macos_default_keeps_user_policy_and_arguments(self):
         report = self.successful_report("macos", "--", "--include", "DECRQM")
         self.assertEqual(report["configuration"], str(self.user_document))
+        self.assertEqual(report["arguments"][2], str(self.scripts / "esctest-observer.py"))
+        self.assertEqual(report["arguments"][3], str(self.suite / "esctest" / "esctest.py"))
         self.assertEqual(report["arguments"][-2:], ["--include", "DECRQM"])
         self.assertIn("normal policy", (self.root / "BuildEsctest" / "esctest-provenance.txt").read_text())
 
@@ -224,6 +226,33 @@ class EsctestObserverTests(unittest.TestCase):
         self.adapter.install_single_page_observer(utility, self.commands)
         utility.GetChecksumOfRect(rectangle)
         self.assertEqual(self.requests, [(17, 3, rectangle)])
+
+    def test_bootstrap_preserves_suite_import_order_and_arguments(self):
+        with tempfile.TemporaryDirectory(prefix="ubq-esctest-bootstrap-") as directory:
+            root = Path(directory)
+            (root / "escutil.py").write_text(
+                "import esccmd\n"
+                "def AssertVTLevel(*arguments): pass\n"
+                "def GetChecksumOfRect(rectangle):\n"
+                "    return esccmd.DECRQCRA(7, 0, rectangle)\n"
+            )
+            (root / "esccmd.py").write_text(
+                "from escutil import AssertVTLevel\n"
+                "def DECRQCRA(identifier, page, rectangle): return page\n"
+            )
+            suite = root / "esctest.py"
+            suite.write_text(
+                "import sys, esccmd, escutil\n"
+                "assert sys.argv[1:] == ['--include', 'fixture']\n"
+                "assert escutil.GetChecksumOfRect('rectangle') == 1\n"
+                "assert esccmd.DECRQCRA(9, 0, 'rectangle') == 0\n"
+            )
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("esctest-observer.py")),
+                 str(suite), "--include", "fixture"],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

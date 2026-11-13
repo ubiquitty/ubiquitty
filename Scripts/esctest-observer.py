@@ -40,7 +40,10 @@ def main():
     suite = Path(sys.argv[1]).resolve()
     sys.argv = [str(suite), *sys.argv[2:]]
     sys.path.insert(0, str(suite.parent))
-    install_single_page_observer(importlib.import_module("escutil"), importlib.import_module("esccmd"))
+    # esccmd imports a completed escutil; enter their cycle in the suite's order.
+    commands = importlib.import_module("esccmd")
+    utility = importlib.import_module("escutil")
+    install_single_page_observer(utility, commands)
     runpy.run_path(str(suite), run_name="__main__")
 
 

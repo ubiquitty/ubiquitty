@@ -159,6 +159,7 @@ recordFact() {
     recordFact suite-commit "$suiteCommit"
     recordFact interpreter "$interpreter ($("$interpreter" -V 2>&1))"
     recordFact expected-terminal "$terminalName"
+    recordFact screen-observer 'explicit page one; direct suite commands unchanged'
     recordFact consent-posture "$consentPosture"
     recordFact test-configuration "$testConfiguration"
     recordFact extra-args "${forwarded[*]:-(none)}"
@@ -170,7 +171,7 @@ printf '\nesctest2 runs inside %s in a window of its own; leave that window alon
 
 rm -f "$suiteLog"
 
-suiteCommand=("$interpreter" "$suiteMain" --expected-terminal="$terminalName" --logfile="$suiteLog" --no-print-logs)
+suiteCommand=("$interpreter" "$repoRoot/Scripts/esctest-observer.py" "$suiteMain" --expected-terminal="$terminalName" --logfile="$suiteLog" --no-print-logs)
 "$executable" -e "${suiteCommand[@]}" ${forwarded+"${forwarded[@]}"} &
 launcherPid=$!
 
