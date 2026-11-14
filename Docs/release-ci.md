@@ -58,7 +58,7 @@ Scripts/release.sh --check
 After the release cut and distribution are approved and tag CI succeeds:
 
 ```sh
-Scripts/release.sh v0.4.0
+Scripts/release.sh v0.4.1
 ```
 
 The command downloads the successful CI preparation and verifies its complete

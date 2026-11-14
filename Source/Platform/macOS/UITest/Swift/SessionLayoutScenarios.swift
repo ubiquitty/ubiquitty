@@ -146,6 +146,10 @@ enum SessionLayoutScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated { checkUpdateRelaunchKeepsTheArrangement(t) }
         }
+        UBUITestRegister("swift_update_verified_candidate_keeps_every_window_tab_split_and_shell", isInDefaultSuite: false) { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { checkUpdateRelaunchKeepsTheArrangement(t, path: .verifiedCandidate) }
+        }
         UBUITestRegister("swift_update_not_now_returns_an_adopted_shell_to_the_app", isInDefaultSuite: false) { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { checkUpdateChoiceReturnsTheShell(t, acceptedRisk: false) }
@@ -1599,6 +1603,10 @@ enum SessionLayoutScenarios {
             MainActor.assumeIsolated {
                 guard NSApp.modalWindow != nil else { return }
                 questionCount += 1
+                t.expect(
+                    !NSApp.windows.contains { $0.identifier?.rawValue == "updatePreparationProgress" && $0.isVisible },
+                    desc: "the progress dialog closes before the restart choice"
+                )
                 NSApp.stopModal(withCode: acceptedRisk ? .alertFirstButtonReturn : .alertSecondButtonReturn)
             }
         }
@@ -1607,6 +1615,7 @@ enum SessionLayoutScenarios {
         var isInstallAuthorized: Bool?
         Task { @MainActor in isInstallAuthorized = await updater.prepareUpdateRelaunchForTesting() }
         t.expect(t.wait(until: { isInstallAuthorized != nil }, timeout: 40), desc: "a refused update asks for a choice")
+        t.expect(updater.didShowUpdatePreparationForTesting, desc: "Install shows progress while the sessions are prepared")
         t.expect(isInstallAuthorized == acceptedRisk, desc: "the update follows the selected restart choice")
         t.expect(questionCount == 1, desc: "the update asks once before a risky restart (\(questionCount))")
         if acceptedRisk {
@@ -1627,6 +1636,11 @@ enum SessionLayoutScenarios {
         t.expect(t.wait(until: { bufferHolds("alive-\(marker)", in: pane) }, timeout: 10), desc: "the same local shell remains alive")
     }
 
+    private enum UpdateRelaunchPath {
+        case quitCapture
+        case verifiedCandidate
+    }
+
     /// Sparkle's Install and Relaunch with session persistence off, driven
     /// short of the relaunch: the notice through the updater's own delegate,
     /// the quit's reply and capture, every window closed as the exit closes
@@ -1635,7 +1649,7 @@ enum SessionLayoutScenarios {
     /// The quit that cannot keep a job runs first: with no daemon that can
     /// start, the confirmation asks, and Cancel refuses the quit request.
     @MainActor
-    private static func checkUpdateRelaunchKeepsTheArrangement(_ t: UBUITestContext) {
+    private static func checkUpdateRelaunchKeepsTheArrangement(_ t: UBUITestContext, path: UpdateRelaunchPath = .quitCapture) {
         t.closeAllWindows()
         guard let delegate = NSApp.delegate as? UBAppDelegate else {
             t.expect(false, desc: "the application delegate is reachable")
@@ -1793,39 +1807,81 @@ enum SessionLayoutScenarios {
         let frontSyncSession = frontSyncPane.remoteSessionID
         let localPanes = [backLonePane, splitLeft, splitRight, jobPane]
 
-        // Sparkle's notice, through the delegate Sparkle calls.
-        t.expect(delegate.quitReason == .Ordinary, desc: "before the notice a quit is an ordinary one")
-        updater.deliverRelaunchNoticeForTesting()
-        t.expect(
-            updater.isRelaunchingForUpdate && delegate.quitReason == .UpdateRelaunch,
-            desc: "Sparkle's relaunch notice makes the quit an update relaunch"
-        )
+        if path == .verifiedCandidate {
+            let environment = ProcessInfo.processInfo.environment
+            guard let archive = environment["UBIQUITTY_UI_TEST_UPDATE_ARCHIVE"],
+                let build = environment["UBIQUITTY_UI_TEST_UPDATE_BUILD"],
+                let version = environment["UBIQUITTY_UI_TEST_UPDATE_VERSION"],
+                files.isReadableFile(atPath: archive)
+            else {
+                t.refuse("A signed update archive, its build and its version are required for the migration rehearsal.")
+                return
+            }
+            var questions = 0
+            let answer = Timer(timeInterval: 0.05, repeats: true) { _ in
+                MainActor.assumeIsolated {
+                    guard NSApp.modalWindow != nil else { return }
+                    questions += 1
+                    NSApp.stopModal(withCode: .alertSecondButtonReturn)
+                }
+            }
+            RunLoop.main.add(answer, forMode: .modalPanel)
+            defer { answer.invalidate() }
+            var isPrepared: Bool?
+            Task { @MainActor in
+                isPrepared = await updater.prepareUpdateRelaunchForTesting(
+                    archive: URL(fileURLWithPath: archive),
+                    build: build,
+                    version: version
+                )
+            }
+            t.expect(t.wait(until: { isPrepared != nil }, timeout: 90), desc: "the signed candidate preparation finishes")
+            t.expect(
+                isPrepared == true && questions == 0,
+                desc: "every local session moves to the verified candidate without a risky restart"
+            )
+            guard isPrepared == true else { return }
+            t.expect(updater.mayTerminateAfterUpdatePreparation, desc: "proved takeover authorizes the update quit")
+            updater.deliverRelaunchNoticeForTesting()
+            t.expect(
+                delegate.applicationShouldTerminate(NSApp) == .terminateNow,
+                desc: "Sparkle's actual quit commits the proved arrangement"
+            )
+        } else {
+            // Sparkle's notice, through the delegate Sparkle calls.
+            t.expect(delegate.quitReason == .Ordinary, desc: "before the notice a quit is an ordinary one")
+            updater.deliverRelaunchNoticeForTesting()
+            t.expect(
+                updater.isRelaunchingForUpdate && delegate.quitReason == .UpdateRelaunch,
+                desc: "Sparkle's relaunch notice makes the quit an update relaunch"
+            )
 
-        // No daemon can start: the update cannot keep the job, so the quit
-        // asks, and Cancel refuses the updater's quit request.
-        setenv("UBIQUITTY_HOME", homeWithoutDaemon, 1)
-        var questions: [String] = []
-        let postponed = TerminalWindows.terminationReply(for: delegate.quitReason) { alert in
-            questions.append(alert.messageText)
-            return .alertSecondButtonReturn
-        }
-        setenv("UBIQUITTY_HOME", home, 1)
-        t.expect(
-            postponed == .terminateCancel && questions == ["Quit Ubiquitty?"],
-            desc: "with no daemon to keep the job, the update's quit asks first, and Cancel keeps the app running (\(questions))"
-        )
-        t.expect(!files.fileExists(atPath: homeWithoutDaemon + "/sessions.json"), desc: "the cancelled quit saved no arrangement")
-        t.expect(!localPanes.contains { $0.drive.isSharedIntoLocalDaemon }, desc: "and handed no shell over")
-        t.expect(delegate.quitReason == .UpdateRelaunch, desc: "the installer still waits, so the next quit is still the update's")
+            // No daemon can start: the update cannot keep the job, so the quit
+            // asks, and Cancel refuses the updater's quit request.
+            setenv("UBIQUITTY_HOME", homeWithoutDaemon, 1)
+            var questions: [String] = []
+            let postponed = TerminalWindows.terminationReply(for: delegate.quitReason) { alert in
+                questions.append(alert.messageText)
+                return .alertSecondButtonReturn
+            }
+            setenv("UBIQUITTY_HOME", home, 1)
+            t.expect(
+                postponed == .terminateCancel && questions == ["Quit Ubiquitty?"],
+                desc: "with no daemon to keep the job, the update's quit asks first, and Cancel keeps the app running (\(questions))"
+            )
+            t.expect(!files.fileExists(atPath: homeWithoutDaemon + "/sessions.json"), desc: "the cancelled quit saved no arrangement")
+            t.expect(!localPanes.contains { $0.drive.isSharedIntoLocalDaemon }, desc: "and handed no shell over")
+            t.expect(delegate.quitReason == .UpdateRelaunch, desc: "the installer still waits, so the next quit is still the update's")
 
-        // The update's quit with the daemon up: nothing to ask about, and
-        // every local pane handed over.
-        var asked = 0
-        let reply = TerminalWindows.terminationReply(for: delegate.quitReason) { _ in
-            asked += 1
-            return .alertSecondButtonReturn
+            // The update's quit with the daemon up: nothing to ask about, and
+            // every local pane handed over.
+            var asked = 0
+            let reply = TerminalWindows.terminationReply(for: delegate.quitReason) { _ in
+                asked += 1
+                return .alertSecondButtonReturn
+            }
+            t.expect(reply == .terminateNow && asked == 0, desc: "the update's quit asks nothing about a job the update keeps (\(asked))")
         }
-        t.expect(reply == .terminateNow && asked == 0, desc: "the update's quit asks nothing about a job the update keeps (\(asked))")
         for (index, pane) in localPanes.enumerated() {
             t.expect(pane.drive.isSharedIntoLocalDaemon, desc: "local pane \(index) handed its shell to the daemon")
         }

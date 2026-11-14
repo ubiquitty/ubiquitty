@@ -67,6 +67,70 @@ private final class UpdateUserDriver: SPUStandardUserDriver {
     }
 }
 
+/// Preparation owns no nested modal loop: attachments and the transfer keep
+/// advancing while the person can see which part of the update is pending.
+@MainActor
+private final class UpdatePreparationProgress {
+    private let panel: NSPanel
+    private let status = NSTextField(wrappingLabelWithString: "")
+    private let indicator = NSProgressIndicator()
+
+    init() {
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 148),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Preparing Update"
+        panel.identifier = NSUserInterfaceItemIdentifier("updatePreparationProgress")
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        let content = NSView()
+        panel.contentView = content
+        status.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        status.setAccessibilityIdentifier("updatePreparationStatus")
+        indicator.style = .bar
+        indicator.isIndeterminate = true
+        indicator.setAccessibilityLabel("Preparing update")
+        let detail = NSTextField(wrappingLabelWithString: "Ubiquitty will restart after your sessions are ready.")
+        detail.textColor = .secondaryLabelColor
+        for view in [status, indicator, detail] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            status.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            status.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            status.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            indicator.leadingAnchor.constraint(equalTo: status.leadingAnchor),
+            indicator.trailingAnchor.constraint(equalTo: status.trailingAnchor),
+            indicator.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 16),
+            detail.leadingAnchor.constraint(equalTo: status.leadingAnchor),
+            detail.trailingAnchor.constraint(equalTo: status.trailingAnchor),
+            detail.topAnchor.constraint(equalTo: indicator.bottomAnchor, constant: 16),
+            detail.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24),
+        ])
+        panel.center()
+    }
+
+    func show(_ message: String) {
+        status.stringValue = message
+        panel.orderFront(nil)
+        indicator.startAnimation(nil)
+        panel.displayIfNeeded()
+    }
+
+    #if UBIQUITTY_UI_TESTS
+    var isVisible: Bool { panel.isVisible }
+    #endif
+
+    func close() {
+        indicator.stopAnimation(nil)
+        panel.close()
+    }
+}
+
 /// A host extracted from a separately downloaded appcast archive, retained
 /// until takeover finishes. This copy is admitted by its release team
 /// signature and checked version; Sparkle validates its own archive.
@@ -81,8 +145,12 @@ private struct UpdateHostCandidate: Sendable {
         else { return nil }
         guard let (archive, response) = try? await URLSession.shared.download(from: url) else { return nil }
         defer { try? FileManager.default.removeItem(at: archive) }
-        guard response.expectedContentLength <= 256 * 1024 * 1024,
-            let size = (try? FileManager.default.attributesOfItem(atPath: archive.path)[.size]) as? NSNumber,
+        guard response.expectedContentLength <= 256 * 1024 * 1024 else { return nil }
+        return stage(archive: archive, expectedBuild: expectedBuild, expectedVersion: expectedVersion)
+    }
+
+    static func stage(archive: URL, expectedBuild: String, expectedVersion: String) -> Self? {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: archive.path)[.size]) as? NSNumber,
             size.uint64Value <= 256 * 1024 * 1024,
             let info = readEntry("Ubiquitty.app/Contents/Info.plist", from: archive, maxBytes: 1 * 1024 * 1024),
             let dictionary = (try? PropertyListSerialization.propertyList(from: info, options: 0, format: nil)) as? [String: Any],
@@ -423,6 +491,16 @@ public final class Updater: NSObject {
     fileprivate func prepareUpdateRelaunch() async -> SPUUserUpdateChoice {
         guard !isPreparingUpdateRelaunch else { return .dismiss }
         isPreparingUpdateRelaunch = true
+        let progress = UpdatePreparationProgress()
+        progress.show("Preparing your terminals…")
+        #if UBIQUITTY_UI_TESTS
+        didShowUpdatePreparationForTesting = progress.isVisible
+        #endif
+        defer { progress.close() }
+        // Let AppKit present the progress window before synchronous adoption.
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
         previousCurrentLayout = SessionLayout.allSessions().first { $0.identifier == SessionLayout.currentIdentifier }
         let capture = TerminalWindows.prepareUpdateCapture()
         preparedCapture = capture
@@ -430,6 +508,7 @@ public final class Updater: NSObject {
         facts.localPaneCount = .init(capture.localPanes.count)
         facts.adoptedLocalPaneCount = .init(capture.adoptedLocalPaneCount)
         facts.unresolvedAdoptionCount = .init(Ubiquitty.Runtime.TerminalSession.unresolvedLocalAdoptionCount())
+        progress.show("Connecting to your running sessions…")
         let predecessors =
             facts.localPaneCount == facts.adoptedLocalPaneCount && facts.unresolvedAdoptionCount == 0
             ? await TerminalWindows.settledUpdateAdoptions(capture) : nil
@@ -438,25 +517,37 @@ public final class Updater: NSObject {
         var candidate: UpdateHostCandidate?
         if facts.localPaneCount == facts.adoptedLocalPaneCount,
             facts.attachedLocalPaneCount == facts.localPaneCount,
-            facts.unresolvedAdoptionCount == 0,
-            let item = policy.selectedItem,
-            let address = item.fileURL
+            facts.unresolvedAdoptionCount == 0
         {
-            candidate = await UpdateHostCandidate.stage(
-                from: address,
-                expectedBuild: item.versionString,
-                expectedVersion: item.displayVersionString,
-                contentLength: item.contentLength
-            )
+            progress.show("Checking the update…")
+            #if UBIQUITTY_UI_TESTS
+            if let testArchive {
+                candidate = UpdateHostCandidate.stage(
+                    archive: testArchive.url,
+                    expectedBuild: testArchive.build,
+                    expectedVersion: testArchive.version
+                )
+            }
+            #endif
+            if candidate == nil, let item = policy.selectedItem, let address = item.fileURL {
+                candidate = await UpdateHostCandidate.stage(
+                    from: address,
+                    expectedBuild: item.versionString,
+                    expectedVersion: item.displayVersionString,
+                    contentLength: item.contentLength
+                )
+            }
         }
         if let candidate {
             facts.isNewHostVerified = true
+            progress.show("Moving your running sessions…")
             let takeover = await LocalHostUpgrade.beforeUpdate(using: candidate.path, version: candidate.version)
             facts.isNewHostInstalled = takeover.isInstalled
             facts.isNewHostAnswering = takeover.isAnswering
             facts.olderHostCount = .init(takeover.olderHostCount)
             facts.pendingSessionCount = .init(takeover.olderHostCount)
             if let predecessors, facts.isNewHostAnswering {
+                progress.show("Checking your sessions are ready…")
                 facts.movedLocalPaneCount = .init(
                     await TerminalWindows.movedUpdateAdoptionCount(capture, from: predecessors)
                 )
@@ -487,6 +578,7 @@ public final class Updater: NSObject {
             )
         }
         if Ubiquitty.Session.updateRelaunchAction(facts, .Unasked) == .InstallNow {
+            progress.show("Restarting Ubiquitty…")
             isPreparingUpdateRelaunch = false
             isUpdateTerminationAuthorized = true
             return .install
@@ -499,7 +591,9 @@ public final class Updater: NSObject {
         let foregroundProgram =
             capture.foregroundPrograms.indices.contains(namedPane)
             ? capture.foregroundPrograms[namedPane] : ""
+        progress.show("Returning to your terminals…")
         await TerminalWindows.reclaimUpdateAdoptions(capture)
+        progress.close()
         isPreparingUpdateRelaunch = false
         let alert = NSAlert()
         alert.icon = NSApp.applicationIconImage
@@ -584,8 +678,19 @@ public final class Updater: NSObject {
 
     /// Exercises the same preparation the Install button awaits, without a
     /// release feed or an installer that would replace the test application.
+    private(set) var didShowUpdatePreparationForTesting = false
+    private var testArchive: (url: URL, build: String, version: String)?
+
     func prepareUpdateRelaunchForTesting() async -> Bool {
         await prepareUpdateRelaunch() == .install
+    }
+
+    /// Uses a local signed release archive while retaining the version and
+    /// signature checks, adoption, takeover and rollback of the Install path.
+    func prepareUpdateRelaunchForTesting(archive: URL, build: String, version: String) async -> Bool {
+        testArchive = (archive, build, version)
+        defer { testArchive = nil }
+        return await prepareUpdateRelaunch() == .install
     }
 
     func cancelPreparedUpdateForTesting() async {
@@ -640,7 +745,9 @@ public final class Updater: NSObject {
     var scheduleCount: Int { 0 }
     var lastScheduledDelay: TimeInterval? { nil }
     func deliverRelaunchNoticeForTesting() {}
+    var didShowUpdatePreparationForTesting: Bool { false }
     func prepareUpdateRelaunchForTesting() async -> Bool { false }
+    func prepareUpdateRelaunchForTesting(archive: URL, build: String, version: String) async -> Bool { false }
     func cancelPreparedUpdateForTesting() async {}
     #endif
     #endif

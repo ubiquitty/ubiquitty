@@ -80,7 +80,9 @@ never checked runs its first scheduled check at launch.
 ## Your terminals across an update
 
 When you choose **Install and Relaunch**, Ubiquitty holds Sparkle before the
-installation and prepares the terminals while the old app still runs. This
+installation and prepares the terminals while the old app still runs. A progress
+dialog shows preparation, verification and session transfer until Sparkle can
+restart the app. If preparation fails, it closes before the restart choice. This
 does not depend on the later relaunch notice or on the quit request's timing.
 The preparation keeps your session whether or not **Restore Last Session on
 Launch** is on (`Session::isSessionKeptByQuit`):
@@ -149,6 +151,17 @@ schedule follows the preference, a scheduled check that fails presents nothing,
 and nothing installs without the person. A UI-test build points every check at
 an address on the machine that nothing answers, so a run never reaches the
 release feed.
+
+The separate `swift_update_verified_candidate_keeps_every_window_tab_split_and_shell`
+scenario exercises preparation against a local signed release archive. Set
+`UBIQUITTY_UI_TEST_UPDATE_ARCHIVE` to the zip and
+`UBIQUITTY_UI_TEST_UPDATE_BUILD` and `UBIQUITTY_UI_TEST_UPDATE_VERSION` to its
+`CFBundleVersion` and `CFBundleShortVersionString`, then select that scenario
+with `Scripts/run-ui-tests.sh`. The scenario retains the production version and
+signature checks, verifies takeover before authorizing quit, and checks every
+restored window, tab, split and running shell. It does not replace the test
+application. A release rehearsal also runs Core's `local_host_upgrade` against
+the released predecessor and candidate host binaries.
 
 ## Build
 
