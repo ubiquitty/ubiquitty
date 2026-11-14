@@ -127,7 +127,7 @@ jobs:
       # run that stopped before building it has no archive, and the save
       # reports that without failing the job.
       - name: Save the CI image
-        if: ${{ !cancelled() && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true' }}
+        if: always() && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true' && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -256,7 +256,7 @@ jobs:
             if [ -f "$emsdk" ]; then . "$emsdk" >/dev/null; fi
             exec ./Scripts/pre-push-gates.sh'
       - name: Save the CI image
-        if: ${{ !cancelled() && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true' }}
+        if: always() && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true' && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -289,7 +289,7 @@ jobs:
           UBQ_CI_LINUX_IMAGE: "true"
         run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c 'if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi'
       - name: Save the compiler cache
-        if: ${{ !cancelled() && runner.environment == 'github-hosted' }}
+        if: always() && runner.environment == 'github-hosted' && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -439,7 +439,7 @@ jobs:
         run: |
           if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi
       - name: Save QUIC dependencies
-        if: ${{ !cancelled() && steps.roots.outputs.build != '' }}
+        if: always() && steps.roots.outputs.build != '' && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -448,7 +448,7 @@ jobs:
             !${{ steps.roots.outputs.build }}/quic-deps/**/src/*/build
           key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.roots.outputs.quic_toolchain }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/macos-deployment-target.txt', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/cmake/UbiquittyPreProject.cmake') }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Save the compiler cache
-        if: ${{ !cancelled() }}
+        if: always() && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
