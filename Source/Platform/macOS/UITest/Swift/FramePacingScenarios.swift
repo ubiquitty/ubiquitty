@@ -1374,7 +1374,8 @@ enum FramePacingScenarios {
                 let commits = index == 0 ? marker.freshCommits : siblingCommitTimes.count
                 t.expect(
                     changed[index] && commits > beforeCommits[index],
-                    desc: "pane \(index) changes output and commits fresh content \(phase) input \(input) during \(payload.rawValue) flood\(selectionNote)"
+                    desc:
+                        "pane \(index) changes output and commits fresh content \(phase) input \(input) during \(payload.rawValue) flood\(selectionNote)"
                 )
             }
             let fresh = surface.recordedPresentsForTesting.dropFirst(beforeCount).filter(\.showsNewContent).count
@@ -1619,6 +1620,13 @@ enum FramePacingScenarios {
         t.pump(0.2)
         let record = surface.recordedPresentsForTesting
         let loadAfter = MachineLoad()
+        let isBackgroundTab = window.tabGroup?.selectedWindow.map { $0 !== window } ?? false
+        notePacing(
+            "flood window: ordered \(window.isVisible), minimized \(window.isMiniaturized), hidden pane \(surface.isHiddenOrHasHiddenAncestor), "
+                + "background tab \(isBackgroundTab), tabs \(window.tabGroup?.windows.count ?? 1), "
+                + "occlusion override \(String(describing: surface.isFullyOccludedForTesting)), "
+                + "continuous \(surface.drive.isPresentationContinuous), recommended \(surface.drive.isPresentationRecommendedContinuous)"
+        )
         let promptLine =
             surface.gridTextForTesting().split(separator: "\n")
             .last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
