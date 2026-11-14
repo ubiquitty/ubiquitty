@@ -536,6 +536,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         COMMAND ${UBIQUITTY_IOS_STEP} -DSTEP=ssh -P "${UBIQUITTY_IOS_STEP_SCRIPT}"
         DEPENDS ${UBIQUITTY_SSH_PACKAGE_SOURCES}
                 "${UBIQUITTY_IOS_STEP_SCRIPT}"
+                "${CMAKE_SOURCE_DIR}/Scripts/cmake/ResolveSwiftPackage.cmake"
                 "${CMAKE_SOURCE_DIR}/Scripts/cmake/ArchiveSwiftPMObjects.cmake"
         COMMENT "Building UbiquittySSH for ${UBIQUITTY_IOS_PLATFORM_LABEL} (first run fetches swift-nio-ssh)"
         VERBATIM)

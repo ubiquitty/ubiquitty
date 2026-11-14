@@ -397,7 +397,9 @@ jobs:
           tag: ${{ env.PRODUCT_TAG }}
       - name: QUIC dependency cache identity
         id: quic
-        run: echo "quic_toolchain=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "quic_toolchain=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "UBIQUITTY_SWIFTPM_CACHE=$RUNNER_WORKSPACE/swiftpm-cache" >> "$GITHUB_ENV"
       - name: Restore QUIC dependencies
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
@@ -414,6 +416,11 @@ jobs:
           restore-keys: |
             release-ccache-${{ runner.os }}-${{ runner.arch }}-ios-${{ matrix.sdk }}-
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-ios-
+      - name: Cache pinned Swift package sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ runner.workspace }}/swiftpm-cache/repositories
+          key: swiftpm-sources-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('product/Source/Platform/Apple/SSH/Package.resolved') }}
       - name: Build the device or simulator development app
         env:
           UBIQUITTY_SIGN_IDENTITY: ad-hoc

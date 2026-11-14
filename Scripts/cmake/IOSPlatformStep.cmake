@@ -123,16 +123,32 @@ if(STEP STREQUAL "ssh")
         endif()
     endforeach()
     find_program(_swift swift REQUIRED)
+    set(_packageArguments
+        --package-path "${SOURCE_DIR}/Source/Platform/Apple/SSH"
+        --scratch-path "${_scratch}"
+        --triple "${_triple}"
+        --sdk "${_sdkPath}"
+        --force-resolved-versions)
+    if(DEFINED ENV{UBIQUITTY_SWIFTPM_CACHE} AND NOT "$ENV{UBIQUITTY_SWIFTPM_CACHE}" STREQUAL "")
+        list(APPEND _packageArguments --cache-path "$ENV{UBIQUITTY_SWIFTPM_CACHE}")
+    endif()
+    include("${CMAKE_CURRENT_LIST_DIR}/ResolveSwiftPackage.cmake")
+    ubiquitty_resolve_swift_package(
+        /usr/bin/env -i ${_environment}
+        "${_swift}" package ${_packageArguments} resolve)
+    set(_buildArguments "")
+    if(DEFINED ENV{UBQ_BUILD_JOBS} AND NOT "$ENV{UBQ_BUILD_JOBS}" STREQUAL "")
+        if(NOT "$ENV{UBQ_BUILD_JOBS}" MATCHES "^[1-9][0-9]*$")
+            message(FATAL_ERROR "IOSPlatformStep.cmake: UBQ_BUILD_JOBS must be a positive integer")
+        endif()
+        list(APPEND _buildArguments --jobs "$ENV{UBQ_BUILD_JOBS}")
+    endif()
     # The language mode is the package's own (Package.swift): SwiftPM's build
     # system warns that a mode set by a compiler flag may disagree with the code
     # it generates for each target.
     ubiquitty_ios_run("swift build"
         /usr/bin/env -i ${_environment}
-        "${_swift}" build -c release
-        --package-path "${SOURCE_DIR}/Source/Platform/Apple/SSH"
-        --scratch-path "${_scratch}"
-        --triple "${_triple}"
-        --sdk "${_sdkPath}")
+        "${_swift}" build -c release ${_packageArguments} ${_buildArguments})
 
     set(PRODUCTS "${_scratch}/out/Products/Release-${PLATFORM}")
     set(MODULE_MAPS "${_scratch}/out/Intermediates.noindex/GeneratedModuleMaps-${PLATFORM}")

@@ -29,6 +29,9 @@ ubiquitty_schedule_shell_stanzas(DRIVER "${_ubq_app_shell_driver}")
 add_test(NAME test_ios_sync_driver
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/Tests/Tools/test_ios_sync_conformance.py")
 ubiquitty_set_test_entry_properties(test_ios_sync_driver)
+add_test(NAME test_swift_package_resolution
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/Tests/Tools/test_swift_package_resolution.py")
+ubiquitty_set_test_entry_properties(test_swift_package_resolution)
 
 ubiquitty_finish_host_tests()
 
