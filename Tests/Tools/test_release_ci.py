@@ -133,6 +133,34 @@ class ReleaseTests(unittest.TestCase):
                 checked, _ = self.collect_linux_hosts(damage)
                 self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
+    def test_dispatch_passes_the_product_tag_to_the_packager(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        step = workflow.split("      - name: Build + package the AppImage\n", 1)[1].split("      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        package = (ROOT / "Scripts/package-linux-appimage.sh").read_text()
+        start = package.index('if [ -n "${GITHUB_REF_NAME:-}" ]')
+        guard = package[start:package.index("\nfi", start) + 4]
+        for tag in ("v0.4.0", "v0.4.1"):
+            with self.subTest(tag=tag), tempfile.TemporaryDirectory(prefix="ubq-release-dispatch-") as temporary:
+                product = Path(temporary)
+                image = product / RELEASE.CORE_PATH / "Scripts/ci-linux-image.sh"
+                image.parent.mkdir(parents=True)
+                image.write_text('#!/bin/sh\nexec "$@"\n')
+                image.chmod(0o755)
+                packager = product / "Scripts/package-linux-appimage.sh"
+                packager.parent.mkdir()
+                packager.write_text('#!/bin/sh\nVERSION=0.4.0\n' + guard + '\nprintf "%s\\n" "$GITHUB_REF_NAME"\n')
+                packager.chmod(0o755)
+                environment = {**os.environ, "PRODUCT_TAG": tag, "GITHUB_REF_NAME": "main", "UBQ_PGO_LLVM": ""}
+                checked = subprocess.run(["/bin/bash", "-c", script], cwd=product, env=environment,
+                                         text=True, capture_output=True, timeout=10)
+                if tag == "v0.4.0":
+                    self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                    self.assertEqual(checked.stdout.strip(), tag)
+                else:
+                    self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                    self.assertIn("the built version", checked.stderr)
+
     def test_tags_are_stable_versions_without_shell_or_path_syntax(self):
         self.assertEqual(RELEASE.version("v0.4.0"), "0.4.0")
         for tag in ("0.4.0", "v0.04.0", "v0.4.0-rc1", "v0.4.0/other", "v0.4.0\n", "$(id)"):

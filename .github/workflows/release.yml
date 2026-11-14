@@ -272,7 +272,7 @@ jobs:
           PATH="${UBQ_PGO_LLVM:+$UBQ_PGO_LLVM:}$PATH" CC=clang CXX=clang++ exec ./Scripts/package-linux-appimage.sh
           UBQ_APPIMAGE_BUILD
           )"
-          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh sh -c "$container_build"
+          GITHUB_REF_NAME="$PRODUCT_TAG" ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh sh -c "$container_build"
 
       - name: Preserve the Linux publication files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
