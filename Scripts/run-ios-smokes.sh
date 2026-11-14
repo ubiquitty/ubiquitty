@@ -187,12 +187,20 @@ if [ "$installStatus" -ne 0 ]; then
 fi
 
 echo "run-ios-smokes: $BUNDLE_ID on $DEVICE_NAME — ${#FLAGS[@]} tests, ${TIMEOUT}s each"
+launchMarker="$(mktemp "${TMPDIR:-/tmp}/run-ios-smokes.XXXXXX")" || exit 2
+cleanupSmokeRun() {
+    rm -f "$launchMarker"
+    ubq_ios_device_release
+}
+trap cleanupSmokeRun EXIT
 warmupStart=$SECONDS
 warmup="$(runWithTimeout "$WARMUP_TIMEOUT" xcrun simctl launch --terminate-running-process "$DEVICE" "$BUNDLE_ID")"
 rc=$?
 if [ "$rc" -ne 0 ]; then
     printf '  FAIL  warm-up launch (rc=%d, %ds)\n' "$rc" $((SECONDS - warmupStart))
     sed 's/^/        /' <<<"$warmup"
+    crashReportsSince "$launchMarker"
+    simulatorDiagnostics
     echo "run-ios-smokes: FAILED — the warm-up launch never came back, so no smoke ran" >&2
     exit 1
 fi
@@ -204,7 +212,6 @@ failed_flags=()
 CONTAINER="$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE_ID" data 2>/dev/null)"
 [ -d "$CONTAINER/tmp" ] || { echo "run-ios-smokes: no data container for $BUNDLE_ID on $DEVICE_NAME" >&2; exit 2; }
 REPORT="$CONTAINER/tmp/smoke-report.txt"
-launchMarker="$(mktemp "${TMPDIR:-/tmp}/run-ios-smokes.XXXXXX")"
 for flag in "${FLAGS[@]}"; do
     # simctl launch answers for the LAUNCH, not for the process, so the verdict
     # is the smoke's own line in its report file. Each smoke writes one and
