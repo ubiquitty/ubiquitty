@@ -47,14 +47,19 @@ private func terminalSurface(under view: NSView) -> TerminalSurface? {
     return nil
 }
 
-/// Draws one frame now, rebuilding every row when asked to.
+/// Waits for the requested frame to resolve, rebuilding every row when asked to.
 @MainActor
-private func drawFrame(_ surface: TerminalSurface, rebuildingEveryRow: Bool) {
+private func drawFrame(_ surface: TerminalSurface, rebuildingEveryRow: Bool, context: UBUITestContext) {
+    let resolvedBefore = surface.framesResolvedForTesting
     if rebuildingEveryRow {
         surface.invalidateRetainedBaseline()
     }
     surface.needsDisplay = true
     surface.display()
+    context.expect(
+        context.wait(until: { surface.framesResolvedForTesting > resolvedBefore }, timeout: 5),
+        desc: "the frame resolves before its diagnostics are read"
+    )
 }
 
 /// Cells whose heat counter is not zero, over a grid.
@@ -173,7 +178,7 @@ enum PerfDiagnosticsScenarios {
                 for row in 0..<8 {
                     surface.feed(Data("heat-row-\(row) \(String(repeating: "x", count: 30))\r\n".utf8))
                 }
-                drawFrame(surface, rebuildingEveryRow: true)
+                drawFrame(surface, rebuildingEveryRow: true, context: t)
                 let grid = surface.paintHeatmapGrid
 
                 NSApp.sendAction(#selector(TerminalWindowController.toggleHeatmap(_:)), to: shell, from: nil)
@@ -184,7 +189,7 @@ enum PerfDiagnosticsScenarios {
                 t.expect(surface.isPaintHeatmapEnabled, desc: "the window turns the active pane's heat pass on")
 
                 // The frame after opening: a baseline, not a whole-grid flash.
-                drawFrame(surface, rebuildingEveryRow: true)
+                drawFrame(surface, rebuildingEveryRow: true, context: t)
                 let afterBaseline = heatedCells(rows: grid.rows, columns: grid.columns)
                 t.expect(
                     afterBaseline.isEmpty,
@@ -193,7 +198,7 @@ enum PerfDiagnosticsScenarios {
 
                 // Wholesale redraws of the same content are not churn.
                 for _ in 0..<3 {
-                    drawFrame(surface, rebuildingEveryRow: true)
+                    drawFrame(surface, rebuildingEveryRow: true, context: t)
                 }
                 let afterRedraws = heatedCells(rows: grid.rows, columns: grid.columns)
                 t.expect(
@@ -203,7 +208,7 @@ enum PerfDiagnosticsScenarios {
 
                 // One cell's content changes, and only that cell heats.
                 surface.feed(Data("\u{1b}[3;5HZ".utf8))
-                drawFrame(surface, rebuildingEveryRow: true)
+                drawFrame(surface, rebuildingEveryRow: true, context: t)
                 let afterChange = heatedCells(rows: grid.rows, columns: grid.columns)
                 t.expect(
                     afterChange.count == 1 && afterChange.first?.row == 2 && afterChange.first?.column == 4,
@@ -213,7 +218,7 @@ enum PerfDiagnosticsScenarios {
                 // A pen change is a content change.
                 let heatAfterChange = Ubiquitty.Diagnostics.PaintHeatmap.cellCount(2, 4)
                 surface.feed(Data("\u{1b}[3;5H\u{1b}[31mZ\u{1b}[m".utf8))
-                drawFrame(surface, rebuildingEveryRow: false)
+                drawFrame(surface, rebuildingEveryRow: false, context: t)
                 let heatAfterRecolour = Ubiquitty.Diagnostics.PaintHeatmap.cellCount(2, 4)
                 t.expect(
                     heatAfterRecolour > heatAfterChange,
@@ -226,13 +231,13 @@ enum PerfDiagnosticsScenarios {
                 t.expect(!heatmap.isShowing, desc: "the second toggle closes the window")
                 t.expect(!surface.isPaintHeatmapEnabled, desc: "and turns the heat pass off")
                 surface.feed(Data("\u{1b}[5;1Hchanged while nobody watched".utf8))
-                drawFrame(surface, rebuildingEveryRow: true)
+                drawFrame(surface, rebuildingEveryRow: true, context: t)
                 NSApp.sendAction(#selector(TerminalWindowController.toggleHeatmap(_:)), to: shell, from: nil)
                 t.expect(
                     heatedCells(rows: grid.rows, columns: grid.columns).isEmpty,
                     desc: "reopening clears the counters"
                 )
-                drawFrame(surface, rebuildingEveryRow: true)
+                drawFrame(surface, rebuildingEveryRow: true, context: t)
                 let afterReopen = heatedCells(rows: grid.rows, columns: grid.columns)
                 t.expect(
                     afterReopen.isEmpty,
@@ -286,9 +291,9 @@ enum PerfDiagnosticsScenarios {
                 )
 
                 // Core owns the decay, and the window's refresh is what runs it.
-                drawFrame(surface, rebuildingEveryRow: true)
+                drawFrame(surface, rebuildingEveryRow: true, context: t)
                 surface.feed(Data("\u{1b}[2;2HQ".utf8))
-                drawFrame(surface, rebuildingEveryRow: false)
+                drawFrame(surface, rebuildingEveryRow: false, context: t)
                 let fresh = Ubiquitty.Diagnostics.PaintHeatmap.cellCount(1, 1)
                 t.expect(fresh > 0, desc: "premise: the written cell heats (\(fresh))")
                 t.pump(0.7)
@@ -358,7 +363,7 @@ enum PerfDiagnosticsScenarios {
                 var reportsSeen = TerminalSurface.framePerfLogForTesting.reportCount
                 let firstReport = reportsSeen
                 for _ in 0..<150 {
-                    drawFrame(surface, rebuildingEveryRow: false)
+                    drawFrame(surface, rebuildingEveryRow: false, context: t)
                     t.pump(0.02)
                     let log = TerminalSurface.framePerfLogForTesting
                     if log.reportCount != reportsSeen {
@@ -406,7 +411,7 @@ enum PerfDiagnosticsScenarios {
                 let before = surface.presentLegForTesting
                 let framesBefore = surface.framesEncodedForTesting
                 for _ in 0..<30 {
-                    drawFrame(surface, rebuildingEveryRow: true)
+                    drawFrame(surface, rebuildingEveryRow: true, context: t)
                     t.pump(0.017)
                 }
                 let presented = surface.framesEncodedForTesting - framesBefore

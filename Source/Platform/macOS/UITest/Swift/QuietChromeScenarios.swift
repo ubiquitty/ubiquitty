@@ -188,6 +188,37 @@ private enum QuietWindowShape: CaseIterable {
 enum QuietChromeScenarios {
     /// Registers every scenario in this file.
     static func register() {
+        UBUITestRegister("swift_shell_idle_terminal_stops_capture_retries") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                guard let shell = TerminalWindowController.spawn(), let window = shell.window,
+                    let surface = shell.focusedSurfaceForTesting
+                else {
+                    t.expect(false, desc: "an idle-retry probe opens a terminal")
+                    return
+                }
+                defer { window.close() }
+                window.makeKeyAndOrderFront(nil)
+                t.pump(1.2)
+                stopIngest(of: shell)
+                surface.isFullyOccludedForTesting = false
+                surface.feed(Data("\u{1b}[?25l\u{1b}[2J\u{1b}[HQUIET-RETRY".utf8))
+                surface.deliver([.screenDirty])
+                t.expect(t.wait(until: {
+                    surface.framesEncodedForTesting > 0 && !surface.drive.isFrameHeld && !surface.isFrameOwedForTesting
+                }, timeout: 5), desc: "the hidden-cursor terminal draws its quiet state")
+                t.pump(1.2)
+                let attempts = surface.encodeAttemptCount
+                let captures = surface.drive.syncFrameCaptureAttemptCount
+                let retries = surface.repaintRetriesAsked
+                t.pump(0.5)
+                print("[idle-work] attempts=\(surface.encodeAttemptCount - attempts) captures=\(surface.drive.syncFrameCaptureAttemptCount - captures) retries=\(surface.repaintRetriesAsked - retries)")
+                t.expect(surface.encodeAttemptCount == attempts, desc: "an idle terminal makes no encode attempts")
+                t.expect(surface.drive.syncFrameCaptureAttemptCount == captures, desc: "an idle terminal requests no captures")
+                t.expect(surface.repaintRetriesAsked == retries, desc: "an idle terminal queues no repaint retries")
+            }
+        }
+
         UBUITestRegister("swift_shell_pane_data_updates_leave_settled_siblings_unowed") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
