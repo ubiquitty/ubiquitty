@@ -205,12 +205,14 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-      - name: Compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-appimage-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: release-ccache-${{ runner.os }}-${{ runner.arch }}-appimage-${{ matrix.architecture }}-
+          restore-keys: |
+            release-ccache-${{ runner.os }}-${{ runner.arch }}-appimage-${{ matrix.architecture }}-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-frontend-
 
       # The frontend needs GTK 4.16, and this runner's Ubuntu 24.04 carries
       # 4.14, so the AppImage is built in the pinned image the Linux battery
@@ -274,6 +276,13 @@ jobs:
           )"
           GITHUB_REF_NAME="$PRODUCT_TAG" ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh sh -c "$container_build"
 
+      - name: Save the compiler cache
+        if: always() && env.CCACHE_DIR != ''
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: release-ccache-${{ runner.os }}-${{ runner.arch }}-appimage-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Preserve the Linux publication files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -329,12 +338,14 @@ jobs:
       - uses: ./.github/actions/release-source
         with:
           tag: ${{ env.PRODUCT_TAG }}
-      - name: Compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-web-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: release-ccache-${{ runner.os }}-${{ runner.arch }}-web-
+          restore-keys: |
+            release-ccache-${{ runner.os }}-${{ runner.arch }}-web-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-wasm-
       - name: Use the battery build root
         run: echo "UBQ_BUILD_ROOT=$RUNNER_WORKSPACE/build" >> "$GITHUB_ENV"
       - name: Build the browser frontend in the CI toolchain
@@ -353,6 +364,13 @@ jobs:
             --source "$PWD" --kit "$PWD/Libraries/ubiquitty-kit" \
             --core "$PWD/Libraries/ubiquitty-kit/Libraries/ubiquitty-core" --copy "$UBQ_BUILD_ROOT/web-dist"
           python3 "$UBQ_RELEASE_CI" web --tag "$PRODUCT_TAG" --directory "$UBQ_BUILD_ROOT/dist"
+      - name: Save the compiler cache
+        if: always() && env.CCACHE_DIR != ''
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: release-ccache-${{ runner.os }}-${{ runner.arch }}-web-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: client-release-web
@@ -388,12 +406,14 @@ jobs:
             !${{ env.UBQ_BUILD_ROOT }}/quic-deps/**/src/*/build
           key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-ios-${{ matrix.sdk }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-ios-${{ matrix.sdk }}-
-      - name: Compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-ios-${{ matrix.sdk }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: release-ccache-${{ runner.os }}-${{ runner.arch }}-ios-${{ matrix.sdk }}-
+          restore-keys: |
+            release-ccache-${{ runner.os }}-${{ runner.arch }}-ios-${{ matrix.sdk }}-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-ios-
       - name: Build the device or simulator development app
         env:
           UBIQUITTY_SIGN_IDENTITY: ad-hoc
@@ -410,6 +430,13 @@ jobs:
             ${{ env.UBQ_BUILD_ROOT }}/quic-deps
             !${{ env.UBQ_BUILD_ROOT }}/quic-deps/**/src/*/build
           key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.quic.outputs.quic_toolchain }}-${{ hashFiles('product/**/Scripts/fetch-quic-deps.sh', 'product/**/Scripts/macos-deployment-target.txt', 'product/**/Scripts/cmake/UbiquittyPreProject.cmake') }}-release-ios-${{ matrix.sdk }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save the compiler cache
+        if: always() && env.CCACHE_DIR != ''
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: release-ccache-${{ runner.os }}-${{ runner.arch }}-ios-${{ matrix.sdk }}-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: client-release-ios-${{ matrix.sdk }}
