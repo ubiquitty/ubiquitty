@@ -770,6 +770,15 @@ enum FramePacingScenarios {
                 surface.display()
                 t.pump(0.2)
 
+                t.expect(
+                    surface.lastFramePhaseInputsForTesting?.dirtyRows == 0,
+                    desc: "the settled content has no dirty rows before the resize"
+                )
+                // Exercise the on-screen resize path with the window kept
+                // off the desktop by the harness. Each size change draws
+                // synchronously; a second display would replace its metrics.
+                surface.isWindowOnScreenForResizeTesting = true
+                defer { surface.isWindowOnScreenForResizeTesting = nil }
                 // The drag's own branches, which a plain setFrameSize never
                 // reaches: the surface keeps its own latch and only this pair
                 // opens it.
@@ -779,8 +788,8 @@ enum FramePacingScenarios {
                 var refusingSteps = 0
                 var blankSteps: [String] = []
                 for step in 0..<26 {
+                    let gridBefore = surface.publishedGrid
                     surface.setFrameSize(NSSize(width: base.width, height: base.height + Double(step)))
-                    surface.display()
                     guard let phase = surface.lastFramePhaseInputsForTesting else {
                         t.expect(false, desc: "step \(step) drew a frame")
                         return
@@ -788,12 +797,19 @@ enum FramePacingScenarios {
                     // A step inside the slack band grows the drawable by a
                     // pixel or two without changing the row count, so the
                     // retained texture no longer matches and the frame has to
-                    // paint the screen from the capture. A frame that refuses
-                    // the target and emits nothing has cleared it and drawn
-                    // nothing on it.
-                    if !phase.didReuseLastFrame, phase.plannedRows > 0, phase.dirtyRows == 0 {
+                    // paint the screen from the capture. The renderer reports
+                    // every row as dirty after refusing the target, even when
+                    // the capture was clean. Read the refusal and unchanged
+                    // grid, then require the complete rebuild it owes.
+                    if !phase.didReuseLastFrame, phase.plannedRows > 0,
+                        surface.publishedGrid == gridBefore
+                    {
                         refusingSteps += 1
-                        if phase.drawnCells == 0 {
+                        t.expect(
+                            phase.dirtyRows == phase.plannedRows,
+                            desc: "step \(step) plans every row after refusing the retained target"
+                        )
+                        if phase.drawnCells < phase.plannedRows * Int(gridBefore.columns) {
                             blankSteps.append("step \(step) h=\(surface.bounds.height)")
                         }
                     }
@@ -806,7 +822,7 @@ enum FramePacingScenarios {
                 t.expect(refusingSteps > 0, desc: "the sweep reached the refusing case (\(refusingSteps) step(s))")
                 t.expect(
                     blankSteps.isEmpty,
-                    desc: "and no refusing step drew an empty screen"
+                    desc: "and every refusing step repainted the whole screen"
                         + (blankSteps.isEmpty ? "" : " — \(blankSteps.joined(separator: ", "))")
                 )
             }

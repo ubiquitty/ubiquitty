@@ -29,6 +29,37 @@ private func terminalSurface(under view: NSView) -> TerminalSurface? {
 
 enum ColumnModeScenarios {
     static func register() {
+        UBUITestRegister("swift_shell_resize_settle_preserves_a_pending_column_mode") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                guard let shell = TerminalWindowController.spawn(),
+                    let window = shell.window,
+                    let content = window.contentView,
+                    let surface = terminalSurface(under: content)
+                else {
+                    t.expect(false, desc: "a Swift-shell window opens with a terminal surface")
+                    return
+                }
+                defer { window.close() }
+                t.pump(0.3)
+                surface.feed(Data("\u{1b}[?40h\u{1b}[?3h".utf8))
+                t.pump(0.3)
+                t.expect(surface.publishedGrid.columns == 132, desc: "the window settled at 132 columns")
+
+                surface.beginLiveResize()
+                surface.feed(Data("\u{1b}[?3l".utf8))
+                t.expect(surface.drive.readSnapshot().columns == 80, desc: "the terminal requested 80 columns")
+                // The main-thread resize ends before it drains the terminal's
+                // queued window request. Settling moves no native bounds.
+                surface.endLiveResize()
+                t.expect(
+                    surface.drive.readSnapshot().columns == 80,
+                    desc: "settling the old frame preserves the pending 80-column request"
+                )
+                t.pump(0.3)
+                t.expect(surface.publishedGrid.columns == 80, desc: "the queued window request reaches 80 columns")
+            }
+        }
         UBUITestRegister("swift_shell_deccolm_owns_the_columns_across_a_resize") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
