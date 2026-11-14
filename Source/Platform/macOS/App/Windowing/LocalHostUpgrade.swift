@@ -24,13 +24,6 @@ package struct LocalHostUpgradeReport: Sendable {
     package let sentence: String
 }
 
-/// The successor's observable state after the pre-relaunch takeover.
-package struct UpdateHostTakeoverReport: Sendable {
-    package let isInstalled: Bool
-    package let isAnswering: Bool
-    package let olderHostCount: Int
-}
-
 @MainActor
 package enum LocalHostUpgrade {
     nonisolated private static let log = Logger(subsystem: "org.ubiquitty.Ubiquitty", category: "LocalHost")
@@ -39,7 +32,6 @@ package enum LocalHostUpgrade {
     private static var launch: Task<LocalHostUpgradeReport, Never>?
     /// The upgrade started last, which the next one waits for.
     private static var running: Task<LocalHostUpgradeReport, Never>?
-    private static var updateTakeover: Task<UpdateHostTakeoverReport, Never>?
 
     /// Whether this copy of the app updates This Mac's host: it bundles one,
     /// and is installed or upgrades only a private control directory.
@@ -70,40 +62,12 @@ package enum LocalHostUpgrade {
         await start().value
     }
 
-    /// Installs the verified update's host while the old app still owns its
-    /// windows. A caller proceeds to Sparkle only when no older host remains.
-    package static func beforeUpdate(using verifiedHost: String, version: String) async -> UpdateHostTakeoverReport {
-        let previous = running
-        let precedingUpdate = updateTakeover
-        let isDevelopment = ShareSessionSupport.isDevelopmentBundle(Bundle.main)
-        let task = Task.detached(priority: .userInitiated) {
-            _ = await previous?.value
-            _ = await precedingUpdate?.value
-            let outcome = Ubiquitty.Session.upgradeLocalHostForUpdate(
-                std.string(verifiedHost),
-                isDevelopment ? .development : .release,
-                std.string(version)
-            )
-            Self.record(outcome, bundled: verifiedHost)
-            let kind = outcome.install.kind
-            return UpdateHostTakeoverReport(
-                isInstalled: kind == .current || kind == .linked || kind == .copied,
-                isAnswering: outcome.isBundledHostAnswering,
-                olderHostCount: outcome.olderHostCount
-            )
-        }
-        updateTakeover = task
-        return await task.value
-    }
-
     private static func start() -> Task<LocalHostUpgradeReport, Never> {
         let previous = running
-        let precedingUpdate = updateTakeover
         let bundled = ShareSessionSupport.localHostBinaryPath()
         let isDevelopment = ShareSessionSupport.isDevelopmentBundle(Bundle.main)
         let task = Task.detached(priority: .userInitiated) { () -> LocalHostUpgradeReport in
             _ = await previous?.value
-            _ = await precedingUpdate?.value
             guard let bundled else {
                 Self.log.notice("This copy of Ubiquitty includes no host, so this Mac’s host was left as it is.")
                 return LocalHostUpgradeReport(title: "", sentence: "")

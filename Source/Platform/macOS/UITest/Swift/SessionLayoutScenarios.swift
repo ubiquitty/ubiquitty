@@ -1838,14 +1838,16 @@ enum SessionLayoutScenarios {
             t.expect(t.wait(until: { isPrepared != nil }, timeout: 90), desc: "the signed candidate preparation finishes")
             t.expect(
                 isPrepared == true && questions == 0,
-                desc: "every local session moves to the verified candidate without a risky restart"
+                desc: "every local session is retained for the verified update without a risky restart"
             )
             guard isPrepared == true else { return }
-            t.expect(updater.mayTerminateAfterUpdatePreparation, desc: "proved takeover authorizes the update quit")
+            t.expect(updater.didShowUpdatePreparationForTesting, desc: "Install shows progress during verified preparation")
+            t.expect(daemon.isRunning, desc: "the predecessor retains its adoption outcomes until the app exits")
+            t.expect(updater.mayTerminateAfterUpdatePreparation, desc: "confirmed host ownership authorizes the update quit")
             updater.deliverRelaunchNoticeForTesting()
             t.expect(
                 delegate.applicationShouldTerminate(NSApp) == .terminateNow,
-                desc: "Sparkle's actual quit commits the proved arrangement"
+                desc: "Sparkle's actual quit commits the retained arrangement"
             )
         } else {
             // Sparkle's notice, through the delegate Sparkle calls.

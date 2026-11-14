@@ -93,10 +93,12 @@ Launch** is on (`Session::isSessionKeptByQuit`):
   on their hosts. The arrangement records the exact session IDs of panes that
   were local before the update, including a split with both local and hosted
   panes.
-- The verified host from the update archive is installed in this Mac's private
-  control directory. Ubiquitty starts its takeover and waits for each adopted
-  pane to reconnect to the same session on the new daemon. An older daemon or
-  a pending session prevents the automatic relaunch.
+- Ubiquitty verifies the update host's signature and exact executable version.
+  The current host keeps its sessions while Sparkle installs the app. Adoption
+  outcomes belong to the adopting app's lifetime, so host takeover waits until
+  that app exits. On launch, the new app installs its host and transfers the
+  sessions before restoring their saved references. A host that refuses a
+  transfer keeps serving its sessions.
 - Ubiquitty saves every window: its frame and screen, whether it was in full
   screen, its place in front of or behind the others, its tabs and the
   selected one, and each tab's split and focused pane.
@@ -110,7 +112,7 @@ The saved arrangement carries a mark that only the launch after the update
 reads, and that launch removes it. With **Restore Last Session on Launch**
 off, the next time you open Ubiquitty it starts with a new window as usual.
 
-If adoption, host verification, or takeover fails, Ubiquitty requests the
+If adoption, attachment, or host verification fails, Ubiquitty requests the
 adopted panes back into the still-running app and asks before restarting. **Not
 Now** leaves the app open with its panes alive. Sparkle keeps the prepared
 update and installs it when you next quit Ubiquitty; that ordinary quit does
@@ -158,10 +160,11 @@ scenario exercises preparation against a local signed release archive. Set
 `UBIQUITTY_UI_TEST_UPDATE_BUILD` and `UBIQUITTY_UI_TEST_UPDATE_VERSION` to its
 `CFBundleVersion` and `CFBundleShortVersionString`, then select that scenario
 with `Scripts/run-ui-tests.sh`. The scenario retains the production version and
-signature checks, verifies takeover before authorizing quit, and checks every
+signature checks, confirms retained ownership before authorizing quit, and checks every
 restored window, tab, split and running shell. It does not replace the test
 application. A release rehearsal also runs Core's `local_host_upgrade` against
-the released predecessor and candidate host binaries.
+the released predecessor and candidate host binaries, and restores a saved live
+reference in a second application process after the adopting process exits.
 
 ## Build
 

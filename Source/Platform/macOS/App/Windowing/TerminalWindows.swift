@@ -1073,7 +1073,7 @@ final class TerminalWindows: NSObject {
     }
 
     /// Each adopted pane must have an established attachment before the
-    /// successor is started, so its exact session and predecessor are known.
+    /// app exits, so its exact session and serving host are known.
     static func settledUpdateAdoptions(_ capture: PreparedUpdateCapture) async -> [UInt64]? {
         for _ in 0..<100 {
             let attached = capture.localPanes.allSatisfy { pane in
@@ -1085,29 +1085,6 @@ final class TerminalWindows: NSObject {
             try? await Task.sleep(for: .milliseconds(100))
         }
         return nil
-    }
-
-    /// A matching session on a new daemon, reached through the original
-    /// attachment, is evidence that the successor took this pane.
-    static func movedUpdateAdoptionCount(_ capture: PreparedUpdateCapture, from predecessors: [UInt64]) async -> Int {
-        guard predecessors.count == capture.localPanes.count else { return 0 }
-        var moved = 0
-        for _ in 0..<100 {
-            moved =
-                zip(capture.localPanes, predecessors)
-                .filter { pair in
-                    let pane = pair.0
-                    let predecessor = pair.1
-                    return pane.drive.isSharedIntoLocalDaemon && pane.drive.remoteState == .Connected
-                        && pane.drive.remoteSessionID == pane.drive.sharedSessionID
-                        && pane.drive.remoteDaemonInstanceID != 0
-                        && pane.drive.remoteDaemonInstanceID != predecessor
-                }
-                .count
-            if moved == capture.localPanes.count { return moved }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        return moved
     }
 
     /// A refused update keeps the old app alive. Reclaim is requested only

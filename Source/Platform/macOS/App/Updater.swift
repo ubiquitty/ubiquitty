@@ -461,7 +461,7 @@ public final class Updater: NSObject {
     /// A quit cannot discard a prepared local owner while Sparkle is held.
     public var isUpdatePreparationInProgress: Bool { isPreparingUpdateRelaunch }
 
-    /// Publishes the already proved arrangement at Sparkle's actual quit.
+    /// Publishes the host-owned arrangement at Sparkle's actual quit.
     public func commitPreparedUpdateAtQuit() {
         guard !didCommitCaptureForInstallation, let preparedCapture else { return }
         TerminalWindows.commitUpdateCapture(preparedCapture)
@@ -509,10 +509,10 @@ public final class Updater: NSObject {
         facts.adoptedLocalPaneCount = .init(capture.adoptedLocalPaneCount)
         facts.unresolvedAdoptionCount = .init(Ubiquitty.Runtime.TerminalSession.unresolvedLocalAdoptionCount())
         progress.show("Connecting to your running sessions…")
-        let predecessors =
+        let attachments =
             facts.localPaneCount == facts.adoptedLocalPaneCount && facts.unresolvedAdoptionCount == 0
             ? await TerminalWindows.settledUpdateAdoptions(capture) : nil
-        facts.attachedLocalPaneCount = .init(predecessors?.count ?? 0)
+        facts.attachedLocalPaneCount = .init(attachments?.count ?? 0)
 
         var candidate: UpdateHostCandidate?
         if facts.localPaneCount == facts.adoptedLocalPaneCount,
@@ -539,19 +539,11 @@ public final class Updater: NSObject {
             }
         }
         if let candidate {
-            facts.isNewHostVerified = true
-            progress.show("Moving your running sessions…")
-            let takeover = await LocalHostUpgrade.beforeUpdate(using: candidate.path, version: candidate.version)
-            facts.isNewHostInstalled = takeover.isInstalled
-            facts.isNewHostAnswering = takeover.isAnswering
-            facts.olderHostCount = .init(takeover.olderHostCount)
-            facts.pendingSessionCount = .init(takeover.olderHostCount)
-            if let predecessors, facts.isNewHostAnswering {
-                progress.show("Checking your sessions are ready…")
-                facts.movedLocalPaneCount = .init(
-                    await TerminalWindows.movedUpdateAdoptionCount(capture, from: predecessors)
-                )
-            }
+            facts.isNewHostVerified =
+                await Task.detached(priority: .userInitiated) {
+                    Ubiquitty.Session.isLocalHostAtVersion(std.string(candidate.path), std.string(candidate.version))
+                }
+                .value
             try? FileManager.default.removeItem(at: candidate.directory)
         }
         for (index, pane) in capture.localPanes.enumerated() {
@@ -562,14 +554,8 @@ public final class Updater: NSObject {
                 reason = "host attachment \(pane.drive.remoteState); \(pane.drive.lastRemoteTransitionDetail)"
             } else if pane.drive.remoteSessionID != pane.drive.sharedSessionID {
                 reason = "host attachment names another session"
-            } else if let predecessors, pane.drive.remoteDaemonInstanceID == predecessors[index],
-                facts.isNewHostAnswering
-            {
-                reason = "new host has not taken over the adopted session"
             } else if !facts.isNewHostVerified {
                 reason = "new host binary could not be verified"
-            } else if !facts.isNewHostInstalled || !facts.isNewHostAnswering {
-                reason = "new host did not start and answer"
             } else {
                 reason = "handoff and attachment confirmed"
             }
