@@ -798,12 +798,30 @@ final class UBAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMe
 
     // MARK: - Remote setup
 
+    /// Produces one pasteable shell line while preserving the source bytes.
+    static func terminfoInstallCommand(source: String) -> String {
+        // Heredoc input can reach the shell's line editor without bracketed
+        // paste, where a source tab invokes completion. Octal printf escapes
+        // keep controls out of the command and survive each shell's quoting
+        // rules without interpreting terminfo's own backslash escapes.
+        var encoded = ""
+        encoded.reserveCapacity(source.utf8.count * 2)
+        for byte in source.utf8 {
+            if (32...126).contains(byte), byte != 39, byte != 92 {
+                encoded.unicodeScalars.append(UnicodeScalar(byte))
+            } else {
+                encoded += String(format: "\\0%03o", Int(byte))
+            }
+        }
+        return "printf '%b' '\(encoded)' | tic -x -"
+    }
+
     /// File ▸ Set Up Ubiquitty on Remote Host…: a self-contained command that
     /// compiles the terminfo entry in whatever shell it is pasted into. The
     /// entry overwrites cleanly, so pasting it again is safe.
     @objc
     func installTerminfoOnRemote(_ sender: Any?) {
-        let command = "tic -x - <<'TERMINFO'\n" + String(cString: Ubiquitty.Terminfo.sourceText()) + "TERMINFO"
+        let command = Self.terminfoInstallCommand(source: String(cString: Ubiquitty.Terminfo.sourceText()))
         let alert = NSAlert()
         alert.messageText = "Set Up Ubiquitty on a Remote Host"
         // Quoted, so the command still runs when pasted from a bundle whose path

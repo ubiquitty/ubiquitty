@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import AppKit
+import UbiquittyCore
 import UbiquittyKit
 
 // MenuRoutingScenarios.swift — every menu action a Swift-shell window is asked
@@ -96,6 +97,55 @@ private func untargetedActions(in menu: NSMenu, path: String = "") -> [(String, 
 enum MenuRoutingScenarios {
     /// Registers every scenario in this file.
     static func register() {
+        UBUITestRegister("swift_remote_terminfo_command_is_one_literal_shell_line") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                let files = FileManager.default
+                let root = files.temporaryDirectory.appendingPathComponent("ubq-terminfo-\(UUID().uuidString)")
+                defer { try? files.removeItem(at: root) }
+                do {
+                    let tools = root.appendingPathComponent("tools")
+                    try files.createDirectory(at: tools, withIntermediateDirectories: true)
+                    let tic = tools.appendingPathComponent("tic")
+                    try Data("#!/bin/sh\n/usr/bin/tee \"$UBQ_TERMINFO_CAPTURE\" | /usr/bin/tic \"$@\"\n".utf8).write(to: tic)
+                    try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tic.path)
+                    let source = String(cString: Ubiquitty.Terminfo.sourceText())
+                    let quoted = source + "# Quotes ' and shell syntax $HOME `printf bad` $(printf bad), \\c and a tab\tstay literal.\n"
+                    for (index, entry) in [source, quoted].enumerated() {
+                        let command = UBAppDelegate.terminfoInstallCommand(source: entry)
+                        t.expect(
+                            command.utf8.allSatisfy { $0 >= 32 && $0 <= 126 },
+                            desc: "the copied command has no tabs, newlines or other control bytes"
+                        )
+                        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+                            let directory = root.appendingPathComponent("\(index)-\(URL(fileURLWithPath: shell).lastPathComponent)")
+                            try files.createDirectory(at: directory, withIntermediateDirectories: true)
+                            let captured = directory.appendingPathComponent("source")
+                            let process = Process()
+                            process.executableURL = URL(fileURLWithPath: shell)
+                            process.arguments = ["-c", command]
+                            process.environment = [
+                                "PATH": tools.path + ":/usr/bin:/bin",
+                                "HOME": directory.path,
+                                "TERMINFO": directory.path,
+                                "UBQ_TERMINFO_CAPTURE": captured.path,
+                            ]
+                            try process.run()
+                            process.waitUntilExit()
+                            t.expect(process.terminationStatus == 0, desc: "\(shell) compiles the copied entry with tic")
+                            t.expect(try Data(contentsOf: captured) == Data(entry.utf8), desc: "\(shell) preserves every source byte")
+                            t.expect(
+                                files.fileExists(atPath: directory.appendingPathComponent("78/xterm-ubiquitty").path)
+                                    || files.fileExists(atPath: directory.appendingPathComponent("x/xterm-ubiquitty").path),
+                                desc: "tic installed xterm-ubiquitty in the isolated directory"
+                            )
+                        }
+                    }
+                } catch {
+                    t.expect(false, desc: "remote terminfo fixture: \(error)")
+                }
+            }
+        }
         UBUITestRegister("swift_cli_installer_preserves_existing_files") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
