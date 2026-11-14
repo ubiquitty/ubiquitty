@@ -2087,6 +2087,8 @@ TEST(aWebNonOwnerFitsTheWholePictureWithoutChangingTheHostGrid)
     namespace Sync = Ubiquitty::Protocol::Sync;
     configureDocument("[remote]\nnon_owner_presentation = \"fit\"\n");
     WebTerminal page(10, 40, 1);
+    // Compare viewport placement at one display instant, including the cursor.
+    page.setPresentationTime(0);
     PageHost host(7, 10, 40, Sync::Role::Viewer);
     Ubiquitty::processBytes(&host.terminal(), "\033[1;31mcell\033[0m\033Pq#1;2;100;0;0#1~\033\\\033[4;8H");
     host.source().geometry().noteTyping({ 99, pageDaemonInstanceID }, Sync::GeometryStanding::Driver, 1);
