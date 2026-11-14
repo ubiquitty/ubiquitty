@@ -132,9 +132,19 @@ jobs:
       - name: Collect Linux host binaries
         run: |
           mkdir -p "$UBQ_BUILD_ROOT/host-cross"
+          set -euo pipefail
+          core="$UBIQUITTY_SOURCE_ROOT/Libraries/ubiquitty-kit/Libraries/ubiquitty-core"
+          image="$(sed -n 's/^host=//p' "$core/Scripts/linux-images.txt")"
           for arch in x86_64 arm64; do
-            find "$RUNNER_TEMP/host-cross-artifacts" -type f -name "ubiquitty-host-linux-$arch" -exec cp {} "$UBQ_BUILD_ROOT/host-cross/" \;
-            test -s "$UBQ_BUILD_ROOT/host-cross/ubiquitty-host-linux-$arch"
+            for suffix in '' .json; do
+              leaf="ubiquitty-host-linux-$arch$suffix"
+              find "$RUNNER_TEMP/host-cross-artifacts" -type f -name "$leaf" -exec cp {} "$UBQ_BUILD_ROOT/host-cross/" \;
+              test -s "$UBQ_BUILD_ROOT/host-cross/$leaf"
+            done
+            key="$(python3 "$core/Scripts/linux-host-artifact.py" key --arch "$arch" \
+              --image "$image" --quic ON --version "$UBIQUITTY_BUILD_VERSION" --identity "$UBIQUITTY_BUILD_IDENTITY")"
+            python3 "$core/Scripts/linux-host-artifact.py" check --arch "$arch" \
+              --binary "$UBQ_BUILD_ROOT/host-cross/ubiquitty-host-linux-$arch" --key "$key"
           done
       - name: Build the release-policy app with ad-hoc signatures
         env:

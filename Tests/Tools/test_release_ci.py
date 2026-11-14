@@ -6,11 +6,13 @@
 
 from contextlib import redirect_stdout
 import importlib.util
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import tempfile
 import textwrap
 import unittest
@@ -72,6 +74,64 @@ class ReleaseTests(unittest.TestCase):
                 checked, environment, _ = self.release_source_bootstrap(**options)
                 self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
                 self.assertEqual(environment, "")
+
+    def collect_linux_hosts(self, damage=""):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        step = workflow.split("      - name: Collect Linux host binaries\n", 1)[1].split("      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        core_root = ROOT / RELEASE.CORE_PATH
+        spec = importlib.util.spec_from_file_location("release_host_artifact_fixture", core_root / "Scripts/linux-host-artifact.py")
+        artifact = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(artifact)
+        with tempfile.TemporaryDirectory(prefix="ubq-host-artifact-") as temporary:
+            directory = Path(temporary)
+            product = directory / "product with spaces"
+            nested_core = product / RELEASE.CORE_PATH
+            nested_core.parent.mkdir(parents=True)
+            nested_core.symlink_to(core_root, target_is_directory=True)
+            inputs = directory / "host-cross-artifacts"
+            image = next(line.removeprefix("host=") for line in (core_root / "Scripts/linux-images.txt").read_text().splitlines() if line.startswith("host="))
+            for arch in ("x86_64", "arm64"):
+                binary = inputs / arch / ("ubiquitty-host-linux-" + arch)
+                binary.parent.mkdir(parents=True)
+                data = bytearray(120)
+                data[:7] = b"\x7fELF\x02\x01\x01"
+                struct.pack_into("<HH", data, 16, 2, artifact.MACHINES[arch])
+                struct.pack_into("<Q", data, 32, 64)
+                struct.pack_into("<HH", data, 54, 56, 1)
+                struct.pack_into("<I", data, 64, 1)
+                binary.write_bytes(data)
+                key = artifact.source_key(core_root, arch, image, "ON", "0.4.0", "release-fixture")
+                manifest = {"format": 1, "key": key, "sha256": hashlib.sha256(data).hexdigest()}
+                artifact.manifest_path(binary).write_text(json.dumps(manifest))
+            binary = inputs / "arm64/ubiquitty-host-linux-arm64"
+            if damage == "missing manifest":
+                artifact.manifest_path(binary).unlink()
+            elif damage == "changed binary":
+                binary.write_bytes(binary.read_bytes() + b"changed")
+            elif damage == "wrong source":
+                metadata = json.loads(artifact.manifest_path(binary).read_text())
+                metadata["key"] = "0" * 64
+                artifact.manifest_path(binary).write_text(json.dumps(metadata))
+            environment = {**os.environ, "RUNNER_TEMP": str(directory), "UBQ_BUILD_ROOT": str(directory / "build"),
+                           "UBIQUITTY_SOURCE_ROOT": str(product), "UBIQUITTY_BUILD_VERSION": "0.4.0",
+                           "UBIQUITTY_BUILD_IDENTITY": "release-fixture"}
+            checked = subprocess.run(["/bin/bash", "-c", script], env=environment, text=True,
+                                     capture_output=True, timeout=30)
+            output = directory / "build/host-cross"
+            return checked, sorted(path.name for path in output.iterdir())
+
+    def test_macos_collection_preserves_both_linux_hosts_and_provenance(self):
+        checked, names = self.collect_linux_hosts()
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(names, sorted("ubiquitty-host-linux-" + arch + suffix
+                                      for arch in ("x86_64", "arm64") for suffix in ("", ".json")))
+
+    def test_macos_collection_rejects_missing_changed_or_wrong_source_hosts(self):
+        for damage in ("missing manifest", "changed binary", "wrong source"):
+            with self.subTest(damage=damage):
+                checked, _ = self.collect_linux_hosts(damage)
+                self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
     def test_tags_are_stable_versions_without_shell_or_path_syntax(self):
         self.assertEqual(RELEASE.version("v0.4.0"), "0.4.0")
