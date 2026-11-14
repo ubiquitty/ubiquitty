@@ -23,6 +23,8 @@ def event(value):
     with (root / "events").open("a") as stream: stream.write(value + "\n")
 if args[-1:] == ["--show-sdk-path"]:
     print(root / "sdk")
+elif args == ["--sdk", "iphonesimulator", "--show-sdk-version"]:
+    print("27.0")
 elif args[:1] == ["clang++"]:
     binary = pathlib.Path(args[args.index("-o") + 1])
     event("compile " + binary.name)
@@ -33,7 +35,7 @@ elif args[:1] == ["clang++"]:
 elif args[:3] == ["simctl", "list", "devices"]:
     print(json.dumps({"devices": {"fixture-runtime": [{"name": "ubq-ios-test-conformancefixture", "udid": "fixture-device", "state": state.read_text(), "isAvailable": True}]}}))
 elif args[:3] == ["simctl", "list", "runtimes"]:
-    print(json.dumps({"runtimes": [{"name": "iOS 27", "identifier": "fixture-runtime", "isAvailable": True, "supportedDeviceTypes": [{"name": "iPhone 18 Pro"}]}]}))
+    print(json.dumps({"runtimes": [{"name": "iOS 27", "version": "27.0", "identifier": "fixture-runtime", "isAvailable": True, "supportedDeviceTypes": [{"name": "iPhone 18 Pro"}]}]}))
 elif args[:2] == ["simctl", "bootstatus"]:
     event("boot"); state.write_text("Booted")
 elif args[:2] == ["simctl", "shutdown"]:

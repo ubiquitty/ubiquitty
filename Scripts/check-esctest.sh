@@ -281,6 +281,14 @@ if [ "$newlyFailing" != "0" ] || [ "$newlyPassing" != "0" ]; then
     # Hosted runners are ephemeral; retain the assertions in the job log.
     echo "check-esctest: full suite log: $LOG" >&2
     cat "$LOG" >&2
+    # Gate runners retain the end of a failed command's output. Keep each
+    # failing assertion there too, after the suite's final summary.
+    echo "check-esctest: failing assertions:" >&2
+    awk '
+        /^Run test:/ { failed = "" }
+        /^\*\*\* TEST .* FAILED:/ { failed = $3 }
+        failed != "" && /^[A-Za-z_][A-Za-z0-9_.]*:/ { print failed ": " $0 }
+    ' "$LOG" >&2
     exit 1
 fi
 
