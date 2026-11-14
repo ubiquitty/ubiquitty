@@ -336,6 +336,11 @@ jobs:
           fetch-depth: 0
       - name: Selected Apple toolchain
         run: |
+          # Finish mounting simulator runtimes before other Apple tools can
+          # activate a second cryptex concurrently (runner-images#14946).
+          if [ "${{ matrix.group }}" = ios ]; then
+            xcrun simctl runtime list
+          fi
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
           xcrun --sdk iphonesimulator --show-sdk-version

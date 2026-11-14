@@ -139,9 +139,16 @@ simulatorDiagnostics() {
     runWithTimeout 30 /usr/bin/log show --last 10m --style compact \
         --predicate 'process == "CoreSimulatorService" OR process == "SimulatorTrampoline" OR process == "launchd_sim" OR process == "SimRenderServer"' \
         2>&1 | tail -100 | sed 's/^/          /'
+    echo "        runtime image and launch host log (last fifteen minutes):"
+    runWithTimeout 30 /usr/bin/log show --last 15m --style compact \
+        --predicate 'process == "simdiskimaged" OR process BEGINSWITH "SimLaunchHost" OR (process == "CoreSimulatorService" AND (eventMessage CONTAINS[c] "shutdown" OR eventMessage CONTAINS[c] "unmount"))' \
+        2>&1 | tail -150 | sed 's/^/          /'
+    echo "        runtime image registrations:"
+    runWithTimeout 30 xcrun simctl runtime list 2>&1 | sed 's/^/          /'
     echo "        recent runtime crash reports:"
     find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f -newer "$launchMarker" \
-        \( -name 'CoreSimulatorService*' -o -name 'launchd_sim*' -o -name 'SimRenderServer*' -o -name 'SimulatorTrampoline*' \) \
+        \( -name 'CoreSimulatorService*' -o -name 'launchd_sim*' -o -name 'SimRenderServer*' \
+            -o -name 'SimulatorTrampoline*' -o -name 'SimLaunchHost*' -o -name 'simdiskimaged*' \) \
         -print -exec head -c 12000 {} \; 2>/dev/null | sed 's/^/          /'
 }
 
