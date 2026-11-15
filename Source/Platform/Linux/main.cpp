@@ -1511,7 +1511,7 @@ std::string bundledFontPathForFamily(std::string_view family)
 
 // GTK font DPI describes logical pixels per inch; the window scale converts
 // logical pixels to backing pixels. Neither conversion may round the points.
-int deviceFontPixelSize()
+double deviceFontPixelSize()
 {
     return Ubiquitty::Linux::fontPixelSize(app().fontSizePoints, app().fontDPI, app().scale);
 }
@@ -1739,7 +1739,7 @@ void setupFonts()
         g_print("ubiquitty-linux: glyph font = GNU Unifont (%s, 1-bit)\n", why);
     } else {
         const Ubiquitty::Rendering::CellMetrics m = app().glyphRasterizer->cellMetrics();
-        g_print("ubiquitty-linux: glyph font = %s (FreeType AA, %gpt, %g DPI, %dpx, cell %dx%d)\n", app().glyphRasterizer->faceName(), app().fontSizePoints, app().fontDPI, deviceFontPixelSize(), static_cast<int>(m.cellWidth + 0.5f), static_cast<int>(m.cellHeight + 0.5f));
+        g_print("ubiquitty-linux: glyph font = %s (FreeType AA, %gpt, %g DPI, %gpx, cell %dx%d)\n", app().glyphRasterizer->faceName(), app().fontSizePoints, app().fontDPI, deviceFontPixelSize(), static_cast<int>(m.cellWidth + 0.5f), static_cast<int>(m.cellHeight + 0.5f));
     }
 }
 
@@ -1804,7 +1804,7 @@ void onScaleFactorChanged(GObject*, GParamSpec*, gpointer)
     if (app().areFontsSetUp) {
         rebuildFontsFromPreferences();
         const Ubiquitty::Rendering::CellMetrics m = currentRasterizer().cellMetrics();
-        g_print("ubiquitty-linux: display scale = %dx → rasterizing at %dpx (device cell %dx%d)\n", app().scale, deviceFontPixelSize(), static_cast<int>(m.cellWidth + 0.5f), static_cast<int>(m.cellHeight + 0.5f));
+        g_print("ubiquitty-linux: display scale = %dx → rasterizing at %gpx (device cell %dx%d)\n", app().scale, deviceFontPixelSize(), static_cast<int>(m.cellWidth + 0.5f), static_cast<int>(m.cellHeight + 0.5f));
     }
     for (const auto& pane : app().panes) {
         publishPanePixelGeometry(*pane);
@@ -9532,7 +9532,7 @@ int smokeFontSettings()
         return 1;
     }
 
-    const int pixelSize = deviceFontPixelSize();
+    const double pixelSize = deviceFontPixelSize();
     auto build = [&](int tracking) {
         return Ubiquitty::Linux::FreeTypeRasterizer(pixelSize, "JetBrains Mono", std::string(), std::string(),
             bundledPath, app().scale, app().lineSpacingPixels, tracking);
@@ -15143,16 +15143,16 @@ int smokeTabs()
     app().fontDPI = 96;
     app().fontSizePoints = 15.5;
     app().scale = 2;
-    const int halfPointAtTwo = deviceFontPixelSize();
+    const double halfPointAtTwo = deviceFontPixelSize();
     app().fontSizePoints = 16.0;
-    const int wholePointAtTwo = deviceFontPixelSize();
+    const double wholePointAtTwo = deviceFontPixelSize();
     app().fontSizePoints = 15.0;
-    const int belowAtTwo = deviceFontPixelSize();
+    const double belowAtTwo = deviceFontPixelSize();
     app().fontSizePoints = savedPoints;
     app().fontDPI = savedDPI;
     app().scale = savedScale;
-    check(halfPointAtTwo == 41, "15.5pt at 96 DPI and 2x is 41 device pixels");
-    check(belowAtTwo == 40 && wholePointAtTwo == 43, "whole points include both DPI and backing scale");
+    check(std::abs(halfPointAtTwo - 124.0 / 3.0) < 1e-12, "15.5pt at 96 DPI and 2x retains the fractional device em");
+    check(belowAtTwo == 40 && std::abs(wholePointAtTwo - 128.0 / 3.0) < 1e-12, "whole points include both DPI and backing scale without rounding");
 
     // (3b) The ':' scope is a projection of the model above, so it is asserted
     // here where three real tabs exist rather than against a constructed one.

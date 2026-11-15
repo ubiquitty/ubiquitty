@@ -37,7 +37,7 @@ colour sheet, and it is measured from the tree rather than listed by hand: a new
 renderer that binds one is a new arm, and it is caught by the first bound below.
 
 The helper need not be called in the binder's own file. Linux binds in
-`VulkanColorGlyphAtlas.cpp` and sizes in `VulkanRenderer.cpp`, so an arm is a
+`VulkanColorGlyphAtlas.cpp` and sizes in `VulkanFontAtlas.cpp`, so an arm is a
 set of files and the check asks whether the helper is reached anywhere in it.
 
 Three bounds, so the record cannot rot in either direction:
@@ -73,6 +73,7 @@ ARMS = {
     "linux-vulkan": [
         "Source/Platform/Linux/VulkanColorGlyphAtlas.cpp",
         "Source/Platform/Linux/VulkanRenderer.cpp",
+        "Source/Platform/Linux/VulkanFontAtlas.cpp",
     ],
     "macos-swift": [
         "Source/UbiquittyRenderKit/GlyphAtlas.swift",
@@ -108,7 +109,7 @@ NOT_ARMS = (
 ZERO_TREATMENT = {
     "core-software": ("floors-to-one", "Source/Core/Rendering/SoftwareRenderer.cpp",
                       "whole > 0 ? whole : 1"),
-    "linux-vulkan": ("passes-zero-through", "Source/Platform/Linux/VulkanRenderer.cpp", None),
+    "linux-vulkan": ("passes-zero-through", "Source/Platform/Linux/VulkanFontAtlas.cpp", None),
     "macos-swift": ("passes-zero-through",
                     "Source/UbiquittyRenderKit/GlyphAtlas.swift", None),
 }
