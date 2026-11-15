@@ -534,6 +534,7 @@ final class TerminalWindows: NSObject {
         var didRestoreAll = true
         var restored: [NSWindow] = []
         var fullScreen: [NSWindow] = []
+        var shownWindows: [NSWindow] = []
         let existingControllers = Set(TerminalWindowController.spawnedControllers.map(ObjectIdentifier.init))
         for group in groups {
             var windows: [NSWindow] = []
@@ -551,10 +552,14 @@ final class TerminalWindows: NSObject {
             placement.frame = group.frame
             placement.activeTab = selectedIndex
             settleRestoredGroup(placement, windows: windows)
-            if group.isFullScreen, let shown = windows.indices.contains(selectedIndex) ? windows[selectedIndex] : windows.first {
-                fullScreen.append(shown)
+            if let shown = windows.indices.contains(selectedIndex) ? windows[selectedIndex] : windows.first {
+                shownWindows.append(shown)
+                if group.isFullScreen { fullScreen.append(shown) }
             }
             restored.append(contentsOf: windows)
+        }
+        for (below, above) in zip(shownWindows, shownWindows.dropFirst()) where above !== below {
+            above.order(.above, relativeTo: below.windowNumber)
         }
         for window in fullScreen {
             await enterFullScreen(window)

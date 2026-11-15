@@ -525,7 +525,7 @@ enum SessionLayoutScenarios {
         other.splitRight(nil)
         t.expect(other.setRootSplitRatioForTesting(0.37), desc: "the arrangement has an unequal split")
         other.toggleZoomPane(nil)
-        otherWindow.orderFront(nil)
+        otherWindow.order(.above, relativeTo: secondWindow.windowNumber)
         t.pump(0.4)
         t.expect(
             firstWindow.tabGroup?.windows == [firstWindow, secondWindow, thirdWindow]
@@ -568,7 +568,7 @@ enum SessionLayoutScenarios {
         // The tabbed window brought in front is stored last, so it reopens in
         // front: a group stands where its selected tab stands, not where the
         // tab behind it last stood.
-        secondWindow.orderFront(nil)
+        secondWindow.order(.above, relativeTo: otherWindow.windowNumber)
         t.pump(0.3)
         let frontName = "uitest-swift-shell-layout-tabbed-front"
         t.expect(delegate.saveCurrentLayout(withName: frontName), desc: "Save Workspace captures the windows again")
@@ -1797,8 +1797,14 @@ enum SessionLayoutScenarios {
         backSplitWindow.setFrame(NSRect(x: 60, y: 240, width: 760, height: 470), display: false)
         middleWindow.setFrame(NSRect(x: 140, y: 170, width: 640, height: 400), display: false)
         frontJobWindow.setFrame(NSRect(x: 220, y: 100, width: 700, height: 430), display: false)
-        for window in [backSplitWindow, middleWindow, frontJobWindow] { window.orderFront(nil) }
-        t.pump(0.4)
+        backSplitWindow.orderFront(nil)
+        middleWindow.order(.above, relativeTo: backSplitWindow.windowNumber)
+        frontJobWindow.order(.above, relativeTo: middleWindow.windowNumber)
+        let intendedStack = [frontJobWindow, middleWindow, backSplitWindow]
+        guard t.wait(until: { NSApp.orderedWindows.filter { intendedStack.contains($0) } == intendedStack }, timeout: 5) else {
+            t.expect(false, desc: "the fixture places its windows front to back before the update")
+            return
+        }
 
         let backFrame = backSplitWindow.frame
         let middleFrame = middleWindow.frame
