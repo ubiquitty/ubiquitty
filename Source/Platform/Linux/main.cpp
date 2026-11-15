@@ -178,14 +178,19 @@
 #include "Platform/Linux/CapabilityPolicy.h"
 #include "Platform/Linux/Clipboard.h"
 #include "Platform/Linux/ConfigurationWatcher.h"
+#include "Platform/Linux/Diagnostics/Rendering/PaddingSmoke.h"
+#include "Platform/Linux/Diagnostics/Rendering/SkipInkSmoke.h"
 #include "Platform/Linux/FontRouting.h"
 #include "Platform/Linux/FontSizing.h"
 #include "Platform/Linux/FreeTypeRasterizer.h"
+#include "Platform/Linux/Input/LinkInteraction.h"
 #include "Platform/Linux/OmarchyAccent.h"
 #include "Platform/Linux/PTYWatch.h"
 #include "Platform/Linux/PaneViewport.h"
 #include "Platform/Linux/PangoRichText.h"
 #include "Platform/Linux/PointerLock.h"
+#include "Platform/Linux/Presentation/PaneGeometry.h"
+#include "Platform/Linux/Presentation/WindowAppearance.h"
 #include "Platform/Linux/Raster.h"
 #include "Platform/Linux/SharedFontResources.h"
 #include "Platform/Linux/Updater.h"
@@ -451,6 +456,8 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     std::optional<Ubiquitty::Rendering::RenderConfiguration> captureConfiguration;
     int captureCellWidth = 0;
     int captureCellHeight = 0;
+    Ubiquitty::FloatPoint captureRasterOrigin;
+    Ubiquitty::FloatSize captureRasterSize;
     int captureViewOffset = -1;
     Ubiquitty::Screen::HistoryFacts captureViewHistory;
     bool isCaptureViewOffsetHeld = false;
@@ -490,8 +497,7 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     Ubiquitty::Rendering::CursorPresentation cursorPresentation;
     double cursorPresentationBypassUntil = 0;
     std::uint32_t lastScrollIndicatorTick = 0;
-    Ubiquitty::Rendering::RemoteViewportPlacement presentation;
-    Ubiquitty::FloatSize presentationViewport;
+    Ubiquitty::Linux::Presentation::PaneGeometry presentation;
     // The layout belongs to the frame this pane presents, not the renderer's
     // last pane. Row vectors retain capacity and only shaped rows hold extents.
     std::vector<std::vector<Ubiquitty::Rendering::LetterExtent>> presentedLetters;
@@ -728,9 +734,7 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
     // ---- window + chrome ----
     GtkApplication* application = nullptr; // the bell notification is sent through it
     GtkWidget* window = nullptr;
-    GtkCssProvider* chromeProvider = nullptr;
-    GdkDisplay* chromeDisplay = nullptr;
-    std::string chromeScopeClass;
+    Ubiquitty::Linux::Presentation::WindowAppearance windowAppearance;
     std::optional<std::uint32_t> omarchyAccent;
     GtkWidget* paneContainer = nullptr; // holds the active tab's pane widget tree (one leaf, or GtkPaned)
     GtkWidget* tabStrip = nullptr;
@@ -820,8 +824,8 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
     int fontPixelSize = 16; // live FreeType pixel size (zoomed at runtime); seeded in setupFonts
     // The configured size in POINTS, which is what `[font] size` is written in
     // and what the double-valued field holds. Kept beside the integer above
-    // rather than replacing it, because the zoom steps and the reset are whole
-    // pixels and read that one; this is what the rasterizer is sized from.
+    // rather than replacing it, because the zoom steps name whole sizes;
+    // this is what the rasterizer is sized from.
     double fontSizePoints = 12.0;
     double fontDPI = 96.0; // logical dots per inch, independent of the backing scale
     int lineSpacingPixels = 0; // font.line_spacing in device px; seeded in setupFonts
@@ -836,7 +840,6 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
     // turns liga/clig/calt on by default for horizontal text, so this is not a
     // flag the shaper reads — it decides whether a suppression is REQUESTED.
     Ubiquitty::Linux::Ligatures ligatures = Ubiquitty::Linux::Ligatures::Enabled;
-    int defaultFontPixelSize = 16; // the resolved startup size, for zoom-reset
     std::string fontFamily; // resolved face family, kept so a zoom can re-emplace the rasterizer
     std::string fallbackFontName; // config [font] fallback; empty -> bundled Symbols Nerd Font
     std::string bundledFallbackPath; // bundled Symbols Nerd Font next to the binary; kept for zoom
@@ -851,6 +854,7 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
     // The pressed pointer button while one is held, for the 1002 drag-motion
     // facts; Other means none is down.
     Ubiquitty::Input::PointerButton heldPointerButton = Ubiquitty::Input::PointerButton::Other;
+    bool isLinkPressClaimed = false;
     Ubiquitty::MousePointerShape hoverCursorShape = Ubiquitty::MousePointerShape::Default;
     // Where the pointer last hovered with nothing reporting it, so a modifier
     // key, which moves no pointer, can re-ask what the hand shows there.
@@ -1781,6 +1785,28 @@ void clampActivePaneViewOffset(const Ubiquitty::Terminal* term)
 float logicalCellWidth() { return app().rasterContext.cellWidth() / static_cast<float>(app().scale); }
 float logicalCellHeight() { return app().rasterContext.cellHeight() / static_cast<float>(app().scale); }
 
+// The model publishes Core's edge-to-edge decision; presentation only converts
+// the configured point insets to the geometry's device-pixel unit.
+Ubiquitty::Rendering::EdgeInsets paneInsets(const LinuxPane& pane, float scale)
+{
+    if (pane.session && pane.session->readSnapshot().isEdgeToEdge)
+        return {};
+    const auto padding = loadPreferences().resolvedPadding();
+    return { static_cast<float>(padding.left) * scale, static_cast<float>(padding.right) * scale,
+        static_cast<float>(padding.top) * scale, static_cast<float>(padding.bottom) * scale };
+}
+
+Ubiquitty::Linux::Presentation::PaneGeometry paneGeometry(const LinuxPane& pane, Ubiquitty::GridSize grid,
+    Ubiquitty::Rendering::RemoteViewportRequest request = {})
+{
+    const Ubiquitty::FloatSize viewport {
+        static_cast<float>(pane.picture ? gtk_widget_get_width(pane.picture) * app().scale : 0),
+        static_cast<float>(pane.picture ? gtk_widget_get_height(pane.picture) * app().scale : 0),
+    };
+    return Ubiquitty::Linux::Presentation::PaneGeometry::resolve(viewport, paneInsets(pane, static_cast<float>(app().scale)),
+        { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) }, grid, request);
+}
+
 // Resolve the whole grid before publishing pixels. Font changes alter the
 // cell metrics without changing GTK's allocation, and the program must see
 // those two changes in one winsize rather than a pixel report for the old grid.
@@ -1788,9 +1814,10 @@ bool updatePaneGridFromAllocation(LinuxPane& pane)
 {
     if (!pane.picture)
         return false;
-    const Ubiquitty::GridSize grid = Ubiquitty::Rendering::gridFromViewport(
-        { static_cast<float>(gtk_widget_get_width(pane.picture)), static_cast<float>(gtk_widget_get_height(pane.picture)) },
-        {}, 0.0f, { logicalCellWidth(), logicalCellHeight() }, Ubiquitty::Rendering::GridFloor::None);
+    const Ubiquitty::GridSize grid = Ubiquitty::Linux::Presentation::PaneGeometry::gridForAllocation(
+        { static_cast<float>(gtk_widget_get_width(pane.picture) * app().scale), static_cast<float>(gtk_widget_get_height(pane.picture) * app().scale) },
+        paneInsets(pane, static_cast<float>(app().scale)),
+        { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) });
     if (grid.columns < 1 || grid.rows < 1 || (grid.columns == pane.columns && grid.rows == pane.rows))
         return false;
     pane.columns = grid.columns;
@@ -1806,15 +1833,15 @@ bool publishPanePixelGeometry(LinuxPane& pane)
     }
     const Ubiquitty::IntSize cell { app().rasterContext.cellWidth(), app().rasterContext.cellHeight() };
     const Ubiquitty::IntSize textArea { cell.width * pane.columns, cell.height * pane.rows };
-    Ubiquitty::IntSize drawable = textArea;
+    const auto unallocated = Ubiquitty::Rendering::viewportForGrid({ pane.columns, pane.rows },
+        { static_cast<float>(cell.width), static_cast<float>(cell.height) }, paneInsets(pane, static_cast<float>(app().scale)), 0);
+    Ubiquitty::IntSize drawable { static_cast<int>(std::ceil(unallocated.width)), static_cast<int>(std::ceil(unallocated.height)) };
     if (pane.picture) {
         const int width = gtk_widget_get_width(pane.picture);
         const int height = gtk_widget_get_height(pane.picture);
         if (width > 0 && height > 0) {
             drawable = { width * app().scale, height * app().scale };
         }
-        drawable.width += (gtk_widget_get_margin_start(pane.picture) + gtk_widget_get_margin_end(pane.picture)) * app().scale;
-        drawable.height += (gtk_widget_get_margin_top(pane.picture) + gtk_widget_get_margin_bottom(pane.picture)) * app().scale;
     }
     std::uint32_t epochBefore = 0;
     {
@@ -1978,7 +2005,7 @@ void publishPaneTypography(LinuxPane& pane)
 }
 
 bool capturePaneRichText(LinuxPane& pane, const Ubiquitty::Linux::CursorOverlay* cursor, int viewOffset,
-    Ubiquitty::FloatPoint origin = {})
+    Ubiquitty::FloatPoint origin = {}, Ubiquitty::FloatSize viewport = {})
 {
     Ubiquitty::Terminal* term = pane.session ? pane.session->terminal() : nullptr;
     if (!term)
@@ -1995,6 +2022,7 @@ bool capturePaneRichText(LinuxPane& pane, const Ubiquitty::Linux::CursorOverlay*
     Ubiquitty::Rendering::TerminalSnapshotOptions options;
     options.viewOffset = viewOffset;
     options.originInPixels = origin;
+    options.viewportSizeInPixels = viewport;
     options.drawCursor = presented.row >= 0;
     options.isFocused = presented.focused;
     options.cursorMixAlpha = presented.mixA;
@@ -2081,6 +2109,21 @@ std::string linuxSymbolFallbackName(const Ubiquitty::Rendering::RenderConfigurat
     return family == Ubiquitty::Rendering::Font::FontFallbackPolicy::defaultSymbolFallbackFamily ? std::string() : std::string(family);
 }
 
+/// Resolves a configured point size with the Linux launch override.
+///
+/// - Parameter configuration: The effective font configuration for the window.
+/// - Returns: The unrounded configured size, or the valid environment override.
+double configuredFontSizePoints(const Ubiquitty::Rendering::RenderConfiguration& configuration)
+{
+    double points = configuration.fontSizePoints >= 4.0 && configuration.fontSizePoints <= 256.0 ? configuration.fontSizePoints : 12.0;
+    if (const char* environment = std::getenv("UBIQUITTY_FONT_SIZE")) {
+        const double parsed = std::strtod(environment, nullptr);
+        if (parsed >= 4.0 && parsed <= 256.0)
+            points = parsed;
+    }
+    return points;
+}
+
 void setupFonts()
 {
     if (app().areFontsSetUp)
@@ -2111,25 +2154,12 @@ void setupFonts()
     // Held as points, not rounded here: the rounding belongs where the scale is
     // applied (`deviceFontPixelSize`), and doing it now would spend the
     // fraction before the display could express it.
-    double fontSizePoints = 12.0;
-    if (config.fontSize.has_value()) {
-        const double parsed = configuration.fontSizePoints;
-        if (parsed >= 4.0 && parsed <= 256.0)
-            fontSizePoints = parsed;
-    }
-    if (const char* sizeEnv = std::getenv("UBIQUITTY_FONT_SIZE")) {
-        // An override a person types on a command line, so it takes the same
-        // fractional spelling the config key does.
-        const double parsed = std::strtod(sizeEnv, nullptr);
-        if (parsed >= 4.0 && parsed <= 256.0)
-            fontSizePoints = parsed;
-    }
+    const double fontSizePoints = configuredFontSizePoints(configuration);
     app().fontSizePoints = fontSizePoints;
-    // The integer twin, for the zoom steps and the reset, which are whole
-    // pixels. A fractional configured size resets to its nearest whole one.
+    // Whole-size zoom steps use the integer twin; reset retains the configured
+    // point size and reaches the rasterizer without that rounding.
     const int fontPixelSize = static_cast<int>(std::lround(fontSizePoints));
     app().fontPixelSize = fontPixelSize;
-    app().defaultFontPixelSize = fontPixelSize;
     app().fontFamily = fontFamily;
     app().fallbackFontName = fallbackFontName;
     app().bundledFallbackPath = bundledFallbackPath;
@@ -2211,23 +2241,31 @@ void applyFontMode()
 // re-derives each pane's grid from the new cell metrics. No-op in Unifont mode (a
 // fixed bitmap) or when the size is unchanged. The clamp is single-sourced with
 // macOS via Zoom::clampFontZoom (the shared font.size range).
-void applyFontZoom(int newPixelSize)
+void applyFontSizePoints(double points)
 {
     if (app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::EmbeddedBitmap)
         return;
-    newPixelSize = Ubiquitty::Preferences::Zoom::clampFontZoom(newPixelSize);
-    if (newPixelSize == app().fontPixelSize)
+    points = Ubiquitty::Preferences::Zoom::clampFontZoom(points);
+    if (points == app().fontSizePoints)
         return;
-    app().fontPixelSize = newPixelSize;
-    // A zoom step names a whole size, so it replaces the configured fraction
-    // rather than riding on top of it — otherwise the first step from 15.5
-    // would land on 15.5 again and read as a zoom that did nothing.
-    app().fontSizePoints = newPixelSize;
+    app().fontPixelSize = static_cast<int>(std::lround(points));
+    app().fontSizePoints = points;
     // Release every borrowed-face cache before replacing its owner.
     app().rasterContext.resetSoftwareRenderer();
     app().vulkan.rebuildAtlas();
     acquireSharedFonts();
     applyFontMode();
+}
+
+void applyFontZoom(int newPixelSize)
+{
+    applyFontSizePoints(newPixelSize);
+}
+
+void resetFontZoom()
+{
+    const auto configuration = Ubiquitty::Preferences::Effective::renderConfiguration(loadPreferences());
+    applyFontSizePoints(configuredFontSizePoints(configuration));
 }
 
 // HiDPI: the window moved to a monitor with a different scale (initial map on a
@@ -2592,14 +2630,6 @@ void endPaneIngest(LinuxPane& pane)
     pane.session->setDrainSignal(nullptr, nullptr);
 }
 
-void releaseChromeTheme(App& owner)
-{
-    if (owner.chromeProvider && owner.chromeDisplay)
-        gtk_style_context_remove_provider_for_display(owner.chromeDisplay, GTK_STYLE_PROVIDER(owner.chromeProvider));
-    g_clear_object(&owner.chromeProvider);
-    g_clear_object(&owner.chromeDisplay);
-}
-
 void closeWindowApp(App& owner)
 {
     AppScope scope(owner);
@@ -2651,7 +2681,7 @@ void closeWindowApp(App& owner)
         gtk_window_destroy(GTK_WINDOW(owner.inspectorWindow));
     owner.inspectorWindow = nullptr;
     owner.focusedPicture = nullptr;
-    releaseChromeTheme(owner);
+    owner.windowAppearance.reset();
     if (owner.imContext) {
         gtk_im_context_set_client_widget(owner.imContext, nullptr);
         g_clear_object(&owner.imContext);
@@ -2842,19 +2872,6 @@ std::vector<Ubiquitty::CommandPalette::PaletteOption> themeOptionLabels()
     return options;
 }
 
-// Paint the window chrome — the background behind the grid's padding and the
-// GtkHeaderBar that replaces the system title bar — in a theme's colours.
-//
-// Called for every theme the window takes, not only the one it launched on. The
-// chrome carries theme colours as much as the grid does, so a change that
-// repaints the panes and not this leaves a title bar and a padding border in the
-// colours of a theme that is no longer anywhere else on screen, and nothing
-// downstream re-derives them.
-//
-// A translucent window has no themed chrome to paint: its widgets are
-// transparent so the compositor shows the desktop through, and an opaque
-// background installed here would fill in exactly what that asks to see through.
-
 void refreshOmarchyAccent(int index)
 {
     const auto read = [index]() -> std::optional<std::uint32_t> {
@@ -2882,13 +2899,7 @@ void refreshOmarchyAccent(int index)
 
 void refreshNativeLinkAccentColor()
 {
-    // Ask the toolkit's native link widget, so hovered links follow GTK's
-    // accent even when the terminal palette and desktop theme differ.
-    GtkWidget* probe = gtk_link_button_new("https://example.invalid");
-    g_object_ref_sink(probe);
-    GdkRGBA nativeColor {};
-    gtk_widget_get_color(probe, &nativeColor);
-    g_object_unref(probe);
+    const GdkRGBA nativeColor = Ubiquitty::Linux::Presentation::WindowAppearance::nativeLinkColor();
     const Ubiquitty::Rendering::Vec4 color { nativeColor.red, nativeColor.green, nativeColor.blue, nativeColor.alpha };
     const auto& previous = app().rasterContext.frameLinkAccentColor();
     if (previous.x == color.x && previous.y == color.y && previous.z == color.z && previous.w == color.w)
@@ -2912,46 +2923,7 @@ void applyChromeTheme(int index)
     if (!theme || !app().window)
         return;
     refreshNativeLinkAccentColor();
-    const bool isTranslucent = app().rasterContext.backgroundOpacity() < 1.0f;
-    gtk_widget_add_css_class(app().window, "ubiquitty-themed-bg");
-    if (app().paneContainer)
-        gtk_widget_add_css_class(app().paneContainer, "ubiquitty-themed-bg");
-    if (isTranslucent)
-        gtk_widget_add_css_class(app().window, "ubiquitty-translucent");
-    else
-        gtk_widget_remove_css_class(app().window, "ubiquitty-translucent");
-    // Display providers see every window. Scope each rule to this window and
-    // keep its colors local, so choosing a theme cannot retint another window.
-    if (app().chromeScopeClass.empty())
-        app().chromeScopeClass = "ubiquitty-window-" + std::to_string(reinterpret_cast<std::uintptr_t>(&app()));
-    gtk_widget_add_css_class(app().window, app().chromeScopeClass.c_str());
-    if (!app().chromeProvider) {
-        app().chromeProvider = gtk_css_provider_new();
-        app().chromeDisplay = GDK_DISPLAY(g_object_ref(gtk_widget_get_display(app().window)));
-        gtk_style_context_add_provider_for_display(app().chromeDisplay, GTK_STYLE_PROVIDER(app().chromeProvider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    }
-    const Ubiquitty::ColorRGBA bg = theme->defaultBackground;
-    const Ubiquitty::ColorRGBA fg = theme->defaultForeground;
-    std::array<char, 8> background {};
-    std::array<char, 8> foreground {};
-    g_snprintf(background.data(), background.size(), "#%02x%02x%02x", bg.red, bg.green, bg.blue);
-    g_snprintf(foreground.data(), foreground.size(), "#%02x%02x%02x", fg.red, fg.green, fg.blue);
-    const std::string backdrop = isTranslucent ? "transparent" : background.data();
-    const std::string ink = foreground.data();
-    const std::string scope = "." + app().chromeScopeClass;
-    const std::string tabs = scope + " .ubiquitty-tabs";
-    const std::string header = scope + " headerbar.ubiquitty-titlebar";
-    const std::string css = (isTranslucent ? scope + ", " + scope + " * { background-color: transparent; }" : std::string {})
-        + scope + ".ubiquitty-themed-bg, " + scope + " .ubiquitty-themed-bg { background-color: " + backdrop + "; }"
-        + header + " { background: " + backdrop + "; color: " + ink + "; box-shadow: none; border: none; }"
-        + header + " button { color: " + ink + "; }"
-        + tabs + " { background: " + backdrop + "; color: " + ink + "; padding: 4px 8px; border-bottom: 1px solid alpha(" + ink + ", 0.12); }"
-        + tabs + " button { background: transparent; color: inherit; box-shadow: none; border: 1px solid transparent; border-radius: 6px; padding: 4px 10px; min-height: 26px; }"
-        + tabs + " button:hover { background: alpha(" + ink + ", 0.08); }"
-        + tabs + " button:checked { background: alpha(" + ink + ", 0.12); border-bottom-color: " + ink + "; }"
-        + tabs + " button:focus-visible { outline: 2px solid " + ink + "; outline-offset: -2px; }"
-        + tabs + " popover contents { background: " + backdrop + "; color: " + ink + "; }";
-    gtk_css_provider_load_from_string(app().chromeProvider, css.c_str());
+    app().windowAppearance.apply(app().window, app().paneContainer, *theme, app().rasterContext.backgroundOpacity());
 }
 
 // Apply a theme to every pane, not just the focused one. Each pane owns its own
@@ -3448,6 +3420,8 @@ struct UbiquittyFramePaintable {
     GObject parent;
     GdkTexture* texture;
     graphene_rect_t bounds; // device pixels
+    graphene_rect_t contentClip; // device pixels
+    bool hasContentClip;
     int intrinsicWidth;
     int intrinsicHeight;
     float deviceScale; // device pixels per logical pixel
@@ -3480,12 +3454,20 @@ void snapshotFramePaintable(GdkPaintable* paintable, GdkSnapshot* snapshot, doub
     const auto* frame = static_cast<const UbiquittyFramePaintable*>(static_cast<const void*>(paintable));
     const graphene_rect_t clip = GRAPHENE_RECT_INIT(0, 0, static_cast<float>(width), static_cast<float>(height));
     gtk_snapshot_push_clip(GTK_SNAPSHOT(snapshot), &clip);
+    if (frame->hasContentClip) {
+        const graphene_rect_t content = GRAPHENE_RECT_INIT(frame->contentClip.origin.x / frame->deviceScale,
+            frame->contentClip.origin.y / frame->deviceScale, frame->contentClip.size.width / frame->deviceScale,
+            frame->contentClip.size.height / frame->deviceScale);
+        gtk_snapshot_push_clip(GTK_SNAPSHOT(snapshot), &content);
+    }
     // The frame is laid out in device pixels, the allocation is in logical
     // ones: converting by the display scale is the only scaling applied.
     gtk_snapshot_save(GTK_SNAPSHOT(snapshot));
     gtk_snapshot_scale(GTK_SNAPSHOT(snapshot), 1.0f / frame->deviceScale, 1.0f / frame->deviceScale);
     gtk_snapshot_append_texture(GTK_SNAPSHOT(snapshot), frame->texture, &frame->bounds);
     gtk_snapshot_restore(GTK_SNAPSHOT(snapshot));
+    if (frame->hasContentClip)
+        gtk_snapshot_pop(GTK_SNAPSHOT(snapshot));
     gtk_snapshot_pop(GTK_SNAPSHOT(snapshot));
 }
 
@@ -3514,7 +3496,8 @@ void initializeFramePaintableInterface(GdkPaintableInterface* paintableInterface
 
 // The frame as a paintable that owns a reference to its texture. Intrinsic
 // dimensions are logical pixels; the texture's bounds are device pixels.
-GdkPaintable* makeFramePaintable(GdkTexture* texture, const graphene_rect_t& bounds, int intrinsicWidth, int intrinsicHeight, float deviceScale)
+GdkPaintable* makeFramePaintable(GdkTexture* texture, const graphene_rect_t& bounds, int intrinsicWidth, int intrinsicHeight, float deviceScale,
+    std::optional<Ubiquitty::FloatRect> contentClip = std::nullopt)
 {
     auto* frame = static_cast<UbiquittyFramePaintable*>(g_object_new(ubiquitty_frame_paintable_get_type(), nullptr));
     frame->texture = GDK_TEXTURE(g_object_ref(texture));
@@ -3522,6 +3505,9 @@ GdkPaintable* makeFramePaintable(GdkTexture* texture, const graphene_rect_t& bou
     frame->intrinsicWidth = intrinsicWidth;
     frame->intrinsicHeight = intrinsicHeight;
     frame->deviceScale = deviceScale;
+    frame->hasContentClip = contentClip.has_value();
+    if (contentClip)
+        frame->contentClip = GRAPHENE_RECT_INIT(contentClip->origin.x, contentClip->origin.y, contentClip->size.width, contentClip->size.height);
     return GDK_PAINTABLE(frame);
 }
 
@@ -3745,10 +3731,28 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
         chrome = layoutBeamForFrame(*term);
         hint = layoutHintForFrame(*pane.session, *term);
     }
+    const Ubiquitty::GridSize gridSize = pane.pendingCapture
+        ? Ubiquitty::GridSize { pane.pendingCapture->columns(), pane.pendingCapture->rows() }
+        : Ubiquitty::GridSize { term->columns, term->rows };
+    const Ubiquitty::CellPosition cursorPosition = pane.pendingCapture
+        ? Ubiquitty::CellPosition { pane.pendingCapture->cursorRow(), pane.pendingCapture->cursorColumn() }
+        : Ubiquitty::CellPosition { term->screens.active->cursorY, term->screens.active->cursorX };
+    const bool isProgramViewport = term->isTekModeActive || term->modes.fullscreenContent;
+    const bool shouldFollowCursor = frameViewOffset == 0 && term->modes.isCursorVisible != 0;
+    const auto framePresentation = paneGeometry(pane, gridSize, {
+                                                                    .policy = app().rasterContext.renderConfiguration().nonOwnerPresentation,
+                                                                    .cursor = cursorPosition,
+                                                                    .previousPanOffset = pane.presentation.placement.panOffset,
+                                                                    .minimumScale = static_cast<float>(std::min(1.0, Ubiquitty::Preferences::Zoom::clampFontZoom(0.0) / app().fontSizePoints)),
+                                                                    .isGeometryOwnedElsewhere = pane.session->isRemoteGeometryOwnedElsewhere(),
+                                                                    .isProgramViewport = isProgramViewport,
+                                                                    .shouldFollowCursor = shouldFollowCursor,
+                                                                });
+    const auto frameGeometry = app().rasterContext.frameCaptureGeometry(framePresentation.rasterOrigin, framePresentation.rasterSize);
     app().rasterContext.setFrameHoverLink(pane.hoveredLink);
     app().rasterContext.setBeamChrome(&chrome);
     app().rasterContext.setHintChrome(&hint);
-    const bool hasRichFrame = capturePaneRichText(pane, &cursor, frameViewOffset);
+    const bool hasRichFrame = capturePaneRichText(pane, &cursor, frameViewOffset, framePresentation.rasterOrigin, framePresentation.rasterSize);
     // A caret inside a block is the block's: Pango owns its insertion offset.
     const bool drawsRichCaret = hasRichFrame && pane.richTextFrame.hasRichTextCaret();
     if (drawsRichCaret) {
@@ -3759,14 +3763,6 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     // Both consume the same scrollback viewport offset + cursor (the CPU<->GPU oracle).
     // The placement's facts about the frame being drawn, read while the hold
     // stands so they describe this frame and not a later pass's.
-    const Ubiquitty::GridSize gridSize = pane.pendingCapture
-        ? Ubiquitty::GridSize { pane.pendingCapture->columns(), pane.pendingCapture->rows() }
-        : Ubiquitty::GridSize { term->columns, term->rows };
-    const Ubiquitty::CellPosition cursorPosition = pane.pendingCapture
-        ? Ubiquitty::CellPosition { pane.pendingCapture->cursorRow(), pane.pendingCapture->cursorColumn() }
-        : Ubiquitty::CellPosition { term->screens.active->cursorY, term->screens.active->cursorX };
-    const bool isProgramViewport = term->isTekModeActive || term->modes.fullscreenContent;
-    const bool shouldFollowCursor = frameViewOffset == 0 && term->modes.isCursorVisible != 0;
     const Ubiquitty::Linux::ModelCaptureHandoff handoff {
         .onCaptured = [](void* context) {
             auto* capturedHold = static_cast<std::optional<Ubiquitty::Runtime::TerminalSession::ModelReadScope>*>(context);
@@ -3798,7 +3794,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     // Their CPU instance build must not block the next parser pass.
     if (shouldRenderOnGPU && pane.pendingCapture && *hold)
         (*hold)->release();
-    bool ok = shouldRenderOnGPU ? app().vulkan.renderGrid(app().rasterContext, term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks, handoff, pane.pendingCapture.get(), &capturedView) : app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks);
+    bool ok = shouldRenderOnGPU ? app().vulkan.renderGrid(app().rasterContext, term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks, handoff, pane.pendingCapture.get(), &capturedView, &frameGeometry) : app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks, nullptr, &frameGeometry);
     const bool didDrawOnGPU = ok && shouldRenderOnGPU;
     const std::optional<Ubiquitty::Linux::VulkanRenderer::ExportedFrame> exportedFrame = didDrawOnGPU ? app().vulkan.takeExportedFrame() : std::nullopt;
     if (exportedFrame)
@@ -3820,7 +3816,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
         // The GPU may have handed the model back before failing. The CPU
         // fallback reads the current model throughout its raster pass.
         hold->emplace(*pane.session);
-        ok = app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks);
+        ok = app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks, nullptr, &frameGeometry);
     }
     if (!ok)
         return true;
@@ -3835,25 +3831,9 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     if (hasRichFrame) {
         const auto overlayHold = holdPaneModel(pane);
         pane.richText.composite(pane.richTextFrame, rgba, width, height,
-            app().rasterContext.snapshotOverlayRegions(*term, frameViewOffset), drawsRichCaret);
+            app().rasterContext.snapshotOverlayRegions(*term, frameViewOffset, framePresentation.rasterOrigin), drawsRichCaret);
     }
-    const Ubiquitty::FloatSize viewport {
-        static_cast<float>(std::max(gtk_widget_get_width(picture) * app().scale, 1)),
-        static_cast<float>(std::max(gtk_widget_get_height(picture) * app().scale, 1))
-    };
-    pane.presentation = Ubiquitty::Rendering::remoteViewportPlacement({
-        .policy = app().rasterContext.renderConfiguration().nonOwnerPresentation,
-        .viewport = viewport,
-        .cell = { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) },
-        .grid = gridSize,
-        .cursor = cursorPosition,
-        .previousPanOffset = pane.presentation.panOffset,
-        .minimumScale = static_cast<float>(std::min(1.0, Ubiquitty::Preferences::Zoom::clampFontZoom(0.0) / app().fontSizePoints)),
-        .isGeometryOwnedElsewhere = pane.session->isRemoteGeometryOwnedElsewhere(),
-        .isProgramViewport = isProgramViewport,
-        .shouldFollowCursor = shouldFollowCursor,
-    });
-    pane.presentationViewport = viewport;
+    pane.presentation = framePresentation;
     if (&pane == activePane())
         updateIMCursorLocation(cursorPosition);
     // The focused pill's bounce is a smooth animation while it runs: another
@@ -3938,9 +3918,9 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     // allocation, so a resize that has not yet produced its next frame shows the
     // old one unscaled instead of stretched to a different owner's grid. No
     // resampling/readback pass is added to either renderer.
-    const graphene_rect_t bounds = GRAPHENE_RECT_INIT(pane.presentation.origin.x, pane.presentation.origin.y,
-        width * pane.presentation.scale, height * pane.presentation.scale);
-    GdkPaintable* paintable = makeFramePaintable(texture, bounds, gtk_widget_get_width(picture), gtk_widget_get_height(picture), static_cast<float>(app().scale));
+    const graphene_rect_t bounds = GRAPHENE_RECT_INIT(pane.presentation.textureOrigin.x, pane.presentation.textureOrigin.y,
+        width * pane.presentation.placement.scale, height * pane.presentation.placement.scale);
+    GdkPaintable* paintable = makeFramePaintable(texture, bounds, gtk_widget_get_width(picture), gtk_widget_get_height(picture), static_cast<float>(app().scale), pane.presentation.contentClip);
     gtk_picture_set_paintable(GTK_PICTURE(picture), paintable);
     g_object_unref(paintable);
     g_object_unref(texture);
@@ -5681,7 +5661,7 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
         applyFontZoom(app().fontPixelSize - 1);
         break;
     case ActionKind::ResetFontSize:
-        applyFontZoom(app().defaultFontPixelSize);
+        resetFontZoom();
         break;
     case ActionKind::IncreaseLineSpacing:
     case ActionKind::DecreaseLineSpacing: {
@@ -5841,19 +5821,9 @@ void rebuildFontsFromPreferences()
     // another setting keeps a zoom, while an actual size edit updates both the
     // live size and the reset target. An environment override wins on either
     // side of the comparison just as it does at startup.
-    const auto configuredSize = [](const Ubiquitty::Rendering::RenderConfiguration& settings) {
-        double points = settings.fontSizePoints >= 4.0 && settings.fontSizePoints <= 256.0 ? settings.fontSizePoints : 12.0;
-        if (const char* environment = std::getenv("UBIQUITTY_FONT_SIZE")) {
-            const double parsed = std::strtod(environment, nullptr);
-            if (parsed >= 4.0 && parsed <= 256.0)
-                points = parsed;
-        }
-        return points;
-    };
-    if (configuredSize(configuration) != configuredSize(app().appliedRenderConfiguration)) {
-        app().fontSizePoints = configuredSize(configuration);
+    if (configuredFontSizePoints(configuration) != configuredFontSizePoints(app().appliedRenderConfiguration)) {
+        app().fontSizePoints = configuredFontSizePoints(configuration);
         app().fontPixelSize = static_cast<int>(std::lround(app().fontSizePoints));
-        app().defaultFontPixelSize = app().fontPixelSize;
     }
     // Spacing is configured in points and reaches both faces in device pixels,
     // so it scales with the display exactly as it does at startup. The bitmap
@@ -6300,7 +6270,7 @@ gboolean onKeyPressed(GtkEventControllerKey* controller, guint keyval, guint key
         return GDK_EVENT_STOP;
     }
     if ((state & GDK_CONTROL_MASK) && (keyval == GDK_KEY_0 || keyval == GDK_KEY_KP_0)) {
-        applyFontZoom(app().defaultFontPixelSize);
+        resetFontZoom();
         return GDK_EVENT_STOP;
     }
 
@@ -6770,7 +6740,7 @@ void onIMPreeditEnd(GtkIMContext*, gpointer)
 // tracks it instead of pinning to the window origin.
 void updateIMCursorLocation(Ubiquitty::CellPosition cursor)
 {
-    if (!app().imContext)
+    if (!app().imContext || !app().window || !activePane()->picture)
         return;
     const int cw = app().rasterContext.cellWidth();
     const int ch = app().rasterContext.cellHeight();
@@ -6778,10 +6748,16 @@ void updateIMCursorLocation(Ubiquitty::CellPosition cursor)
     const Ubiquitty::FloatRect cell = Ubiquitty::Rendering::cellRect(cursor, { static_cast<float>(cw), static_cast<float>(ch) }, Ubiquitty::Rendering::EdgeInsets {}, /*extraTop*/ 0.0f);
     GdkRectangle rect;
     const auto origin = activePane()->presentation.viewportPoint(cell.origin);
-    rect.x = static_cast<int>(origin.x / app().scale);
-    rect.y = static_cast<int>(origin.y / app().scale);
-    rect.width = std::max(1, static_cast<int>(cw * activePane()->presentation.scale / app().scale));
-    rect.height = std::max(1, static_cast<int>(ch * activePane()->presentation.scale / app().scale));
+    // GTK's client widget is the toplevel window. The picture can be below
+    // chrome or inside a split, so its local anchor must cross that boundary.
+    const graphene_point_t picturePoint { origin.x / app().scale, origin.y / app().scale };
+    graphene_point_t clientPoint;
+    if (!gtk_widget_compute_point(activePane()->picture, app().window, &picturePoint, &clientPoint))
+        return;
+    rect.x = static_cast<int>(clientPoint.x);
+    rect.y = static_cast<int>(clientPoint.y);
+    rect.width = std::max(1, static_cast<int>(cw * activePane()->presentation.placement.scale / app().scale));
+    rect.height = std::max(1, static_cast<int>(ch * activePane()->presentation.placement.scale / app().scale));
     gtk_im_context_set_cursor_location(app().imContext, &rect);
 }
 
@@ -6822,6 +6798,28 @@ void cellAtPanePoint(const LinuxPane& pane, double x, double y, int& row, int& c
         row = std::clamp(row, 0, std::max(terminal->rows - 1, 0));
         column = std::clamp(column, 0, std::max(terminal->columns - 1, 0));
     }
+}
+
+// A link hit addresses actual displayed content, unlike a report or a drag
+// whose coordinates clamp to an existing cell.
+std::optional<Ubiquitty::CellPosition> strictCellAtPanePoint(const LinuxPane& pane, double x, double y)
+{
+    const auto hold = holdPaneModel(pane);
+    const auto* terminal = pane.session->terminal();
+    const auto cell = pane.presentedCellPixels.width > 0 ? pane.presentedCellPixels
+                                                         : Ubiquitty::FloatSize { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) };
+    const auto grid = pane.presentedGridSize.columns > 0 ? pane.presentedGridSize
+        : terminal                                       ? Ubiquitty::GridSize { terminal->columns, terminal->rows }
+                                                         : Ubiquitty::GridSize {};
+    auto position = pane.presentation.cellAtPointIfInside({ x * app().scale, y * app().scale }, cell, grid);
+    if (!position)
+        return std::nullopt;
+    const auto letters = pane.presentedRowLetters(position->row);
+    if (!letters.empty()) {
+        const auto point = pane.presentation.picturePoint({ static_cast<float>(x * app().scale), static_cast<float>(y * app().scale) });
+        position->column = Ubiquitty::Rendering::letterColumnAt(letters, point.x);
+    }
+    return position;
 }
 
 void cellAtPoint(double x, double y, int& row, int& column)
@@ -6877,22 +6875,18 @@ LinkSource linkURIAtCell(int row, int column, char* outputBuffer, int outputCapa
     return activePane()->session->resolvedLinkIsHyperlink() ? LinkSource::Declared : LinkSource::Guessed;
 }
 
-// Whether a primary click with these modifiers opens a link from this source.
-// Ctrl or Super opens any link, as Command does on macOS. A plain click opens only what
-// the program declared, and only while [selection] osc8_click_opens is on: a
-// guess is the terminal's reading of the text, and a plain click is how a
-// reader focuses and selects, so acting on a guess there launches something
-// nobody asked for. A connection to a host the program named (ssh, sftp, ftp,
-// ftps) needs Ctrl even when declared (LinkRun::requiresLinkModifier).
+// The same native policy serves clicking and hovering, including a TUI that
+// enabled mouse reporting. Control reaches links; Super belongs to the WM.
 bool linkClickOpens(LinkSource source, std::string_view uri, GdkModifierType state)
 {
     if (source == LinkSource::None)
         return false;
-    if ((state & (GDK_CONTROL_MASK | GDK_SUPER_MASK)) != 0)
-        return true;
-    if (Ubiquitty::Attributes::LinkRun::requiresLinkModifier(uri))
-        return false;
-    return source == LinkSource::Declared && Ubiquitty::Preferences::Effective::osc8ClickOpens(Ubiquitty::Preferences::values());
+    const Ubiquitty::Input::PointerMoment moment {
+        .held = heldModifiers(state),
+        .isMouseReporting = activePane()->session->readSnapshot().mouseReportsActive,
+    };
+    const Ubiquitty::Linux::LinkInteraction interaction(moment, Ubiquitty::Preferences::values());
+    return interaction.canOpen({ source == LinkSource::Declared, activePane()->session->resolvedLinkIsFilePath(), uri });
 }
 
 // The URL-or-path token span covering (row, column), for smart double-click: tries a
@@ -7031,9 +7025,17 @@ void onMousePressed(GtkGestureClick* gesture, gint nPress, gdouble x, gdouble y,
         app().heldPointerButton = button;
     const GdkModifierType state = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
 
-    // The native fallbacks run before the ladder, and only while the
-    // application has not grabbed the mouse — reporting hands the pointer to
-    // the TUI, and the ladder below owns that ranking.
+    if (gdkButton == GDK_BUTTON_PRIMARY) {
+        app().isLinkPressClaimed = false;
+        const auto cell = strictCellAtPanePoint(*activePane(), x, y);
+        if (cell && openLinkAtCell(cell->row, cell->column, state, nPress)) {
+            app().isLinkPressClaimed = true;
+            gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+            return;
+        }
+    }
+    // PRIMARY paste remains the terminal's fallback only when the application
+    // has not claimed mouse reporting. Link ownership above uses Core's policy.
     if (!activePane()->mouseModes.mouseReportsActive) {
         // Middle-click pastes the PRIMARY selection (the X11 convention). The
         // read is async; onClipboardPasted feeds it (bracketed per the live mode).
@@ -7047,18 +7049,6 @@ void onMousePressed(GtkGestureClick* gesture, gint nPress, gdouble x, gdouble y,
             gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
             return;
         }
-        // Ctrl+click opens the link under the pointer (macOS's Cmd-click);
-        // [selection] osc8_click_opens (default on, the same setting macOS
-        // reads) lets a plain click open an OSC 8 link too (linkClickOpens).
-        // A launched link claims the press so no selection begins.
-        if (gdkButton == GDK_BUTTON_PRIMARY) {
-            int row = 0, column = 0;
-            cellAtPoint(x, y, row, column);
-            if (openLinkAtCell(row, column, state, nPress)) {
-                gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
-                return;
-            }
-        }
     }
 
     if (button == Ubiquitty::Input::PointerButton::Other)
@@ -7067,11 +7057,24 @@ void onMousePressed(GtkGestureClick* gesture, gint nPress, gdouble x, gdouble y,
         gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
 }
 
+void onMouseGestureCancelled(GtkGesture*, GdkEventSequence*, gpointer)
+{
+    // A cancelled sequence has no release to route. GtkGestureClick::stopped
+    // can also fire during a drag, which must retain its claimed release.
+    app().isLinkPressClaimed = false;
+    app().heldPointerButton = Ubiquitty::Input::PointerButton::Other;
+}
+
 void onMouseReleased(GtkGestureClick* gesture, gint, gdouble x, gdouble y, gpointer)
 {
     const guint gdkButton = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
     const Ubiquitty::Input::PointerButton button = pointerButtonForGdk(gdkButton);
     app().heldPointerButton = Ubiquitty::Input::PointerButton::Other;
+    if (button == Ubiquitty::Input::PointerButton::Left && app().isLinkPressClaimed) {
+        app().isLinkPressClaimed = false;
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+        return;
+    }
     if (button == Ubiquitty::Input::PointerButton::Other)
         return;
     const GdkModifierType state = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
@@ -7121,16 +7124,22 @@ void updatePaneHoverCursor(LinuxPane& pane, double x, double y, GdkModifierType 
         app().hoverModifiers = state;
     pane.hoverModelGeneration = pane.session->readSnapshot().modelGeneration;
     pane.hoverViewOffset = pane.viewOffset;
-    int row = 0, column = 0;
-    cellAtPanePoint(pane, x, y, row, column);
-    const bool hasModifier = (state & (GDK_CONTROL_MASK | GDK_SUPER_MASK)) != 0;
-    const bool found = pane.session->resolveLinkAtVisibleCell(pane.viewOffset, row, column,
-        hasModifier ? Ubiquitty::Screen::LinkScanScope::Any : Ubiquitty::Screen::LinkScanScope::Declared);
+    const auto cell = strictCellAtPanePoint(pane, x, y);
+    const Ubiquitty::Input::PointerMoment moment {
+        .held = heldModifiers(state),
+        .isMouseReporting = pane.session->readSnapshot().mouseReportsActive,
+    };
+    const Ubiquitty::Linux::LinkInteraction interaction(moment, Ubiquitty::Preferences::values());
+    const auto probe = interaction.probe();
+    const bool found = cell && probe != Ubiquitty::Input::LinkProbe::None
+        && pane.session->resolveLinkAtVisibleCell(pane.viewOffset, cell->row, cell->column,
+            probe == Ubiquitty::Input::LinkProbe::Any ? Ubiquitty::Screen::LinkScanScope::Any : Ubiquitty::Screen::LinkScanScope::Declared);
     Ubiquitty::Input::PointerContext context;
+    context.isOverTextVoid = !cell;
     const LinkSource source = !found              ? LinkSource::None
         : pane.session->resolvedLinkIsHyperlink() ? LinkSource::Declared
                                                   : LinkSource::Guessed;
-    context.isOverLink = linkClickOpens(source, pane.session->resolvedLinkURI(), state);
+    context.isOverLink = found && interaction.canOpen({ source == LinkSource::Declared, pane.session->resolvedLinkIsFilePath(), pane.session->resolvedLinkURI() });
     Ubiquitty::Rendering::FrameHoverLink hover;
     if (context.isOverLink) {
         hover.isActive = true;
@@ -7145,21 +7154,13 @@ void updatePaneHoverCursor(LinuxPane& pane, double x, double y, GdkModifierType 
     }
     publishHoveredLink(pane, hover);
     const auto hold = holdPaneModel(pane);
-    // Which chord makes a drag rectangular is the reader's ([selection]
-    // block_select_modifier) and Core matches it, so this arm reports what is
-    // held and hard-codes no modifier. The same state answers whether such a
-    // drag would reach through an application that is tracking the pointer,
-    // which is why both come from one call.
-    const Ubiquitty::Input::PointerMoment moment {
-        .held = heldModifiers(state),
-        .isMouseReporting = Ubiquitty::Mouse::tracksPointer(term),
-    };
-    const Ubiquitty::Input::PointerReportingState reporting = Ubiquitty::Input::pointerReportingState(
-        moment, Ubiquitty::Input::pointerPolicyFromPreferences(Ubiquitty::Preferences::values()));
+    const auto& reporting = interaction.reportingState();
     context.isRectangularSelectArmed = Ubiquitty::Input::localDragIsRectangular(reporting);
     context.selectionBypassesMouseReporting = Ubiquitty::Input::allowsLocalDragSelect(reporting);
-    if (context.isRectangularSelectArmed || (moment.isMouseReporting && !context.selectionBypassesMouseReporting))
+    if (context.isRectangularSelectArmed) {
+        context.isOverLink = false;
         publishHoveredLink(pane, {});
+    }
     // Read for completeness -- onMouseMotion already routes every X11-backend
     // locked event through reportPointerLockX11Motion and returns before this
     // runs, so this only matters if that ranking ever changes.
@@ -7197,20 +7198,20 @@ void onMouseMotion(GtkEventControllerMotion* motion, gdouble x, gdouble y, gpoin
         reportPointerLockX11Motion(x, y, state);
         return;
     }
+    if (app().isLinkPressClaimed)
+        return;
     const bool isButtonDown = app().heldPointerButton != Ubiquitty::Input::PointerButton::Other;
     if (!isButtonDown) {
-        // A button-less move: any-event tracking (1003) reports it, the
-        // locator watches it, and a move nothing took is the hover
-        // affordance's -- the hand cursor over a link. Under reporting the
-        // application owns the pointer, so the cursor is left alone.
-        const bool isReported = forwardPointerFact(*pane, Ubiquitty::Runtime::TerminalSession::PointerFact::Kind::Motion,
-            Ubiquitty::Input::PointerButton::None, x, y, state, 1);
+        updatePaneHoverCursor(*pane, x, y, state);
+        // A locally activatable link keeps its hover even under any-event
+        // reporting. Away from a link the application's motion path is intact.
+        const bool isReported = !pane->hoveredLink.isActive
+            && forwardPointerFact(*pane, Ubiquitty::Runtime::TerminalSession::PointerFact::Kind::Motion,
+                Ubiquitty::Input::PointerButton::None, x, y, state, 1);
         app().isHoverPointKnown = !isReported;
         app().hoverX = x;
         app().hoverY = y;
-        if (!isReported)
-            updatePaneHoverCursor(*pane, x, y, state);
-        else
+        if (isReported)
             publishHoveredLink(*pane, {});
         return;
     }
@@ -7249,20 +7250,22 @@ void onMouseLeave(GtkEventControllerMotion*, gpointer userData)
 // key's edge is applied here rather than read from the event.
 GdkModifierType modifiersAfterKey(guint keyval, GdkModifierType state, Ubiquitty::Keys::KeyEventType edge)
 {
-    const auto modifier = keyval == GDK_KEY_Control_L || keyval == GDK_KEY_Control_R ? GDK_CONTROL_MASK
-        : keyval == GDK_KEY_Super_L || keyval == GDK_KEY_Super_R                     ? GDK_SUPER_MASK
-                                                                                     : static_cast<GdkModifierType>(0);
+    const auto modifier = keyval == GDK_KEY_Control_L || keyval == GDK_KEY_Control_R                                 ? GDK_CONTROL_MASK
+        : keyval == GDK_KEY_Super_L || keyval == GDK_KEY_Super_R                                                     ? GDK_SUPER_MASK
+        : keyval == GDK_KEY_Shift_L || keyval == GDK_KEY_Shift_R                                                     ? GDK_SHIFT_MASK
+        : keyval == GDK_KEY_Alt_L || keyval == GDK_KEY_Alt_R || keyval == GDK_KEY_Meta_L || keyval == GDK_KEY_Meta_R ? GDK_ALT_MASK
+                                                                                                                     : static_cast<GdkModifierType>(0);
     const unsigned held = edge == Ubiquitty::Keys::KeyEventType::Release ? (state & ~modifier) : (state | modifier);
     return static_cast<GdkModifierType>(held);
 }
 
-// Ctrl or Super decides whether a click opens a guessed link (linkClickOpens), and the
+// The exact Control chord decides whether a click opens a guessed link, and the
 // hand promises what a click would do, so it re-asks at the last hover point
 // when Ctrl goes down or up. Pressing a key moves no pointer, so no motion
 // event would, and macOS re-asks on flagsChanged for the same reason.
 void updateHoverForModifierKey(guint keyval, GdkModifierType state, Ubiquitty::Keys::KeyEventType edge)
 {
-    if (keyval != GDK_KEY_Control_L && keyval != GDK_KEY_Control_R && keyval != GDK_KEY_Super_L && keyval != GDK_KEY_Super_R)
+    if (modifierVirtualKeyFor(keyval) == Ubiquitty::Keys::VirtualKey::None)
         return;
     if (app().isPointerLocked || app().heldPointerButton != Ubiquitty::Input::PointerButton::Other)
         return;
@@ -7789,9 +7792,9 @@ void drawScrollIndicator(GtkDrawingArea* area, cairo_t* cr, int, int, gpointer)
         parameters.scrollbackCount = Ubiquitty::Screen::scrollbackCount(term);
         parameters.rows = term->rows;
         parameters.viewOffset = pane.viewOffset;
-        // The overlay covers the pane's padding too. Measure the shared
-        // thumb's right inset from that outer edge, rather than the grid.
-        parameters.viewportSizeInPixels = { bounds.size.width + gtk_widget_get_margin_end(pane.picture), bounds.size.height };
+        // The picture includes padding, so its outer edge is also the shared
+        // thumb's reference edge.
+        parameters.viewportSizeInPixels = { bounds.size.width, bounds.size.height };
         parameters.isFullScreen = true; // square Omarchy window corners
         Ubiquitty::Rendering::OverlayQuad quad;
         if (!Ubiquitty::Rendering::buildScrollIndicatorQuad(parameters, quad))
@@ -7919,8 +7922,8 @@ void publishAccessibleTerminalNow()
     const auto hold = holdPaneModel(*pane);
     Ubiquitty::Linux::Accessibility::updateTerminal(accessible,
         Ubiquitty::Linux::Accessibility::snapshot(pane->session->terminal(), pane->viewOffset, &pane->selection.state),
-        { bounds.origin.x + presentation.origin.x / scale, bounds.origin.y + presentation.origin.y / scale },
-        { logicalCellWidth() * presentation.scale, logicalCellHeight() * presentation.scale });
+        { bounds.origin.x + presentation.placement.origin.x / scale, bounds.origin.y + presentation.placement.origin.y / scale },
+        { logicalCellWidth() * presentation.placement.scale, logicalCellHeight() * presentation.placement.scale });
 }
 
 // Keep frames admitted at parser boundaries instead of looking for the same
@@ -7943,13 +7946,16 @@ void preparePaneFrame(LinuxPane& pane)
             && terminal->richTextBlocks.blocks(Ubiquitty::RichText::activeScreen(*terminal)).empty()
             && pane.richTextFrame.richTextQuads().empty();
     }
-    if (app().isVulkanReady && (!pane.captureConfiguration || *pane.captureConfiguration != configuration || pane.captureCellWidth != cellWidth || pane.captureCellHeight != cellHeight || pane.isCaptureFocused != isFocused)) {
-        auto geometry = app().rasterContext.frameCaptureGeometry();
+    const auto authored = paneGeometry(pane, { hoverSnapshot.columns, hoverSnapshot.rows });
+    if (app().isVulkanReady && (!pane.captureConfiguration || *pane.captureConfiguration != configuration || pane.captureCellWidth != cellWidth || pane.captureCellHeight != cellHeight || pane.isCaptureFocused != isFocused || pane.captureRasterOrigin.x != authored.rasterOrigin.x || pane.captureRasterOrigin.y != authored.rasterOrigin.y || pane.captureRasterSize.width != authored.rasterSize.width || pane.captureRasterSize.height != authored.rasterSize.height)) {
+        auto geometry = app().rasterContext.frameCaptureGeometry(authored.rasterOrigin, authored.rasterSize);
         geometry.isFocused = isFocused;
         pane.session->setSyncFrameCaptureGeometry(geometry);
         pane.captureConfiguration = configuration;
         pane.captureCellWidth = cellWidth;
         pane.captureCellHeight = cellHeight;
+        pane.captureRasterOrigin = authored.rasterOrigin;
+        pane.captureRasterSize = authored.rasterSize;
         pane.isCaptureFocused = isFocused;
         pane.captureViewOffset = -1;
     }
@@ -7995,19 +8001,13 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     // Match each VISIBLE leaf's grid to its picture (its split sub-rectangle), and
     // resize Core + the PTY when it changes. The cell is the font-derived runtime
     // cell (Unifont 8×16 when forced); one font, so every pane shares the cell metric.
-    // The whole-window grid (app().paneContainer) seeds new full-window tabs. Reserve
-    // the window padding (left+right / top+bottom) the same way the per-pane math
-    // does via the picture's margins, so the seed matches the realized grid.
+    // The whole-window grid (app().paneContainer) seeds new full-window tabs.
+    // Both that seed and each pane subtract their internal content padding.
     if (app().paneContainer) {
-        const Ubiquitty::Preferences::Values::PaddingEdges pad = loadPreferences().resolvedPadding();
-        // Shared viewport→grid resolver: the left/right inset eats the
-        // columns axis, top+bottom is the rows reserve — the same split the per-pane
-        // math gets from the picture's margins. clampToMinimumGrid=false keeps the Linux
-        // "don't shrink to 1x1, keep the prior grid" semantic: raw dims below 1 fail
-        // the `>= 1` gate below rather than collapsing the grid to a single cell.
-        const Ubiquitty::Rendering::EdgeInsets insets { static_cast<float>(pad.left), static_cast<float>(pad.right), 0.0f, 0.0f };
-        const Ubiquitty::GridSize dims
-            = Ubiquitty::Rendering::gridFromViewport({ static_cast<float>(gtk_widget_get_width(app().paneContainer)), static_cast<float>(gtk_widget_get_height(app().paneContainer)) }, insets, static_cast<float>(pad.top + pad.bottom), { logicalCellWidth(), logicalCellHeight() }, Ubiquitty::Rendering::GridFloor::None);
+        const Ubiquitty::GridSize dims = Ubiquitty::Linux::Presentation::PaneGeometry::gridForAllocation(
+            { static_cast<float>(gtk_widget_get_width(app().paneContainer) * app().scale), static_cast<float>(gtk_widget_get_height(app().paneContainer) * app().scale) },
+            paneInsets(*activePane(), static_cast<float>(app().scale)),
+            { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) });
         if (dims.columns >= 1 && dims.rows >= 1) {
             app().columns = dims.columns;
             app().rows = dims.rows;
@@ -8016,14 +8016,13 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     forEachVisibleLeaf([&](LinuxPane& pane) {
         if (!pane.picture)
             return;
-        // Shared viewport→grid resolver: the picture's GTK margins
-        // already carry the padding, so no insets/reserve here. clampToMinimumGrid=false
-        // preserves the `>= 1` keep-prior-grid gate (see the app().paneContainer seed).
+        // Allocation changes invalidate the presented viewport. Grid sizing
+        // subtracts internal padding through the same Core geometry resolver.
         const Ubiquitty::FloatSize viewport {
             static_cast<float>(gtk_widget_get_width(pane.picture) * app().scale),
             static_cast<float>(gtk_widget_get_height(pane.picture) * app().scale)
         };
-        if (viewport.width != pane.presentationViewport.width || viewport.height != pane.presentationViewport.height)
+        if (viewport.width != pane.presentation.viewport.width || viewport.height != pane.presentation.viewport.height)
             requestRepaint();
         if (updatePaneGridFromAllocation(pane))
             requestRepaint();
@@ -8191,17 +8190,17 @@ void requestRepaint(RepaintCause cause)
 // The pane owns a strong ref (ref_sink) so its picture survives re-parenting across
 // GtkPaned rebuilds. GTK-only: callers guard on app().window (headless smokes have no
 // display and never build widgets — renderPaneInto bails on a null picture).
-// Apply the resolved window padding to a pane's grid picture as GTK margins.
-// Re-applied on config reload so a [appearance] padding change reflows the grid.
+// Keep padding inside the frame's drawable, where overhanging text may draw.
+// Reload invalidates capture geometry; the next tick resolves the new insets.
 void applyPanePadding(LinuxPane& pane)
 {
     if (!pane.picture)
         return;
-    const Ubiquitty::Preferences::Values::PaddingEdges p = loadPreferences().resolvedPadding();
-    gtk_widget_set_margin_start(pane.picture, static_cast<int>(p.left + 0.5));
-    gtk_widget_set_margin_end(pane.picture, static_cast<int>(p.right + 0.5));
-    gtk_widget_set_margin_top(pane.picture, static_cast<int>(p.top + 0.5));
-    gtk_widget_set_margin_bottom(pane.picture, static_cast<int>(p.bottom + 0.5));
+    gtk_widget_set_margin_start(pane.picture, 0);
+    gtk_widget_set_margin_end(pane.picture, 0);
+    gtk_widget_set_margin_top(pane.picture, 0);
+    gtk_widget_set_margin_bottom(pane.picture, 0);
+    pane.captureConfiguration.reset();
     publishPanePixelGeometry(pane);
 }
 
@@ -8213,18 +8212,15 @@ void attachPaneControllers(LinuxPane& pane)
     gtk_picture_set_content_fit(GTK_PICTURE(pane.picture), GTK_CONTENT_FIT_FILL);
     gtk_widget_set_hexpand(pane.picture, TRUE);
     gtk_widget_set_vexpand(pane.picture, TRUE);
-    // Window padding: inset the grid picture by the resolved per-edge padding.
-    // GTK margins sit OUTSIDE the widget's allocation, so they shrink the size
-    // the resize→grid math (gtk_widget_get_width/cellWidth) divides — the same
-    // effect macOS gets by reserving padding on the content box — and reveal the
-    // window background in the inset band. Resolved through Settings's portable
-    // single source of truth, so it can't drift from the macOS resolution.
+    // The picture covers the whole pane. Core reserves internal padding for
+    // grid sizing and raster origins, preserving native text overhang.
     applyPanePadding(pane);
 
     GtkGesture* mouseClick = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(mouseClick), 0);
     windowSignalConnect(mouseClick, "pressed", G_CALLBACK(onMousePressed), &pane);
     windowSignalConnect(mouseClick, "released", G_CALLBACK(onMouseReleased), &pane);
+    windowSignalConnect(mouseClick, "cancel", G_CALLBACK(onMouseGestureCancelled), &pane);
     gtk_widget_add_controller(pane.picture, GTK_EVENT_CONTROLLER(mouseClick));
 
     GtkEventController* motion = gtk_event_controller_motion_new();
@@ -9313,12 +9309,15 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
     gtk_box_append(GTK_BOX(app().paneContainer), activePane()->picture);
 
     // Open at exactly the launch grid: pin the focused pane picture's natural
-    // size to it so the window sizes itself around it (grid + padding
-    // margins + CSD titlebar). The pin is relaxed on first map so the user can
+    // size to it so the window sizes itself around its internally padded
+    // drawable and CSD titlebar. The pin is relaxed on first map so the user can
     // still resize the window smaller afterward.
+    const auto launchExtent = Ubiquitty::Rendering::viewportForGrid(
+        { activePane()->columns, activePane()->rows },
+        { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) },
+        paneInsets(*activePane(), static_cast<float>(app().scale)), 0);
     gtk_widget_set_size_request(activePane()->picture,
-        static_cast<int>(activePane()->columns * logicalCellWidth() + 0.5f),
-        static_cast<int>(activePane()->rows * logicalCellHeight() + 0.5f));
+        static_cast<int>(std::ceil(launchExtent.width / app().scale)), static_cast<int>(std::ceil(launchExtent.height / app().scale)));
     windowSignalConnect(app().window, "map", G_CALLBACK(onWindowMappedRelaxSize), activePane()->picture);
     windowSignalConnect(app().window, "unmap", G_CALLBACK(onWindowUnmapped), nullptr);
     windowSignalConnect(app().window, "realize", G_CALLBACK(onWindowRealized), nullptr);
@@ -14708,7 +14707,7 @@ int smokeLink()
     const GdkModifierType plain = static_cast<GdkModifierType>(0);
     expect(linkDispatchAtCell(0, 1, plain, 1).action == LocalLinkAction::Open, "a plain click opens a declared link");
     expect(linkDispatchAtCell(1, 8, plain, 1).action == LocalLinkAction::Refuse, "a plain click leaves a guessed link alone");
-    expect(linkDispatchAtCell(1, 8, GDK_SUPER_MASK, 1).target == "https://example.com/guess", "Super opens a guessed link");
+    expect(linkDispatchAtCell(1, 8, GDK_SUPER_MASK, 1).action == LocalLinkAction::Refuse, "Super leaves a guessed link to the window manager");
     expect(linkDispatchAtCell(1, 8, GDK_CONTROL_MASK, 1).target == "https://example.com/guess", "Ctrl opens a guessed link");
     expect(linkDispatchAtCell(0, 1, plain, 2).action == LocalLinkAction::Refuse, "the second press of a double-click opens nothing");
     // The hand over the guess follows Ctrl as it goes down and up, as the
@@ -14730,13 +14729,34 @@ int smokeLink()
     } else {
         GtkWidget* picture = GTK_WIDGET(g_object_ref_sink(gtk_picture_new()));
         app().focusedPicture = picture;
+        const auto savedPresentation = activePane()->presentation;
+        const Ubiquitty::FloatSize hitCell { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) };
+        const auto hitViewport = Ubiquitty::Rendering::viewportForGrid({ term->columns, term->rows }, hitCell, { 4, 4, 6, 6 }, 0);
+        activePane()->presentation = Ubiquitty::Linux::Presentation::PaneGeometry::resolve(hitViewport, { 4, 4, 6, 6 }, hitCell, { term->columns, term->rows });
+        const double paddingX = 1.0 / app().scale;
+        const double textY = (6 + 0.5 * hitCell.height) / app().scale;
+        int paddingRow = -1, paddingColumn = -1;
+        cellAtPoint(paddingX, textY, paddingRow, paddingColumn);
+        expect(paddingRow == 0 && paddingColumn == 0 && !strictCellAtPanePoint(*activePane(), paddingX, textY),
+            "padding clamps mouse reports but is not a cell for a link press");
+        updateHoverCursor(paddingX, textY, GDK_CONTROL_MASK);
+        expect(!activePane()->hoveredLink.isActive && activePane()->hoverCursorShape == Ubiquitty::MousePointerShape::Default,
+            "padding beside a declared link shows neither a hand nor text cursor");
+        updateHoverCursor((4 + 0.5 * hitCell.width) / app().scale, textY, GDK_CONTROL_MASK);
+        expect(activePane()->hoveredLink.isActive && activePane()->hoveredLink.linkID == id,
+            "the same declared link remains hoverable inside the padded content");
+        activePane()->presentation = savedPresentation;
+        publishHoveredLink(*activePane(), {});
         app().hoverX = (8.5 * app().rasterContext.cellWidth()) / app().scale;
         app().hoverY = (1.5 * app().rasterContext.cellHeight()) / app().scale;
         app().isHoverPointKnown = true;
         activePane()->pointerX = app().hoverX;
         activePane()->pointerY = app().hoverY;
         activePane()->isPointerPositionKnown = true;
-        app().hoverCursorShape = Ubiquitty::MousePointerShape::Default;
+        updateHoverCursor(app().hoverX, app().hoverY, plain);
+        expect(!activePane()->hoveredLink.isActive && app().hoverCursorShape != Ubiquitty::MousePointerShape::Pointer
+                && activePane()->hoverCursorShape != Ubiquitty::MousePointerShape::Pointer,
+            "a resting pointer over the guess shows no link hand or underline");
         int hoverRow = -1;
         int hoverColumn = -1;
         cellAtPoint(app().hoverX, app().hoverY, hoverRow, hoverColumn);
@@ -14772,11 +14792,47 @@ int smokeLink()
         onKeyReleased(nullptr, GDK_KEY_Control_L, 0, GDK_CONTROL_MASK, nullptr);
         expect(app().hoverCursorShape != Ubiquitty::MousePointerShape::Pointer, "and Ctrl coming up lowers it");
         expect(!activePane()->hoveredLink.isActive, "Ctrl release clears the underline without pointer motion");
-        onKeyPressed(nullptr, GDK_KEY_Super_L, 0, plain, nullptr);
+        GtkGesture* cancelledGesture = gtk_gesture_click_new();
+        g_object_ref_sink(cancelledGesture);
+        windowSignalConnect(cancelledGesture, "cancel", G_CALLBACK(onMouseGestureCancelled), activePane());
+        app().isLinkPressClaimed = true;
+        app().heldPointerButton = Ubiquitty::Input::PointerButton::Left;
+        g_signal_emit_by_name(cancelledGesture, "cancel", nullptr);
+        expect(!app().isLinkPressClaimed && app().heldPointerButton == Ubiquitty::Input::PointerButton::Other,
+            "cancelling a locally claimed link gesture releases its native pointer state");
+        onKeyPressed(nullptr, GDK_KEY_Control_L, 0, plain, nullptr);
+        expect(activePane()->hoveredLink.isActive, "a cancelled link gesture permits modifier hover without another click");
+        onKeyReleased(nullptr, GDK_KEY_Control_L, 0, GDK_CONTROL_MASK, nullptr);
+        g_object_unref(cancelledGesture);
+        const auto feedModes = [](std::string_view bytes) {
+            activePane()->session->feedBytes({ bytes.data(), bytes.size() });
+        };
+        feedModes("\x1b[?1003h");
+        updateHoverCursor(app().hoverX, app().hoverY, GDK_CONTROL_MASK);
         expect(activePane()->hoveredLink.isActive && app().hoverCursorShape == Ubiquitty::MousePointerShape::Pointer,
-            "Super hover publishes the same link affordance");
+            "Ctrl hover reaches detected links while the application tracks every motion");
+        updateHoverCursor(app().hoverX, app().hoverY, plain);
+        const auto& preferences = Ubiquitty::Preferences::values();
+        const bool shouldRevealPlainReportedLink = Ubiquitty::Preferences::Effective::osc8ClickOpens(preferences)
+            && Ubiquitty::Preferences::Effective::linksOverrideReporting(preferences);
+        expect(activePane()->hoveredLink.isActive == shouldRevealPlainReportedLink,
+            "plain reported-link hover follows the shared reporting override preference");
+        feedModes("\x1b[?1003l\x1b[?1049h\x1b[2;1Hsee https://example.com/guess here");
+        updateHoverCursor(app().hoverX, app().hoverY, plain);
+        expect(!activePane()->hoveredLink.isActive, "alternate screen alone leaves detected links modifier-gated");
+        updateHoverCursor(app().hoverX, app().hoverY, GDK_CONTROL_MASK);
+        expect(activePane()->hoveredLink.isActive, "Ctrl hover works on the alternate screen without mouse reporting");
+        feedModes("\x1b[?1003h");
+        updateHoverCursor(app().hoverX, app().hoverY, plain);
+        expect(activePane()->hoveredLink.isActive == shouldRevealPlainReportedLink,
+            "alternate-screen mouse reporting uses the same plain-link preference");
+        feedModes("\x1b[?1003l\x1b[?1049l");
+        updateHoverCursor(app().hoverX, app().hoverY, plain);
+        onKeyPressed(nullptr, GDK_KEY_Super_L, 0, plain, nullptr);
+        expect(!activePane()->hoveredLink.isActive,
+            "Super preserves the desktop's window gesture without revealing guessed links");
         onKeyReleased(nullptr, GDK_KEY_Super_L, 0, GDK_SUPER_MASK, nullptr);
-        expect(!activePane()->hoveredLink.isActive, "Super release clears the underline without pointer motion");
+        expect(!activePane()->hoveredLink.isActive, "Super release preserves the resting underline state");
         updateHoverCursor((1.5 * app().rasterContext.cellWidth()) / app().scale,
             (0.5 * app().rasterContext.cellHeight()) / app().scale, GDK_SUPER_MASK);
         expect(activePane()->hoveredLink.isActive && activePane()->hoveredLink.linkID == id,
@@ -14794,11 +14850,11 @@ int smokeLink()
         app().panes.push_back(std::move(other));
         onMouseEnter(nullptr, app().rasterContext.cellWidth() * 2.5 / app().scale,
             app().rasterContext.cellHeight() * 0.5 / app().scale, otherPane);
-        onKeyPressed(nullptr, GDK_KEY_Super_L, 0, plain, nullptr);
+        onKeyPressed(nullptr, GDK_KEY_Control_L, 0, plain, nullptr);
         expect(otherPane->hoveredLink.isActive && otherPane->hoverCursorShape == Ubiquitty::MousePointerShape::Pointer,
-            "Super hover resolves a nonfocused pane at its own pointer position");
+            "Ctrl hover resolves a nonfocused pane at its own pointer position");
         expect(activePane() == focusedBeforeHover, "hovering another split preserves keyboard focus");
-        onKeyReleased(nullptr, GDK_KEY_Super_L, 0, GDK_SUPER_MASK, nullptr);
+        onKeyReleased(nullptr, GDK_KEY_Control_L, 0, GDK_CONTROL_MASK, nullptr);
         expect(!otherPane->hoveredLink.isActive, "modifier release clears a nonfocused pane underline");
         onMouseLeave(nullptr, otherPane);
         auto previousLetters = std::move(focusedBeforeHover->presentedLetters);
@@ -14963,8 +15019,9 @@ int smokeLink()
     Ubiquitty::processBytes(term, "\033[2J\033[H");
     const std::string wrappedURL = "https://example.com/" + std::string(static_cast<std::size_t>(startupColumns), 'a');
     Ubiquitty::processBytes(term, wrappedURL);
-    expect(linkDispatchAtCell(1, 1, GDK_SUPER_MASK, 1).target == wrappedURL,
-        "Super-click resolves the complete URL across a soft wrap");
+    const auto superWrapped = linkDispatchAtCell(1, 1, GDK_SUPER_MASK, 1);
+    expect(superWrapped.action == LocalLinkAction::Refuse && superWrapped.target.empty(),
+        "Super-click leaves a soft-wrapped URL to the window manager");
     expect(linkDispatchAtCell(1, 1, GDK_CONTROL_MASK, 1).target == wrappedURL,
         "Ctrl-click resolves the same wrapped URL through Core");
 
@@ -17171,13 +17228,13 @@ int smokeWindowChrome(const char* outputDirectory)
     chromeConfig.backgroundOpacity = 1.0;
     applyWindowGlobalRenderSettings(chromeConfig);
     applyChromeTheme(fixtureIndex);
-    gchar* themeCSS = app().chromeProvider ? gtk_css_provider_to_string(app().chromeProvider) : nullptr;
+    gchar* themeCSS = app().windowAppearance.cssProvider() ? gtk_css_provider_to_string(app().windowAppearance.cssProvider()) : nullptr;
     std::string compactCSS = themeCSS ? themeCSS : "";
     g_free(themeCSS);
     std::erase_if(compactCSS, [](unsigned char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; });
     check(compactCSS.find("rgb(161,178,195)") != std::string::npos || compactCSS.find("#a1b2c3") != std::string::npos,
         "the scoped padding CSS contains the replacement background");
-    GtkCssProvider* const retainedProvider = app().chromeProvider;
+    GtkCssProvider* const retainedProvider = app().windowAppearance.cssProvider();
     chromeConfig.backgroundOpacity = 0.5;
     applyWindowGlobalRenderSettings(chromeConfig);
     applyChromeTheme(fixtureIndex);
@@ -17185,7 +17242,7 @@ int smokeWindowChrome(const char* outputDirectory)
     chromeConfig.backgroundOpacity = 1.0;
     applyWindowGlobalRenderSettings(chromeConfig);
     applyChromeTheme(fixtureIndex);
-    check(!gtk_widget_has_css_class(app().window, "ubiquitty-translucent") && app().chromeProvider == retainedProvider,
+    check(!gtk_widget_has_css_class(app().window, "ubiquitty-translucent") && app().windowAppearance.cssProvider() == retainedProvider,
         "returning to opaque replaces the same scoped provider without stale transparency");
     check(Ubiquitty::Preferences::configure(savedDocument, Ubiquitty::Preferences::ParseMode::Strict).isApplied,
         "the original configuration is restored after the theme probe");
@@ -17580,12 +17637,13 @@ int smokeFontZoom()
     }
     const int width0 = app().rasterContext.cellWidth();
     const int height0 = app().rasterContext.cellHeight();
+    const double points0 = app().fontSizePoints;
     applyFontZoom(app().fontPixelSize + 8);
     const int width1 = app().rasterContext.cellWidth();
     const int height1 = app().rasterContext.cellHeight();
     const bool grew = width1 > width0 && height1 > height0;
-    applyFontZoom(app().defaultFontPixelSize);
-    const bool restored = app().rasterContext.cellWidth() == width0 && app().rasterContext.cellHeight() == height0;
+    resetFontZoom();
+    const bool restored = app().fontSizePoints == points0 && app().rasterContext.cellWidth() == width0 && app().rasterContext.cellHeight() == height0;
     bool didPass = grew && restored;
     const auto check = [&](bool condition, const char* message) {
         if (!condition) {
@@ -17615,12 +17673,18 @@ int smokeFontZoom()
     check(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::Native && app().glyphRasterizer->ready(),
         "a corrected family recovers from the bitmap fallback");
     check(app().fontFamily == "JetBrains Mono" && app().fallbackFontName == "Monaspace Neon", "the primary and symbol families reload");
-    check(app().fontSizePoints == 13.5 && app().defaultFontPixelSize == 14, "a configured fractional size updates the reset target");
+    check(app().fontSizePoints == 13.5 && configuredFontSizePoints(Ubiquitty::Preferences::Effective::renderConfiguration(loadPreferences())) == 13.5,
+        "a configured fractional size updates the reset target");
+    applyFontZoom(20);
+    resetFontZoom();
+    check(app().fontSizePoints == 13.5, "font reset rounded the configured fractional point size");
     applyFontZoom(20);
     configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 13.5\nline_spacing = 2\n");
-    check(app().fontSizePoints == 20 && app().defaultFontPixelSize == 14, "a spacing edit preserves the live zoom");
+    check(app().fontSizePoints == 20 && configuredFontSizePoints(Ubiquitty::Preferences::Effective::renderConfiguration(loadPreferences())) == 13.5,
+        "a spacing edit preserves the live zoom");
     configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 15.5\n");
-    check(app().fontSizePoints == 15.5 && app().defaultFontPixelSize == 16, "an actual size edit replaces the live zoom");
+    check(app().fontSizePoints == 15.5 && configuredFontSizePoints(Ubiquitty::Preferences::Effective::renderConfiguration(loadPreferences())) == 15.5,
+        "an actual size edit replaces the live zoom");
     configureLive("[font]\nfamily = \"GNU Unifont\"\nsize = 15.5\n");
     check(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::EmbeddedBitmap, "a configured bitmap family takes effect");
     configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 15.5\n");
@@ -17634,11 +17698,22 @@ int smokeFontZoom()
     configureLive("[font]\nfamily = \"GNU Unifont\"\nsize = 24\n");
     check(app().fontFamily == "JetBrains Mono" && app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::Native,
         "the environment family keeps priority over a live edit");
-    check(app().fontSizePoints == 22 && app().defaultFontPixelSize == 19, "an overridden size edit preserves the live zoom and reset target");
+    check(app().fontSizePoints == 22 && configuredFontSizePoints(Ubiquitty::Preferences::Effective::renderConfiguration(loadPreferences())) == 18.5,
+        "an overridden size edit preserves the live zoom and reset target");
+    resetFontZoom();
+    check(app().fontSizePoints == 18.5, "font reset rounded the environment point-size override");
     unsetenv("UBIQUITTY_FONT");
     unsetenv("UBIQUITTY_FONT_SIZE");
+    configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 8.5\n");
+    const int fractionalWidth = app().rasterContext.cellWidth();
+    const int fractionalHeight = app().rasterContext.cellHeight();
+    applyFontZoom(14);
+    resetFontZoom();
+    check(app().fontSizePoints == 8.5 && app().rasterContext.cellWidth() == fractionalWidth && app().rasterContext.cellHeight() == fractionalHeight,
+        "font reset did not restore the exact 8.5-point cell metrics");
     if (gtk_init_check()) {
-        configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 11\nline_spacing = 0\n");
+        configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 11\nline_spacing = 0\n"
+                      "[appearance]\npadding_left = 3\npadding_right = 5\npadding_top = 7\npadding_bottom = 11\n");
         LinuxPane& pane = *activePane();
         pane.session->start(startupRows, startupColumns);
         // A mounted, allocated picture exercises the same font-size path as a
@@ -17666,8 +17741,11 @@ int smokeFontZoom()
                     applyFontZoom(app().fontPixelSize + direction);
                     const int cellWidth = app().rasterContext.cellWidth();
                     const int cellHeight = app().rasterContext.cellHeight();
-                    const int columns = viewportWidth * scale / cellWidth;
-                    const int rows = viewportHeight * scale / cellHeight;
+                    // The fixed 800x480 logical allocation contains explicit
+                    // 3/5/7/11 logical-pixel padding. These independent content
+                    // extents include both opposing edges at each device scale.
+                    const int columns = 792 * scale / cellWidth;
+                    const int rows = 462 * scale / cellHeight;
                     struct winsize windowSize {};
                     check(::ioctl(pane.session->fileDescriptor(), TIOCGWINSZ, &windowSize) == 0
                             && windowSize.ws_col == columns && windowSize.ws_row == rows
@@ -17675,6 +17753,19 @@ int smokeFontZoom()
                         "font zoom did not publish the final grid and pixels together");
                     check(pane.columns == columns && pane.rows == rows,
                         "font zoom left the pane on its previous grid until the next frame");
+                    {
+                        const auto hold = holdPaneModel(pane);
+                        const auto* terminal = pane.session->terminal();
+                        check(terminal && terminal->cellPixelWidth == cellWidth && terminal->cellPixelHeight == cellHeight
+                                && terminal->textAreaPixelWidth == columns * cellWidth && terminal->textAreaPixelHeight == rows * cellHeight
+                                && terminal->drawablePixelWidth == viewportWidth * scale && terminal->drawablePixelHeight == viewportHeight * scale,
+                            "font zoom did not retain distinct text and padding-inclusive drawable geometry");
+                        g_print("smoke-font-zoom: scale=%d point-size=%g cell=%dx%d expected-grid=%dx%d PTY=%dx%d pixels=%dx%d drawable=%dx%d\n",
+                            scale, app().fontSizePoints, cellWidth, cellHeight, columns, rows,
+                            static_cast<int>(windowSize.ws_col), static_cast<int>(windowSize.ws_row),
+                            static_cast<int>(windowSize.ws_xpixel), static_cast<int>(windowSize.ws_ypixel),
+                            terminal ? terminal->drawablePixelWidth : 0, terminal ? terminal->drawablePixelHeight : 0);
+                    }
                     check(pane.session->windowSizeDeliveryCount() == before + 1,
                         "font zoom did not deliver exactly one complete window size");
                     // The next frame performs these same two operations. It
@@ -18224,12 +18315,17 @@ int smokePixelGeometry()
     checkReply("\033[16t\033[14t\033[?7402h\033[14t", "\033[6;32;16t\033[4;128;96t\033[4;162;130t");
     check(publishPanePixelGeometry(pane), "a fullscreen-content toggle did not republish the reported size");
 
+    Ubiquitty::processBytes(terminal, "\033[?7402l");
+    pane.session->republishSnapshot();
     constexpr std::string_view changedPadding = "[font]\nfamily = \"GNU Unifont\"\nsize = 10\nline_spacing = 0\n"
                                                 "[appearance]\npadding_left = 4\npadding_right = 6\npadding_top = 8\npadding_bottom = 12\n";
     check(Ubiquitty::Preferences::configure(std::string(changedPadding), Ubiquitty::Preferences::ParseMode::Strict).isApplied, "padding configuration failed");
-    check(gtk_widget_get_margin_start(pane.picture) == 4 && gtk_widget_get_margin_end(pane.picture) == 6
-            && gtk_widget_get_margin_top(pane.picture) == 8 && gtk_widget_get_margin_bottom(pane.picture) == 12,
-        "live padding change did not reach the picture");
+    check(gtk_widget_get_margin_start(pane.picture) == 0 && gtk_widget_get_margin_end(pane.picture) == 0
+            && gtk_widget_get_margin_top(pane.picture) == 0 && gtk_widget_get_margin_bottom(pane.picture) == 0,
+        "padding became an external picture clip");
+    const auto changedGeometry = paneGeometry(pane, { pane.columns, pane.rows });
+    check(changedGeometry.rasterOrigin.x == 8 && changedGeometry.rasterOrigin.y == 16,
+        "live padding change did not reach the internal frame origin");
     check(!publishPanePixelGeometry(pane), "live padding change did not publish geometry");
     int pixelX = 0;
     int pixelY = 0;
@@ -18598,6 +18694,10 @@ int main(int argc, char** argv)
         return smokeProportionalStrip();
     if (mode == "--smoke-proportional-atlas")
         return smokeProportionalAtlas();
+    if (mode == "--smoke-padding")
+        return Ubiquitty::Linux::Diagnostics::smokePadding();
+    if (mode == "--smoke-skip-ink")
+        return Ubiquitty::Linux::Diagnostics::smokeSkipInk();
     if (mode == "--smoke-doubled-run")
         return smokeDoubledRun();
     if (mode == "--smoke-script-glyphs")

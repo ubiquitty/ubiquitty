@@ -29,6 +29,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(UBIQUITTY_TEST_GIO REQUIRED IMPORTED_TARGET gio-2.0)
     list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_configuration_watcher.cpp)
+    list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_link_interaction.cpp)
+    list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_pane_geometry.cpp)
+    set(test_linux_pane_geometry_EXTRA_SOURCES
+        ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/Presentation/PaneGeometry.cpp
+        ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Rendering/PaddingGeometry.cpp)
+    set(test_linux_link_interaction_EXTRA_SOURCES ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/Input/LinkInteraction.cpp)
     set(test_linux_configuration_watcher_EXTRA_SOURCES ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/ConfigurationWatcher.cpp)
     set(test_linux_configuration_watcher_EXTRA_LIBS PkgConfig::UBIQUITTY_TEST_GIO)
 endif()

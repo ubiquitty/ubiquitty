@@ -391,6 +391,79 @@ enum LinkScenarios {
             }
         }
 
+        UBUITestRegister("swift_shell_link_settings_follow_mouse_reporting_on_both_screens") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                guard let shell = TerminalWindowController.spawn(),
+                    let window = shell.window,
+                    let content = window.contentView,
+                    let surface = terminalSurface(under: content)
+                else {
+                    t.expect(false, desc: "a Swift-shell window opens with a surface")
+                    return
+                }
+                let saved = String(Ubiquitty.Preferences.liveDocument().pointee)
+                defer {
+                    restoreLiveDocument(saved)
+                    window.close()
+                }
+                t.pump(0.3)
+                let base = documentDroppingTables(saved) { $0 == "[selection]" }
+                var opened: [String] = []
+                surface.linkOpener = { opened.append($0) }
+                let screens = [
+                    (name: "primary", mode: "", isReporting: false),
+                    (name: "alternate", mode: "\u{1b}[?1049h", isReporting: false),
+                    (name: "primary reporting", mode: "\u{1b}[?1003h", isReporting: true),
+                    (name: "alternate reporting", mode: "\u{1b}[?1049h\u{1b}[?1003h", isReporting: true),
+                ]
+                for screen in screens {
+                    surface.feed(Data(("\u{1b}[?1003l\u{1b}[?1049l\u{1b}[H\u{1b}[2J" + screen.mode
+                        + "\u{1b}]8;;https://example.com/declared\u{1b}\\DECLARED\u{1b}]8;;\u{1b}\\\r\n"
+                        + "https://example.com/guessed").utf8))
+                    t.pump(0.1)
+                    guard let declared = surface.viewPoint(forRow: 0, column: 2),
+                        let guessed = surface.viewPoint(forRow: 1, column: 2)
+                    else {
+                        t.expect(false, desc: "both link points are visible on \(screen.name)")
+                        continue
+                    }
+                    for isOverrideEnabled in [false, true] {
+                        restoreLiveDocument(base + "\n[selection]\nosc8_click_opens = true\nlinks_override_reporting = \(isOverrideEnabled)\n")
+                        opened.removeAll()
+                        let didOpenDeclared = surface.openLink(atViewPoint: declared, isCommandHeld: false)
+                        t.expect(
+                            didOpenDeclared == (!screen.isReporting || isOverrideEnabled),
+                            desc: "plain declared link follows override=\(isOverrideEnabled) on \(screen.name)"
+                        )
+                        opened.removeAll()
+                        let didOpenGuessed = surface.openLink(atViewPoint: guessed, isCommandHeld: false)
+                        t.expect(
+                            didOpenGuessed == (screen.isReporting && isOverrideEnabled),
+                            desc: "plain detected URL follows reporting on \(screen.name)"
+                        )
+                        surface.updateLinkAffordance(atViewPoint: guessed, isCommandHeld: false)
+                        t.expect(
+                            (surface.hoveredLinkTarget == "https://example.com/guessed")
+                                == (screen.isReporting && isOverrideEnabled),
+                            desc: "detected-link hover promises the same plain click on \(screen.name)"
+                        )
+                        t.expect(
+                            surface.openLink(atViewPoint: guessed, isCommandHeld: true),
+                            desc: "Command reaches a detected URL on \(screen.name)"
+                        )
+                    }
+                    restoreLiveDocument(base + "\n[selection]\nosc8_click_opens = false\nlinks_override_reporting = true\n")
+                    t.expect(
+                        !surface.openLink(atViewPoint: declared, isCommandHeld: false)
+                            && !surface.openLink(atViewPoint: guessed, isCommandHeld: false),
+                        desc: "disabling plain-click links keeps both candidates modifier-gated on \(screen.name)"
+                    )
+                }
+                surface.feed(Data("\u{1b}[?1003l\u{1b}[?1049l".utf8))
+            }
+        }
+
         UBUITestRegister("swift_shell_hovered_link_reaches_the_frame") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {

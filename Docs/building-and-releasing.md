@@ -747,7 +747,7 @@ the goldens by font files and is not a substitute for the host's verdict.
 
 ### Build
 ```sh
-./Scripts/build-linux-gtk.sh            # Debug, quiet
+./Scripts/build-linux-gtk.sh            # Release, quiet
 ./Scripts/build-linux-gtk.sh Release
 VERBOSE=1 ./Scripts/build-linux-gtk.sh  # stream full output (log: $UBQ_BUILD_ROOT/linux/build.log)
 "$UBQ_BUILD_ROOT/linux/ubiquitty"             # run (headless self-tests: --smoke, --dump-png, …)
