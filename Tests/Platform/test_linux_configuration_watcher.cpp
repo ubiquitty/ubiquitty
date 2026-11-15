@@ -44,6 +44,7 @@ public:
 
     [[nodiscard]] std::string path() const { return m_directory.path() + "/ubiquitty/config.toml"; }
     [[nodiscard]] std::string siblingPath() const { return m_directory.path() + "/ubiquitty/editor-save.toml"; }
+    [[nodiscard]] std::string root() const { return m_directory.path(); }
 
 private:
     Ubiquitty::Test::TempDir m_directory;
@@ -146,6 +147,54 @@ TEST(atomicConfigurationReplacementsAndRenameAwayKeepMonitoringTheName)
     CHECK(waitUntil([] { return Ubiquitty::Preferences::liveDocument().empty(); }));
     writeFile(home.path(), fontDocument(31));
     CHECK(waitUntil([] { return Ubiquitty::Preferences::values().fontSize == 31; }));
+}
+
+TEST(vimBackupRenameSavesCoalesceAndKeepRefusedFields)
+{
+    ConfigurationHome home;
+    Ubiquitty::Linux::ConfigurationWatcher watcher;
+    CHECK(watcher.start());
+    writeFile(home.path(), fontDocument(19));
+    CHECK(waitUntil([] { return Ubiquitty::Preferences::values().fontSize == 19; }));
+    int deliveries = 0;
+    Ubiquitty::Preferences::ConfigurationSubscription subscription([&](const auto&) { ++deliveries; });
+
+    // Vim may move the old inode to a backup before installing the new file.
+    // None of that burst is a request to reset the live document to defaults.
+    const std::string backup = home.path() + "~";
+    CHECK_EQ(std::rename(home.path().c_str(), backup.c_str()), 0);
+    writeFile(home.path(), "");
+    writeFile(home.path(), fontDocument(23));
+    CHECK(waitUntil([] { return Ubiquitty::Preferences::values().fontSize == 23; }));
+    pumpFor(350ms);
+    CHECK_EQ(deliveries, 1);
+
+    // Like the Mac reload, a malformed field keeps its last valid value,
+    // while valid changes in the same save still reach the live document.
+    writeFile(home.siblingPath(), "[font]\nsize = \"large\"\nfamily = \"monospace\"\n");
+    CHECK_EQ(std::rename(home.siblingPath().c_str(), home.path().c_str()), 0);
+    CHECK(waitUntil([] { return Ubiquitty::Preferences::values().fontFamily == "monospace"; }));
+    CHECK(Ubiquitty::Preferences::values().fontSize == 23);
+    CHECK(!Ubiquitty::Preferences::liveDiagnosticSummary().empty());
+    writeFile(home.siblingPath(), fontDocument(27));
+    CHECK_EQ(std::rename(home.siblingPath().c_str(), home.path().c_str()), 0);
+    CHECK(waitUntil([] { return Ubiquitty::Preferences::values().fontSize == 27; }));
+    CHECK(Ubiquitty::Preferences::liveDiagnosticSummary().empty());
+}
+
+TEST(configurationMonitoringStartsWhenTheWholeConfigPathIsAbsent)
+{
+    ConfigurationHome home;
+    const std::string nestedRoot = home.root() + "/missing/xdg";
+    CHECK_EQ(::setenv("XDG_CONFIG_HOME", nestedRoot.c_str(), 1), 0);
+    Ubiquitty::Linux::ConfigurationWatcher watcher;
+    CHECK(watcher.start());
+    const auto path = Ubiquitty::Preferences::filePath();
+    CHECK(path.has_value());
+    if (!path)
+        return;
+    writeFile(*path, fontDocument(35));
+    CHECK(waitUntil([] { return Ubiquitty::Preferences::values().fontSize == 35; }));
 }
 
 TEST(ownWritesAndUnrelatedFilesDoNotReloadConfiguration)

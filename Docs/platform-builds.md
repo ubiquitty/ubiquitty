@@ -113,7 +113,40 @@ respective pointer-lock backends.
 "$UBQ_BUILD_ROOT/linux/ubiquitty"
 ```
 
-The default build is Debug. Keep the generated shaders and bundled fonts beside
+The Linux build script defaults to Release; pass `Debug` explicitly for a debug build.
+For an Omarchy or other tiling desktop build without the tab/menu bar or window
+decorations, run `UBIQUITTY_LINUX_CHROMELESS=ON ./Scripts/build-linux-gtk.sh Release`.
+Keyboard shortcuts and the command palette remain available.
+
+Install the complete build under `~/.local` with:
+
+```sh
+./Scripts/install-linux.sh
+# Use an existing build, including an Omarchy build from another directory:
+./Scripts/install-linux.sh --no-build --build-dir "$UBQ_BUILD_ROOT/linux" --omarchy
+# Explicitly select it as the default terminal as well:
+./Scripts/install-linux.sh --omarchy --default-terminal
+```
+
+The installer builds Release by default and refuses a single-configuration Debug
+build with `--no-build`. `--omarchy` builds without chrome,
+registers Omarchy menu entries, and follows its current theme when a Foot palette
+is available. Its font-set hook follows explicit Omarchy font changes while
+preserving bold weight, spacing, and fallback ranges. It preserves the default terminal unless `--default-terminal` is
+specified. `--prefix DIR` changes the installation prefix; `--build-dir DIR`
+selects the CMake build directory for either building or `--no-build` reuse.
+Distribution scripts, hooks, and the Noir theme ports live in the
+[Omarchy integration repository](https://github.com/ubiquitty/omarchy), pinned
+here as `Integrations/omarchy`. Initialize it with
+`git submodule update --init Integrations/omarchy`. The installer packages the
+existing Release into the build directory's `distribution/` before installing.
+The public `bin/ubiquitty` symlink points into a versioned directory under
+`lib/ubiquitty/releases`, keeping the executable and its shaders/fonts together.
+Old versions remain available to running processes. The desktop entry and icons
+live under the prefix's `share`; a custom prefix must be on `PATH` and its `share`
+directory on `XDG_DATA_DIRS` for shell and desktop discovery.
+
+Keep the generated shaders and bundled fonts beside
 the executable in `$UBQ_BUILD_ROOT/linux`; copying the binary alone omits
 renderer resources. The prerequisite script diagnoses the GTK/Vulkan baseline
 and glslc; CMake checks the font libraries and reports optional backend

@@ -8,10 +8,9 @@
 // The grid is CPU-rasterized (Unifont) as a GdkMemoryTexture; the Vulkan path
 // swaps the raster for a GPU grid.
 //
-// Single-threaded by construction: the Terminal is touched only on the GTK main
-// thread. Each pane holds the same TerminalSession the macOS drive wraps — the
-// session's ingest thread is never started, so drain() runs on the main
-// loop and its model lock is uncontended.
+// GUI panes use TerminalSession's ingest thread, as the macOS drive does.
+// GTK presents owned boundary captures and locks the model for live reads and
+// input integration. Headless smokes drain inline.
 //
 // Self-tests (headless, lavapipe-friendly — no display needed):
 //   --smoke               offscreen Vulkan clear → pixel readback (GPU path)
@@ -182,11 +181,13 @@
 #include "Platform/Linux/FontRouting.h"
 #include "Platform/Linux/FontSizing.h"
 #include "Platform/Linux/FreeTypeRasterizer.h"
+#include "Platform/Linux/OmarchyAccent.h"
 #include "Platform/Linux/PTYWatch.h"
 #include "Platform/Linux/PaneViewport.h"
 #include "Platform/Linux/PangoRichText.h"
 #include "Platform/Linux/PointerLock.h"
 #include "Platform/Linux/Raster.h"
+#include "Platform/Linux/SharedFontResources.h"
 #include "Platform/Linux/Updater.h"
 #include "Platform/Linux/VulkanMemory.h"
 #include "Platform/Linux/VulkanRenderer.h"
@@ -286,6 +287,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -293,15 +295,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <expected>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -318,6 +324,9 @@
 #include <gdk/gdkkeysyms.h>
 #include <glib-unix.h>
 #include <gtk/gtk.h>
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/wayland/gdkwayland.h>
+#endif
 
 namespace {
 
@@ -395,7 +404,15 @@ private:
     Ubiquitty::Terminal* m_term = nullptr;
 };
 
+struct App;
+
 struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
+    Ubiquitty::Rendering::FrameHoverLink hoveredLink;
+    std::uint64_t hoverModelGeneration = 0;
+    int hoverViewOffset = -1;
+    GdkModifierType hoverModifiers = static_cast<GdkModifierType>(0);
+    Ubiquitty::MousePointerShape hoverCursorShape = Ubiquitty::MousePointerShape::Default;
+    App* ownerApp = nullptr;
     std::uint8_t keyPositionModifiers = 0;
     bool hasUnheardBell = false;
     // Declared before `runtime`, and the order is the point: the Terminal inside
@@ -425,6 +442,20 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     // the writability watch, the held-frame timer — stay unarmed: the loop
     // owns the transport, the queued writes and the coherence rule's clock.
     bool isIngesting = false;
+    struct FrameRelease {
+        void operator()(Ubiquitty::Rendering::FrameCapture* frame) const { ::releaseFrameCapture(frame); }
+    };
+    std::unique_ptr<Ubiquitty::Rendering::FrameCapture, FrameRelease> pendingCapture;
+    std::vector<Ubiquitty::Rendering::SelectionRowSpan> capturedSelectionSpans;
+    int capturedSelectionSpanCount = 0;
+    std::optional<Ubiquitty::Rendering::RenderConfiguration> captureConfiguration;
+    int captureCellWidth = 0;
+    int captureCellHeight = 0;
+    int captureViewOffset = -1;
+    Ubiquitty::Screen::HistoryFacts captureViewHistory;
+    bool isCaptureViewOffsetHeld = false;
+    bool isCaptureFocused = true;
+    bool isFrameDeclined = false;
     // The pointer-lock mode (private 7403) as the last delivery published it.
     // The verdict is asked on an edge of it, not on every delivery: a flood
     // delivers hundreds of times a second, and each ask is a model lock the
@@ -446,6 +477,9 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     // Scrollback viewport offset: 0 = live tail, up scrolls into history (clamped to
     // scrollbackCount). Selection coords are VISIBLE-grid rows/columns read through it.
     int viewOffset = 0;
+    double pointerX = 0;
+    double pointerY = 0;
+    bool isPointerPositionKnown = false;
     std::uint64_t searchRevealGeneration = 0;
     std::uint32_t searchRevealEpoch = 0;
     // Portable mouse text selection through Core's Terminal-bound facade —
@@ -454,8 +488,22 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     Ubiquitty::Selection::Session selection;
     float lastCursorBlinkAlpha = 1.0f; // last painted blink phase (onTick repaint gate)
     Ubiquitty::Rendering::CursorPresentation cursorPresentation;
+    double cursorPresentationBypassUntil = 0;
+    std::uint32_t lastScrollIndicatorTick = 0;
     Ubiquitty::Rendering::RemoteViewportPlacement presentation;
     Ubiquitty::FloatSize presentationViewport;
+    // The layout belongs to the frame this pane presents, not the renderer's
+    // last pane. Row vectors retain capacity and only shaped rows hold extents.
+    std::vector<std::vector<Ubiquitty::Rendering::LetterExtent>> presentedLetters;
+    Ubiquitty::GridSize presentedGridSize {};
+    Ubiquitty::FloatSize presentedCellPixels {};
+
+    [[nodiscard]] std::span<const Ubiquitty::Rendering::LetterExtent> presentedRowLetters(int row) const
+    {
+        return row >= 0 && row < static_cast<int>(presentedLetters.size())
+            ? std::span<const Ubiquitty::Rendering::LetterExtent>(presentedLetters[static_cast<std::size_t>(row)])
+            : std::span<const Ubiquitty::Rendering::LetterExtent> {};
+    }
     Ubiquitty::Linux::PaneViewportPublisher viewportPublisher;
     guint cursorPresentationSource = 0;
     guint ptySource = 0; // GLib fd-watch tag draining this pane's PTY (0 = none)
@@ -656,7 +704,10 @@ struct PaneReferents {
     Ubiquitty::Linux::LinuxCapabilityPolicy capabilityPolicy;
 };
 
-struct App : PaneReferents {
+struct App : PaneReferents, std::enable_shared_from_this<App> {
+    std::atomic<bool> isClosing { false };
+    std::mutex sourcesLock;
+    std::set<GSource*> sources;
     ~App()
     {
         // Renderer-owned sheets borrow the faces, which are still alive here.
@@ -677,9 +728,15 @@ struct App : PaneReferents {
     // ---- window + chrome ----
     GtkApplication* application = nullptr; // the bell notification is sent through it
     GtkWidget* window = nullptr;
+    GtkCssProvider* chromeProvider = nullptr;
+    GdkDisplay* chromeDisplay = nullptr;
+    std::string chromeScopeClass;
+    std::optional<std::uint32_t> omarchyAccent;
     GtkWidget* paneContainer = nullptr; // holds the active tab's pane widget tree (one leaf, or GtkPaned)
     GtkWidget* tabStrip = nullptr;
     GtkWidget* menuButton = nullptr;
+    GtkWidget* scrollIndicator = nullptr;
+    guint scrollIndicatorSource = 0;
     GtkWidget* progressBar = nullptr; // GtkDrawingArea, can't-target so input passes through
     GtkWidget* searchBar = nullptr;
     GtkWidget* searchEntry = nullptr;
@@ -688,6 +745,7 @@ struct App : PaneReferents {
     GtkWidget* inspectorLabel = nullptr;
     GtkWidget* accessibleTerminal = nullptr;
     GtkIMContext* imContext = nullptr; // input method (dead keys / compose / CJK)
+    bool hasInputMethodPreedit = false;
     GtkWidget* focusedPicture = nullptr; // the FOCUSED pane's GtkPicture (alias of activePane()->picture)
     bool isFullScreen = false; // window fullscreen state (F11 toggles; macOS toggleFullScreen parity)
     std::string lastTitle;
@@ -751,12 +809,12 @@ struct App : PaneReferents {
 
     // ---- fonts + rendering ----
     bool isVulkanReady = false;
-    std::optional<Ubiquitty::Linux::FreeTypeRasterizer> glyphRasterizer;
+    std::shared_ptr<Ubiquitty::Linux::SharedFontResources> sharedFonts;
+    std::shared_ptr<Ubiquitty::Linux::FreeTypeRasterizer> glyphRasterizer;
     // The bitmap font and the toggle target. Optional so it can be built with the
     // configured line spacing once that is known: default-constructed it carries
     // none, and switching to it would change the row height under the user.
     std::optional<Ubiquitty::Rendering::UnifontRasterizer> unifontRasterizer;
-    std::optional<Ubiquitty::Rendering::BoxDrawingRasterizer> boxRasterizer;
     bool areFontsSetUp = false;
     Ubiquitty::Rendering::FontRasterizerKind fontRasterizerKind = Ubiquitty::Rendering::FontRasterizerKind::Native;
     int fontPixelSize = 16; // live FreeType pixel size (zoomed at runtime); seeded in setupFonts
@@ -799,6 +857,7 @@ struct App : PaneReferents {
     double hoverX = 0;
     double hoverY = 0;
     bool isHoverPointKnown = false;
+    GdkModifierType hoverModifiers = static_cast<GdkModifierType>(0);
 
     // ---- pointer lock (DECSET 7403) ----
     // The OS-level grab; at most one is ever live, so this is per-app rather
@@ -832,6 +891,9 @@ struct App : PaneReferents {
     std::string beamFindQuery;
     bool wasBeamInFindScope = false;
     int liveThemeIndex = -1;
+    std::optional<std::string> configuredThemeName;
+    std::string liveThemeName;
+    std::string appliedThemePalette;
     const Ubiquitty::Preferences::Values* config = nullptr;
     // What the live configuration document could not apply, as the bar under
     // the panes says it; empty when it applied whole. Held apart from the bar
@@ -847,11 +909,13 @@ struct App : PaneReferents {
     // ---- the panes and the model that owns them ----
     // PaneID -> LinuxPane projection of the model's panes.
     std::map<PaneID, LinuxPane*> paneByID;
-    // The `-e` command this process was started with, owned by main for the
-    // whole run, and whether a pane has taken it. The FIRST pane runs it; a new
-    // tab or split is the user asking for another shell, and re-running the
+    // The invocation this window owns, and whether a pane has taken its
+    // command. The first pane runs it; a new tab or split is the user asking
+    // for another shell, and re-running the
     // child there is behaviour a `-e` script cannot undo.
-    const Ubiquitty::Runtime::LaunchRequest* launchRequest = nullptr;
+    std::optional<Ubiquitty::Runtime::LaunchRequest> launchRequest;
+    std::string windowApplicationID;
+    std::string launchDirectory;
     bool didConsumeLaunchRequest = false;
     // Heap-owned so each LinuxPane keeps a STABLE address: TerminalRuntime is
     // non-movable (owns unique_ptr Terminal/Stream + a CheckedPtr) and each pane's
@@ -898,13 +962,298 @@ double cursorPresentationInterval(GtkWidget*);
 // outliving them — not the position of a line.
 static_assert(std::is_base_of_v<PaneReferents, App>, "the panes' referents must be a base of App, so no member reordering can outlive them");
 
-// The one instance. Owned here rather than by main so a GTK callback -- which
-// carries no state of its own -- can reach it, and constructed on first use so
-// nothing depends on the order two definitions happen to appear in.
+// GTK dispatch and worker posts carry the window they belong to. Nesting a
+// callback from another window temporarily changes that context, then restores it.
+struct WindowApps {
+    std::shared_ptr<App> headless;
+    std::vector<std::shared_ptr<App>> windows;
+};
+
+WindowApps& windowApps()
+{
+    static WindowApps instances;
+    return instances;
+}
+
+App*& currentWindowApp()
+{
+    static thread_local App* current = nullptr;
+    return current;
+}
+
+class AppScope {
+public:
+    explicit AppScope(App& owner)
+        : m_owner(owner.shared_from_this())
+        , m_previous(currentWindowApp())
+    {
+        currentWindowApp() = &owner;
+    }
+    ~AppScope() { currentWindowApp() = m_previous; }
+    AppScope(const AppScope&) = delete;
+    AppScope& operator=(const AppScope&) = delete;
+
+private:
+    std::shared_ptr<App> m_owner;
+    App* m_previous;
+};
+
+App& defaultApp()
+{
+    auto& owner = windowApps().headless;
+    if (!owner)
+        owner = std::make_shared<App>();
+    return *owner;
+}
+
 App& app()
 {
-    static App instance;
-    return instance;
+    return currentWindowApp() ? *currentWindowApp() : defaultApp();
+}
+
+App& createWindowApp()
+{
+    auto instance = std::make_shared<App>();
+    App& result = *instance;
+    windowApps().windows.push_back(std::move(instance));
+    return result;
+}
+
+App* appForWindow(GtkWindow* window)
+{
+    return static_cast<App*>(g_object_get_data(G_OBJECT(window), "ubiquitty-window-state"));
+}
+
+struct WindowSourceCallback {
+    std::shared_ptr<App> owner;
+    GSource* source;
+    GSourceFunc callback;
+    gpointer data;
+    GDestroyNotify destroy;
+};
+
+gboolean dispatchWindowSource(gpointer data)
+{
+    auto& call = *static_cast<WindowSourceCallback*>(data);
+    AppScope scope(*call.owner);
+    return call.owner->isClosing ? G_SOURCE_REMOVE : call.callback(call.data);
+}
+
+void destroyWindowSource(gpointer data)
+{
+    std::unique_ptr<WindowSourceCallback> call(static_cast<WindowSourceCallback*>(data));
+    AppScope scope(*call->owner);
+    if (call->destroy)
+        call->destroy(call->data);
+    {
+        const std::scoped_lock lock(call->owner->sourcesLock);
+        call->owner->sources.erase(call->source);
+    }
+    g_source_unref(call->source);
+}
+
+guint attachWindowSource(GSource* source, GSourceFunc callback, gpointer data, GDestroyNotify destroy)
+{
+    auto call = std::make_unique<WindowSourceCallback>(WindowSourceCallback { app().shared_from_this(), source, callback, data, destroy });
+    g_source_set_callback(source, dispatchWindowSource, call.release(), destroyWindowSource);
+    {
+        const std::scoped_lock lock(app().sourcesLock);
+        app().sources.insert(source); // owns the source's initial reference
+    }
+    return g_source_attach(source, nullptr);
+}
+
+guint windowTimeoutAdd(guint milliseconds, GSourceFunc callback, gpointer data)
+{
+    return attachWindowSource(g_timeout_source_new(milliseconds), callback, data, nullptr);
+}
+
+guint windowIdleAddFull(gint priority, GSourceFunc callback, gpointer data, GDestroyNotify destroy)
+{
+    GSource* source = g_idle_source_new();
+    g_source_set_priority(source, priority);
+    return attachWindowSource(source, callback, data, destroy);
+}
+
+struct WindowFDCallback {
+    GUnixFDSourceFunc callback;
+    gpointer data;
+};
+
+gboolean dispatchWindowFD(gint descriptor, GIOCondition condition, gpointer data)
+{
+    auto& call = *static_cast<WindowSourceCallback*>(data);
+    AppScope scope(*call.owner);
+    auto& file = *static_cast<WindowFDCallback*>(call.data);
+    return call.owner->isClosing ? G_SOURCE_REMOVE : file.callback(descriptor, condition, file.data);
+}
+
+guint windowUnixFDAdd(gint descriptor, GIOCondition condition, GUnixFDSourceFunc callback, gpointer data, gint priority = G_PRIORITY_DEFAULT)
+{
+    GSource* source = g_unix_fd_source_new(descriptor, condition);
+    g_source_set_priority(source, priority);
+    auto file = std::make_unique<WindowFDCallback>(WindowFDCallback { callback, data });
+    auto call = std::make_unique<WindowSourceCallback>(WindowSourceCallback { app().shared_from_this(), source, nullptr, file.release(),
+        +[](gpointer value) { delete static_cast<WindowFDCallback*>(value); } });
+    g_source_set_callback(source, G_SOURCE_FUNC(dispatchWindowFD), call.release(), destroyWindowSource);
+    {
+        const std::scoped_lock lock(app().sourcesLock);
+        app().sources.insert(source);
+    }
+    return g_source_attach(source, nullptr);
+}
+
+struct WindowChildCallback {
+    GChildWatchFunc callback;
+    gpointer data;
+};
+
+guint windowChildWatchAdd(GPid pid, GChildWatchFunc callback, gpointer data)
+{
+    GSource* source = g_child_watch_source_new(pid);
+    auto child = std::make_unique<WindowChildCallback>(WindowChildCallback { callback, data });
+    auto call = std::make_unique<WindowSourceCallback>(WindowSourceCallback { app().shared_from_this(), source, nullptr, child.release(),
+        +[](gpointer value) { delete static_cast<WindowChildCallback*>(value); } });
+    g_source_set_callback(source, G_SOURCE_FUNC(+[](GPid pid, gint status, gpointer value) {
+        auto& call = *static_cast<WindowSourceCallback*>(value);
+        AppScope scope(*call.owner);
+        auto& child = *static_cast<WindowChildCallback*>(call.data);
+        if (call.owner->isClosing)
+            g_spawn_close_pid(pid);
+        else
+            child.callback(pid, status, child.data);
+    }),
+        call.release(), destroyWindowSource);
+    // Reaping belongs to the process: closing its initiating window only
+    // suppresses UI completion, not the watch which must collect the child.
+    return g_source_attach(source, nullptr);
+}
+
+struct WindowTickCallback {
+    std::shared_ptr<App> owner;
+    GtkTickCallback callback;
+    gpointer data;
+    GDestroyNotify destroy;
+};
+
+guint windowTickAdd(GtkWidget* widget, GtkTickCallback callback, gpointer data, GDestroyNotify destroy)
+{
+    auto call = std::make_unique<WindowTickCallback>(WindowTickCallback { app().shared_from_this(), callback, data, destroy });
+    return gtk_widget_add_tick_callback(widget, +[](GtkWidget* target, GdkFrameClock* clock, gpointer value) -> gboolean {
+            auto& tick = *static_cast<WindowTickCallback*>(value);
+            AppScope scope(*tick.owner);
+            return tick.owner->isClosing ? G_SOURCE_REMOVE : tick.callback(target, clock, tick.data); }, call.release(), +[](gpointer value) {
+            std::unique_ptr<WindowTickCallback> tick(static_cast<WindowTickCallback*>(value));
+            if (tick->destroy)
+                tick->destroy(tick->data); });
+}
+
+void cancelWindowSources(App& owner)
+{
+    std::vector<GSource*> pending;
+    {
+        const std::scoped_lock lock(owner.sourcesLock);
+        for (GSource* source : owner.sources)
+            pending.push_back(g_source_ref(source));
+    }
+    for (GSource* source : pending) {
+        g_source_destroy(source);
+        g_source_unref(source);
+    }
+}
+
+// GTK closures retain their window context as well as their original user
+// data. Background windows keep routing input and paint into their own model.
+struct WindowSignalClosure {
+    GCClosure closure;
+    App* owner;
+    bool allowsClosing;
+};
+
+enum class WindowSignalLifetime {
+    OpenWindowOnly,
+    IncludesClosing,
+};
+
+GClosure* makeWindowSignalClosure(GCallback callback, gpointer userData, GConnectFlags flags, WindowSignalLifetime lifetime = WindowSignalLifetime::OpenWindowOnly)
+{
+    auto* context = reinterpret_cast<WindowSignalClosure*>(g_closure_new_simple(sizeof(WindowSignalClosure), userData));
+    context->owner = &app();
+    context->allowsClosing = lifetime == WindowSignalLifetime::IncludesClosing;
+    auto* retainedOwner = new std::shared_ptr<App>(app().shared_from_this());
+    g_closure_add_finalize_notifier(&context->closure.closure, retainedOwner, +[](gpointer data, GClosure*) { delete static_cast<std::shared_ptr<App>*>(data); });
+    context->closure.callback = reinterpret_cast<gpointer>(callback);
+    context->closure.closure.derivative_flag = (flags & G_CONNECT_SWAPPED) != 0;
+    g_closure_set_marshal(&context->closure.closure, +[](GClosure* closure, GValue* result, guint count, const GValue* parameters, gpointer hint, gpointer marshalData) {
+            auto* context = reinterpret_cast<WindowSignalClosure*>(closure);
+            AppScope scope(*context->owner);
+            if (context->owner->isClosing && !context->allowsClosing)
+                return;
+            g_cclosure_marshal_generic(closure, result, count, parameters, hint, marshalData); });
+    return &context->closure.closure;
+}
+
+gulong windowSignalConnect(gpointer instance, const gchar* signal, GCallback callback, gpointer userData)
+{
+    return g_signal_connect_closure(instance, signal, makeWindowSignalClosure(callback, userData, G_CONNECT_DEFAULT), FALSE);
+}
+
+gulong windowLifecycleSignalConnect(gpointer instance, const gchar* signal, GCallback callback, gpointer userData)
+{
+    return g_signal_connect_closure(instance, signal, makeWindowSignalClosure(callback, userData, G_CONNECT_DEFAULT, WindowSignalLifetime::IncludesClosing), FALSE);
+}
+
+gulong windowSignalConnectObject(gpointer instance, const gchar* signal, GCallback callback, gpointer object, GConnectFlags flags)
+{
+    GClosure* closure = makeWindowSignalClosure(callback, object, flags);
+    g_object_watch_closure(G_OBJECT(object), closure);
+    return g_signal_connect_closure(instance, signal, closure, (flags & G_CONNECT_AFTER) != 0);
+}
+
+struct WindowDrawContext {
+    std::shared_ptr<App> owner;
+    GtkDrawingAreaDrawFunc function;
+    gpointer data;
+    GDestroyNotify destroy;
+};
+
+void windowDrawingAreaSetDrawFunc(GtkDrawingArea* area, GtkDrawingAreaDrawFunc function, gpointer data, GDestroyNotify destroy)
+{
+    auto* context = new WindowDrawContext { app().shared_from_this(), function, data, destroy };
+    gtk_drawing_area_set_draw_func(area, +[](GtkDrawingArea* area, cairo_t* cr, int width, int height, gpointer data) {
+            auto& context = *static_cast<WindowDrawContext*>(data);
+            AppScope scope(*context.owner);
+            if (!context.owner->isClosing)
+                context.function(area, cr, width, height, context.data); }, context, +[](gpointer data) {
+            std::unique_ptr<WindowDrawContext> context(static_cast<WindowDrawContext*>(data));
+            if (context->destroy)
+                context->destroy(context->data); });
+}
+
+struct WindowAsyncContext {
+    std::shared_ptr<App> owner;
+    GAsyncReadyCallback function;
+    gpointer data;
+    GDestroyNotify discard;
+};
+
+void discardPendingClipboardRead(gpointer);
+
+gpointer windowAsyncData(GAsyncReadyCallback function, gpointer data, GDestroyNotify discard = nullptr)
+{
+    return new WindowAsyncContext { app().shared_from_this(), function, data, discard };
+}
+
+void onWindowAsyncReady(GObject* source, GAsyncResult* result, gpointer data)
+{
+    std::unique_ptr<WindowAsyncContext> context(static_cast<WindowAsyncContext*>(data));
+    AppScope scope(*context->owner);
+    if (context->owner->isClosing) {
+        if (context->discard)
+            context->discard(context->data);
+        return;
+    }
+    context->function(source, result, context->data);
 }
 
 // PaneID -> LinuxPane projection of the window model.
@@ -949,6 +1298,9 @@ void notePointerLockChordFromKeyEvent(guint keyval, GdkModifierType state, Ubiqu
 // The hover hand, forward-declared for onKeyPressed / onKeyReleased, which
 // re-ask it when Ctrl goes down or up.
 void updateHoverForModifierKey(guint keyval, GdkModifierType state, Ubiquitty::Keys::KeyEventType edge);
+void updateHoverCursor(double x, double y, GdkModifierType state);
+void updatePaneHoverCursor(LinuxPane&, double x, double y, GdkModifierType state);
+void publishHoveredLink(LinuxPane&, const Ubiquitty::Rendering::FrameHoverLink&);
 
 LinuxPane* paneForID(PaneID id)
 {
@@ -1277,8 +1629,8 @@ void onWindowRealized(GtkWidget* window, gpointer)
         // Size notifications wake an idle frame clock without subscribing to
         // every layout pass. The weak object connection follows the window's
         // lifetime; unrealizing it destroys the source surface.
-        g_signal_connect_object(surface, "notify::width", G_CALLBACK(onWindowSurfaceSizeChanged), window, G_CONNECT_DEFAULT);
-        g_signal_connect_object(surface, "notify::height", G_CALLBACK(onWindowSurfaceSizeChanged), window, G_CONNECT_DEFAULT);
+        windowSignalConnectObject(surface, "notify::width", G_CALLBACK(onWindowSurfaceSizeChanged), window, G_CONNECT_DEFAULT);
+        windowSignalConnectObject(surface, "notify::height", G_CALLBACK(onWindowSurfaceSizeChanged), window, G_CONNECT_DEFAULT);
     }
 }
 
@@ -1287,6 +1639,21 @@ void onWindowRealized(GtkWidget* window, gpointer)
 // the first point the window's scale_factor reflects its monitor.
 void onWindowMappedRelaxSize(GtkWidget* window, gpointer picture)
 {
+#ifdef GDK_WINDOWING_WAYLAND
+    // GDK creates the Wayland toplevel during its map handler. Its application
+    // ID setter is a no-op at GtkWidget::realize; set it here before the first
+    // content buffer commits, so compositor launch rules see the requested ID.
+    if (GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(window)); surface && GDK_IS_WAYLAND_TOPLEVEL(surface)
+        && !app().windowApplicationID.empty())
+        gdk_wayland_toplevel_set_application_id(GDK_TOPLEVEL(surface), app().windowApplicationID.c_str());
+#endif
+    // Once the compositor has allocated the launch size, keep it as the
+    // floating window's default before dropping the temporary minimum. A
+    // picture with no frame yet has no natural size to preserve it itself.
+    const int width = gtk_widget_get_width(window);
+    const int height = gtk_widget_get_height(window);
+    if (width > 0 && height > 0)
+        gtk_window_set_default_size(GTK_WINDOW(window), width, height);
     if (picture)
         gtk_widget_set_size_request(GTK_WIDGET(picture), -1, -1);
     onScaleFactorChanged(G_OBJECT(window), nullptr, nullptr);
@@ -1362,7 +1729,7 @@ void pasteClipboard(GdkClipboard* clipboard, Ubiquitty::ClipboardBuffer buffer)
         armPTYWriteDrain(activePane());
         return;
     }
-    gdk_clipboard_read_text_async(clipboard, nullptr, onClipboardPasted, nullptr);
+    gdk_clipboard_read_text_async(clipboard, nullptr, onWindowAsyncReady, windowAsyncData(onClipboardPasted, nullptr));
 }
 
 // Find bar (Ctrl+F): a GtkSearchBar over the portable Core ScrollSearch engine —
@@ -1384,6 +1751,8 @@ bool openLinkAtCell(int row, int column, GdkModifierType state, int pressCount);
 // `Screen::clampViewOffset`; distinct name because this one mutates a pane
 // rather than returning a value, and a shared name makes the two
 // indistinguishable to any tree-wide rename.
+void noteScrollIndicatorActivity(LinuxPane&);
+
 void clampActivePaneViewOffset(const Ubiquitty::Terminal* term)
 {
     const auto hold = holdPaneModel(*activePane());
@@ -1411,6 +1780,23 @@ void clampActivePaneViewOffset(const Ubiquitty::Terminal* term)
 // it 1:1 (no blurry upscale). Layout + pointer math instead use the LOGICAL cell.
 float logicalCellWidth() { return app().rasterContext.cellWidth() / static_cast<float>(app().scale); }
 float logicalCellHeight() { return app().rasterContext.cellHeight() / static_cast<float>(app().scale); }
+
+// Resolve the whole grid before publishing pixels. Font changes alter the
+// cell metrics without changing GTK's allocation, and the program must see
+// those two changes in one winsize rather than a pixel report for the old grid.
+bool updatePaneGridFromAllocation(LinuxPane& pane)
+{
+    if (!pane.picture)
+        return false;
+    const Ubiquitty::GridSize grid = Ubiquitty::Rendering::gridFromViewport(
+        { static_cast<float>(gtk_widget_get_width(pane.picture)), static_cast<float>(gtk_widget_get_height(pane.picture)) },
+        {}, 0.0f, { logicalCellWidth(), logicalCellHeight() }, Ubiquitty::Rendering::GridFloor::None);
+    if (grid.columns < 1 || grid.rows < 1 || (grid.columns == pane.columns && grid.rows == pane.rows))
+        return false;
+    pane.columns = grid.columns;
+    pane.rows = grid.rows;
+    return true;
+}
 
 bool publishPanePixelGeometry(LinuxPane& pane)
 {
@@ -1463,19 +1849,7 @@ bool publishPanePixelGeometry(LinuxPane& pane)
 // CPU<->GPU oracle) and giving both seam-free procedural box glyphs.
 Ubiquitty::Rendering::GlyphRasterizer& currentRasterizer()
 {
-    Ubiquitty::Rendering::GlyphRasterizer* base;
-    if (app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::Native && app().glyphRasterizer && app().glyphRasterizer->ready())
-        base = &*app().glyphRasterizer;
-    else
-        base = &*app().unifontRasterizer;
-    if (!app().boxRasterizer)
-        app().boxRasterizer.emplace(*base);
-    else
-        app().boxRasterizer->setInner(*base);
-    // A shade-style change is a typography change, so the sheets that baked
-    // the old slots are rebuilt before the next fault reaches this.
-    app().boxRasterizer->setShadeStyle(app().appliedRenderConfiguration.shadeStyle);
-    return *app().boxRasterizer;
+    return *app().sharedFonts->rasterizer(app().fontRasterizerKind);
 }
 
 // Build the FreeType rasterizer once (so the runtime toggle can switch to it) and
@@ -1521,16 +1895,85 @@ double deviceFontPixelsPerPoint()
     return Ubiquitty::Linux::fontPixelsPerPoint(app().fontDPI, app().scale);
 }
 
+Ubiquitty::Linux::SharedFontRequest sharedFontRequest()
+{
+    Ubiquitty::Linux::SharedFontRequest request;
+    request.pixelSize = deviceFontPixelSize();
+    request.pointSize = app().fontSizePoints;
+    request.pixelsPerPoint = deviceFontPixelsPerPoint();
+    request.deviceScale = app().scale;
+    request.lineSpacing = app().lineSpacingPixels;
+    request.tracking = app().trackingPixels;
+    request.uprightWeight = app().uprightWeight;
+    request.boldWeight = app().boldWeight;
+    request.widthPercent = app().widthPercent;
+    request.bitmapScale = Ubiquitty::Rendering::unifontScaleForRequestedSize(app().fontSizePoints, request.pixelsPerPoint);
+    guint generation = 0;
+    if (GtkSettings* settings = gtk_settings_get_default())
+        g_object_get(settings, "gtk-fontconfig-timestamp", &generation, nullptr);
+    request.catalogGeneration = generation;
+    request.family = app().fontFamily;
+    request.fallbackFamily = app().fallbackFontName;
+    request.fallbackPath = app().bundledFallbackPath;
+    request.primaryPath = bundledFontPathForFamily(app().fontFamily);
+    request.variations = app().fontVariations;
+    request.features = app().fontFeatures;
+    request.ligatures = app().ligatures;
+    request.preferences = loadPreferences();
+    return request;
+}
+
+void acquireSharedFonts()
+{
+    app().sharedFonts = Ubiquitty::Linux::SharedFontResources::acquire(sharedFontRequest());
+    app().glyphRasterizer = app().sharedFonts->nativeFace();
+}
+
+int largestMonitorCellBudget()
+{
+    GdkDisplay* display = gdk_display_get_default();
+    if (!display)
+        return 0;
+    const auto metrics = currentRasterizer().cellMetrics();
+    if (metrics.cellWidth <= 0 || metrics.cellHeight <= 0)
+        return 0;
+    GListModel* monitors = gdk_display_get_monitors(display);
+    std::uint64_t largest = 0;
+    for (guint index = 0; index < g_list_model_get_n_items(monitors); ++index) {
+        auto* monitor = GDK_MONITOR(g_list_model_get_item(monitors, index));
+        GdkRectangle geometry {};
+        gdk_monitor_get_geometry(monitor, &geometry);
+        g_object_unref(monitor);
+        // Capacity follows the largest display at this font configuration,
+        // rather than each window's viewport, so compatible windows share it.
+        const auto columns = static_cast<std::uint64_t>(std::max(0.0, std::floor(static_cast<double>(geometry.width) * app().scale / metrics.cellWidth)));
+        const auto rows = static_cast<std::uint64_t>(std::max(0.0, std::floor(static_cast<double>(geometry.height) * app().scale / metrics.cellHeight)));
+        largest = std::max(largest, columns * rows);
+    }
+    return static_cast<int>(std::min<std::uint64_t>(largest, std::numeric_limits<int>::max()));
+}
+
+void configureSharedGlyphRenderer(Ubiquitty::Linux::VulkanRenderer& renderer)
+{
+    renderer.setSharedGlyphRasterizer(app().sharedFonts->rasterizer(app().fontRasterizerKind),
+        app().sharedFonts->configuration(app().fontRasterizerKind), largestMonitorCellBudget());
+}
+
 void publishPaneTypography(LinuxPane& pane)
 {
     if (!pane.session)
         return;
+    const std::string actualFamily = app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::Native
+            && app().glyphRasterizer && app().glyphRasterizer->ready()
+        ? app().glyphRasterizer->familyName()
+        : "GNU Unifont";
+    (void)pane.session->publishActualFont(actualFamily, app().fontSizePoints);
     const auto& configuration = app().rasterContext.renderConfiguration();
     const double zoom = configuration.fontSizePoints > 0 ? app().fontSizePoints / configuration.fontSizePoints : 1;
     const double size = Ubiquitty::Rendering::proportionalFacePointSize(app().fontSizePoints, configuration.proportionalFontSizePoints * zoom);
     const auto catalog = pane.richText.fontCatalog();
     pane.session->setFontCatalogProvider(catalog.function, catalog.context);
-    pane.session->publishTypography(pane.richText.configure(app().fontFamily, configuration.proportionalFontFamily.string(),
+    pane.session->publishTypography(pane.richText.configure(actualFamily, configuration.proportionalFontFamily.string(),
         currentRasterizer().cellMetrics(), size, deviceFontPixelSize() / deviceFontPixelsPerPoint(), deviceFontPixelsPerPoint()));
 }
 
@@ -1660,7 +2103,6 @@ void setupFonts()
     // binary, which is reached by its path rather than by name.
     std::string fallbackFontName = linuxSymbolFallbackName(configuration);
     const std::string bundledFallbackPath = bundledFallbackFontPath();
-    const std::string bundledPrimaryPath = bundledFontPathForFamily(fontFamily);
 
     // Font point size — 12pt (16px at 96 DPI) by default; config [font] size overrides it, and the
     // UBIQUITTY_FONT_SIZE env overrides config. The cell is DERIVED from the face at
@@ -1722,7 +2164,7 @@ void setupFonts()
     app().rasterContext.resetSoftwareRenderer();
     app().vulkan.rebuildAtlas();
     Ubiquitty::Linux::emplaceBitmapFace(app().unifontRasterizer, app().fontSizePoints, deviceFontPixelsPerPoint(), spacing);
-    app().glyphRasterizer.emplace(deviceFontPixelSize(), fontFamily, fallbackFontName, bundledFallbackPath, bundledPrimaryPath, app().scale, app().lineSpacingPixels, app().trackingPixels, app().uprightWeight, app().boldWeight, app().widthPercent, app().fontVariations, app().fontFeatures, app().ligatures, Ubiquitty::Preferences::buildFontRoutePreferences(config));
+    acquireSharedFonts();
     Ubiquitty::Linux::configureFontRouting(deviceFontPixelSize(), config);
     // Font family selection owns the rasterizer choice. A failed native-font
     // load still falls back to the embedded rasterizer so text remains usable.
@@ -1744,18 +2186,21 @@ void setupFonts()
 }
 
 // Re-inject the current-mode rasterizer into both backends and rebuild their glyph
-// atlas / CPU renderer so a runtime font swap takes effect. The next onTick
-// re-derives the grid from the new cell dims; app().isRepaintPending forces a redraw.
+// atlas / CPU renderer so a runtime font swap takes effect. A mounted pane's
+// allocated grid is resolved before publishing the new metrics to its program.
 void applyFontMode()
 {
     Ubiquitty::Rendering::GlyphRasterizer& chosen = currentRasterizer();
     app().rasterContext.setGlyphRasterizer(chosen);
-    app().vulkan.setGlyphRasterizer(chosen);
-    app().vulkan.setLigatureRasterizer(chosen);
+    configureSharedGlyphRenderer(app().vulkan);
     app().rasterContext.resetSoftwareRenderer();
     app().vulkan.rebuildAtlas();
     for (const auto& pane : app().panes) {
+        pane->captureConfiguration.reset();
+        pane->pendingCapture.reset();
         publishPaneTypography(*pane);
+        if (pane->picture && gtk_widget_get_parent(pane->picture))
+            updatePaneGridFromAllocation(*pane);
         publishPanePixelGeometry(*pane);
     }
     requestRepaint();
@@ -1781,7 +2226,7 @@ void applyFontZoom(int newPixelSize)
     // Release every borrowed-face cache before replacing its owner.
     app().rasterContext.resetSoftwareRenderer();
     app().vulkan.rebuildAtlas();
-    app().glyphRasterizer.emplace(deviceFontPixelSize(), app().fontFamily, app().fallbackFontName, app().bundledFallbackPath, bundledFontPathForFamily(app().fontFamily), app().scale, app().lineSpacingPixels, app().trackingPixels, app().uprightWeight, app().boldWeight, app().widthPercent, app().fontVariations, app().fontFeatures, app().ligatures, Ubiquitty::Preferences::buildFontRoutePreferences(loadPreferences()));
+    acquireSharedFonts();
     applyFontMode();
 }
 
@@ -1956,7 +2401,7 @@ void scheduleHeldFrame(LinuxPane& pane)
         return;
     if (const std::optional<std::uint64_t> due = pane.session->publishHeldFrameIfDue()) {
         const guint milliseconds = static_cast<guint>(std::clamp<std::uint64_t>((*due + 999) / 1000, 1, G_MAXUINT));
-        pane.heldFrameSource = g_timeout_add(milliseconds, onHeldFrameDue, &pane);
+        pane.heldFrameSource = windowTimeoutAdd(milliseconds, onHeldFrameDue, &pane);
     }
 }
 
@@ -2029,9 +2474,11 @@ void applyPaneDelivery(LinuxPane& pane, const PaneDelivery& delivery)
             refreshBeamFindScope();
         requestRepaint();
     }
+    const auto* shown = app().model->paneTree(app().model->activeSurface());
+    const bool isPaneVisible = &pane == activePane() || (shown && shown->holdsPane(static_cast<int>(paneIDForPane(&pane))));
+    if (delivery.didOutputArrive && isPaneVisible)
+        requestRepaint();
     if (&pane == activePane()) {
-        if (delivery.didOutputArrive)
-            requestRepaint();
         partStartMicros = Ubiquitty::PAL::monotonicMicros();
         applyWindowTitle(delivery.didTitleChange || delivery.didDirectoryChange || delivery.didProcessStateChange);
         app().perfWindow.hopTitleSeconds += elapsedSince(partStartMicros);
@@ -2060,8 +2507,9 @@ gboolean onIngestEventsDue(gpointer data)
 void onIngestDrainSignal(void* context)
 {
     auto* pane = static_cast<LinuxPane*>(context);
+    AppScope scope(*pane->ownerApp);
     auto hop = std::make_unique<Ubiquitty::WeakPtr<LinuxPane>>(pane->weakPtr());
-    g_idle_add_full(G_PRIORITY_DEFAULT, onIngestEventsDue, hop.release(),
+    windowIdleAddFull(G_PRIORITY_DEFAULT, onIngestEventsDue, hop.release(),
         [](gpointer data) { delete static_cast<Ubiquitty::WeakPtr<LinuxPane>*>(data); });
 }
 
@@ -2116,6 +2564,7 @@ void serviceIngestEvents(LinuxPane& pane)
 // session's transport cannot be polled — a remote attachment, say.
 void beginPaneIngest(LinuxPane& pane)
 {
+    pane.ownerApp = &app();
     if (pane.isIngesting || !pane.session)
         return;
     pane.session->setDrainSignal(&pane, onIngestDrainSignal);
@@ -2141,6 +2590,89 @@ void endPaneIngest(LinuxPane& pane)
     pane.isIngesting = false;
     pane.session->stopIngest();
     pane.session->setDrainSignal(nullptr, nullptr);
+}
+
+void releaseChromeTheme(App& owner)
+{
+    if (owner.chromeProvider && owner.chromeDisplay)
+        gtk_style_context_remove_provider_for_display(owner.chromeDisplay, GTK_STYLE_PROVIDER(owner.chromeProvider));
+    g_clear_object(&owner.chromeProvider);
+    g_clear_object(&owner.chromeDisplay);
+}
+
+void closeWindowApp(App& owner)
+{
+    AppScope scope(owner);
+    if (owner.isClosing.exchange(true))
+        return;
+    if (owner.pointerLockPane)
+        applyPointerLock(Ubiquitty::Input::PointerLockVerdict::Release);
+    if (owner.tickCallbackID && owner.paneContainer) {
+        gtk_widget_remove_tick_callback(owner.paneContainer, owner.tickCallbackID);
+        owner.tickCallbackID = 0;
+    }
+    for (const auto& pane : owner.panes)
+        endPaneIngest(*pane);
+    cancelWindowSources(owner);
+    owner.caretBlinkSource = 0;
+    owner.scrollIndicatorSource = 0;
+    owner.accessiblePublishSource = 0;
+    owner.pointerLockChordTimerID = 0;
+    for (const auto& pane : owner.panes) {
+        pane->pendingCapture.reset();
+        pane->cursorPresentationSource = 0;
+        pane->ptySource = 0;
+        pane->ptyWriteSource = 0;
+        pane->heldFrameSource = 0;
+        if (pane->picture) {
+            gtk_picture_set_paintable(GTK_PICTURE(pane->picture), nullptr);
+            g_object_unref(pane->picture); // release the pane's ref_sink ownership
+            pane->picture = nullptr;
+        }
+    }
+    // GTK can retain an App and its private export image through the last frame.
+    // A closed view releases CPU caches and shared glyph leases independently.
+    owner.rasterContext.resetSoftwareRenderer();
+    owner.vulkan.rebuildAtlas();
+    const SurfaceID surface = owner.model->activeSurface();
+    if (surface != Layout::invalidSurface)
+        owner.model->closeWindowSurface(surface);
+    for (const auto& pane : owner.panes)
+        pane->session = nullptr;
+    owner.vulkan.releaseFontResources();
+    // GDK can retain the last frame's App after the view is gone. Frame pixels
+    // need the device, not a lease on its former native fonts and glyph masks.
+    if (owner.unifontRasterizer)
+        owner.rasterContext.setGlyphRasterizer(*owner.unifontRasterizer);
+    owner.glyphRasterizer.reset();
+    owner.sharedFonts.reset();
+    owner.paneByID.clear();
+    if (owner.inspectorWindow)
+        gtk_window_destroy(GTK_WINDOW(owner.inspectorWindow));
+    owner.inspectorWindow = nullptr;
+    owner.focusedPicture = nullptr;
+    releaseChromeTheme(owner);
+    if (owner.imContext) {
+        gtk_im_context_set_client_widget(owner.imContext, nullptr);
+        g_clear_object(&owner.imContext);
+    }
+    owner.configurationSubscription.reset();
+}
+
+gboolean onWindowCloseRequested(GtkWindow*, gpointer)
+{
+    closeWindowApp(app());
+    return FALSE;
+}
+
+void onWindowUnrealized(GtkWidget* widget, gpointer)
+{
+    auto retained = app().shared_from_this();
+    closeWindowApp(*retained);
+    retained->window = nullptr;
+    retained->paneContainer = nullptr;
+    g_object_set_data(G_OBJECT(widget), "ubiquitty-window-state", nullptr);
+    std::erase_if(windowApps().windows, [&](const auto& owner) { return owner.get() == retained.get(); });
 }
 
 // Periodic title refresh: the foreground process + working directory change with
@@ -2172,6 +2704,10 @@ Ubiquitty::Linux::CursorOverlay resolveCursorOverlay(const Ubiquitty::Terminal* 
     cursor.shape = state.shape;
     cursor.blinkAlpha = state.blinkAlpha;
     cursor.focused = term != nullptr && term->windowFocused != 0;
+    if (app().window && !gtk_window_is_active(GTK_WINDOW(app().window))) {
+        cursor.focused = false;
+        cursor.blinkAlpha = 1.0f;
+    }
     // All three shapes follow GTK's blink setting and idle timeout. The
     // bounded paint phase keeps each fade below the display's refresh rate.
     if (term)
@@ -2195,10 +2731,17 @@ void scheduleCaretBlink(const Ubiquitty::Terminal* term)
     if (microseconds <= 0)
         return;
     const guint milliseconds = static_cast<guint>(std::clamp<std::int64_t>((microseconds + 999) / 1000, 1, 60000));
-    app().caretBlinkSource = g_timeout_add(milliseconds, [](gpointer) -> gboolean {
+    app().caretBlinkSource = windowTimeoutAdd(milliseconds, [](gpointer) -> gboolean {
         app().caretBlinkSource = 0;
         requestRepaint(RepaintCause::CursorStep);
         return G_SOURCE_REMOVE; }, nullptr);
+}
+
+// Input feedback must not wait behind the redraw filter: the cell just typed
+// belongs behind the caret, not inside the previous held block cursor.
+void noteCursorInput(LinuxPane& pane, double nowSeconds = static_cast<double>(g_get_monotonic_time()) / 1e6)
+{
+    pane.cursorPresentationBypassUntil = nowSeconds + Ubiquitty::Rendering::cursorPresentationInputBypassSeconds;
 }
 
 Ubiquitty::Linux::CursorOverlay resolvePresentedCursorOverlay(LinuxPane& pane, double nowSeconds, double intervalSeconds)
@@ -2223,7 +2766,8 @@ Ubiquitty::Linux::CursorOverlay resolvePresentedCursorOverlay(LinuxPane& pane, d
         frame.geometry.isAlternateActive = term->screens.isUsingAlternateScreen;
         frame.geometry.hasStatusLineOnBottomRow = pane.viewOffset == 0 && term->statusLineType != 0;
     }
-    Ubiquitty::Rendering::CursorRenderState presented = pane.cursorPresentation.update(frame, nowSeconds, intervalSeconds, false);
+    Ubiquitty::Rendering::CursorRenderState presented = pane.cursorPresentation.update(frame, nowSeconds, intervalSeconds,
+        nowSeconds < pane.cursorPresentationBypassUntil);
     if (term && presented.row >= 0 && presented.row < term->rows) {
         presented.lineAttribute = Ubiquitty::Screen::rowLineAttribute(term, Ubiquitty::Screen::scrollbackCount(term) + presented.row);
     }
@@ -2252,7 +2796,7 @@ void scheduleCursorPresentation(LinuxPane& pane, double nowSeconds)
         return;
     }
     const guint milliseconds = static_cast<guint>(std::clamp(std::ceil((deadline - nowSeconds) * 1000.0), 1.0, 1000.0));
-    pane.cursorPresentationSource = g_timeout_add(milliseconds, onCursorPresentationDue, &pane);
+    pane.cursorPresentationSource = windowTimeoutAdd(milliseconds, onCursorPresentationDue, &pane);
 }
 
 double cursorPresentationInterval(GtkWidget* picture)
@@ -2310,47 +2854,104 @@ std::vector<Ubiquitty::CommandPalette::PaletteOption> themeOptionLabels()
 // A translucent window has no themed chrome to paint: its widgets are
 // transparent so the compositor shows the desktop through, and an opaque
 // background installed here would fill in exactly what that asks to see through.
+
+void refreshOmarchyAccent(int index)
+{
+    const auto read = [index]() -> std::optional<std::uint32_t> {
+        const auto* theme = index >= 0 ? Ubiquitty::Themes::get(index) : nullptr;
+        if (!theme || !theme->name || std::string_view(theme->name) != "Omarchy")
+            return std::nullopt;
+        const std::string path = std::string(g_get_user_state_dir()) + "/omarchy/current/theme/colors.toml";
+        const auto closeFile = [](FILE* file) { std::fclose(file); };
+        std::unique_ptr<FILE, decltype(closeFile)> input(std::fopen(path.c_str(), "rb"), closeFile);
+        if (!input)
+            return std::nullopt;
+        constexpr std::size_t maximum = 64 * 1024;
+        std::array<char, maximum + 1> bytes {};
+        const auto count = std::fread(bytes.data(), 1, bytes.size(), input.get());
+        return std::ferror(input.get()) || count > maximum ? std::nullopt
+                                                           : Ubiquitty::Linux::parseOmarchyAccent(std::string_view(bytes.data(), count));
+    };
+    const auto accent = read();
+    if (app().omarchyAccent != accent) {
+        app().omarchyAccent = accent;
+        if (app().scrollIndicator)
+            gtk_widget_queue_draw(app().scrollIndicator);
+    }
+}
+
+void refreshNativeLinkAccentColor()
+{
+    // Ask the toolkit's native link widget, so hovered links follow GTK's
+    // accent even when the terminal palette and desktop theme differ.
+    GtkWidget* probe = gtk_link_button_new("https://example.invalid");
+    g_object_ref_sink(probe);
+    GdkRGBA nativeColor {};
+    gtk_widget_get_color(probe, &nativeColor);
+    g_object_unref(probe);
+    const Ubiquitty::Rendering::Vec4 color { nativeColor.red, nativeColor.green, nativeColor.blue, nativeColor.alpha };
+    const auto& previous = app().rasterContext.frameLinkAccentColor();
+    if (previous.x == color.x && previous.y == color.y && previous.z == color.z && previous.w == color.w)
+        return;
+    app().rasterContext.setFrameLinkAccentColor(color);
+    for (const auto& pane : app().panes) {
+        const auto hold = holdPaneModel(*pane);
+        if (auto* terminal = pane->session->terminal(); terminal && terminal->grid)
+            terminal->grid->requestFullRedraw();
+        pane->pendingCapture.reset();
+        pane->captureConfiguration.reset();
+        pane->isFrameDeclined = false;
+    }
+    requestRepaint();
+}
+
 void applyChromeTheme(int index)
 {
+    refreshOmarchyAccent(index);
     const Ubiquitty::Themes::Theme* theme = index >= 0 ? Ubiquitty::Themes::get(index) : nullptr;
-    if (!theme || app().rasterContext.backgroundOpacity() < 1.0f)
+    if (!theme || !app().window)
         return;
-
-    // One provider for the process, reloaded rather than replaced. A provider is
-    // added to the display for as long as the display lives, so minting a fresh
-    // one per theme change stacks every theme the window has ever worn and
-    // leaves only the last of them readable.
-    static GtkCssProvider* provider = nullptr;
-    if (!provider) {
-        provider = gtk_css_provider_new();
-        gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    refreshNativeLinkAccentColor();
+    const bool isTranslucent = app().rasterContext.backgroundOpacity() < 1.0f;
+    gtk_widget_add_css_class(app().window, "ubiquitty-themed-bg");
+    if (app().paneContainer)
+        gtk_widget_add_css_class(app().paneContainer, "ubiquitty-themed-bg");
+    if (isTranslucent)
+        gtk_widget_add_css_class(app().window, "ubiquitty-translucent");
+    else
+        gtk_widget_remove_css_class(app().window, "ubiquitty-translucent");
+    // Display providers see every window. Scope each rule to this window and
+    // keep its colors local, so choosing a theme cannot retint another window.
+    if (app().chromeScopeClass.empty())
+        app().chromeScopeClass = "ubiquitty-window-" + std::to_string(reinterpret_cast<std::uintptr_t>(&app()));
+    gtk_widget_add_css_class(app().window, app().chromeScopeClass.c_str());
+    if (!app().chromeProvider) {
+        app().chromeProvider = gtk_css_provider_new();
+        app().chromeDisplay = GDK_DISPLAY(g_object_ref(gtk_widget_get_display(app().window)));
+        gtk_style_context_add_provider_for_display(app().chromeDisplay, GTK_STYLE_PROVIDER(app().chromeProvider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
-
     const Ubiquitty::ColorRGBA bg = theme->defaultBackground;
     const Ubiquitty::ColorRGBA fg = theme->defaultForeground;
-    char css[2048];
-    g_snprintf(css, sizeof(css),
-        "@define-color ubiquitty_background #%02x%02x%02x;"
-        "@define-color ubiquitty_foreground #%02x%02x%02x;"
-        ".ubiquitty-themed-bg { background-color: #%02x%02x%02x; }"
-        " headerbar.ubiquitty-titlebar {"
-        " background: #%02x%02x%02x; color: #%02x%02x%02x;"
-        " box-shadow: none; border: none; }"
-        // Recolour the window-control button icons (symbolic) so close/min/max
-        // track the theme foreground on the themed bar.
-        " headerbar.ubiquitty-titlebar button { color: #%02x%02x%02x; }"
-        " .ubiquitty-tabs { background: @ubiquitty_background; color: @ubiquitty_foreground;"
-        " padding: 4px 8px; border-bottom: 1px solid alpha(@ubiquitty_foreground, 0.12); }"
-        " .ubiquitty-tabs button { background: transparent; color: inherit; box-shadow: none;"
-        " border: 1px solid transparent; border-radius: 6px; padding: 4px 10px; min-height: 26px; }"
-        " .ubiquitty-tabs button:hover { background: alpha(@ubiquitty_foreground, 0.08); }"
-        " .ubiquitty-tabs button:checked { background: alpha(@ubiquitty_foreground, 0.12);"
-        " border-bottom-color: @ubiquitty_foreground; }"
-        " .ubiquitty-tabs button:focus-visible { outline: 2px solid @ubiquitty_foreground; outline-offset: -2px; }"
-        " .ubiquitty-tabs popover contents { background: @ubiquitty_background; color: @ubiquitty_foreground; }",
-        bg.red, bg.green, bg.blue, fg.red, fg.green, fg.blue,
-        bg.red, bg.green, bg.blue, bg.red, bg.green, bg.blue, fg.red, fg.green, fg.blue, fg.red, fg.green, fg.blue);
-    gtk_css_provider_load_from_string(provider, css);
+    std::array<char, 8> background {};
+    std::array<char, 8> foreground {};
+    g_snprintf(background.data(), background.size(), "#%02x%02x%02x", bg.red, bg.green, bg.blue);
+    g_snprintf(foreground.data(), foreground.size(), "#%02x%02x%02x", fg.red, fg.green, fg.blue);
+    const std::string backdrop = isTranslucent ? "transparent" : background.data();
+    const std::string ink = foreground.data();
+    const std::string scope = "." + app().chromeScopeClass;
+    const std::string tabs = scope + " .ubiquitty-tabs";
+    const std::string header = scope + " headerbar.ubiquitty-titlebar";
+    const std::string css = (isTranslucent ? scope + ", " + scope + " * { background-color: transparent; }" : std::string {})
+        + scope + ".ubiquitty-themed-bg, " + scope + " .ubiquitty-themed-bg { background-color: " + backdrop + "; }"
+        + header + " { background: " + backdrop + "; color: " + ink + "; box-shadow: none; border: none; }"
+        + header + " button { color: " + ink + "; }"
+        + tabs + " { background: " + backdrop + "; color: " + ink + "; padding: 4px 8px; border-bottom: 1px solid alpha(" + ink + ", 0.12); }"
+        + tabs + " button { background: transparent; color: inherit; box-shadow: none; border: 1px solid transparent; border-radius: 6px; padding: 4px 10px; min-height: 26px; }"
+        + tabs + " button:hover { background: alpha(" + ink + ", 0.08); }"
+        + tabs + " button:checked { background: alpha(" + ink + ", 0.12); border-bottom-color: " + ink + "; }"
+        + tabs + " button:focus-visible { outline: 2px solid " + ink + "; outline-offset: -2px; }"
+        + tabs + " popover contents { background: " + backdrop + "; color: " + ink + "; }";
+    gtk_css_provider_load_from_string(app().chromeProvider, css.c_str());
 }
 
 // Apply a theme to every pane, not just the focused one. Each pane owns its own
@@ -2363,6 +2964,8 @@ void applyThemeToAllPanes(int index)
     if (!theme)
         return;
     app().liveThemeIndex = index;
+    app().liveThemeName = theme->name;
+    app().appliedThemePalette = theme->serializeTOML();
     applyChromeTheme(index);
     for (const std::unique_ptr<LinuxPane>& pane : app().panes) {
         if (!pane)
@@ -2370,6 +2973,11 @@ void applyThemeToAllPanes(int index)
         if (Ubiquitty::Terminal* term = pane->session->terminal()) {
             const auto hold = holdPaneModel(*pane);
             (void)Ubiquitty::Themes::applyThemeToTerminal(*term, index);
+            if (term->grid)
+                term->grid->requestFullRedraw();
+            pane->pendingCapture.reset();
+            pane->captureConfiguration.reset();
+            pane->isFrameDeclined = false;
         }
     }
 }
@@ -2807,7 +3415,7 @@ Ubiquitty::Rendering::HintToastGeometry layoutHintForFrame(const Ubiquitty::Runt
     if (left != 0 && !app().isHintRepaintBooked) {
         app().isHintRepaintBooked = true;
         // One tick past the expiry, so the frame lands on its far side.
-        g_timeout_add(static_cast<guint>((left + 1) * 1000 / 60), [](gpointer) -> gboolean {
+        windowTimeoutAdd(static_cast<guint>((left + 1) * 1000 / 60), [](gpointer) -> gboolean {
             app().isHintRepaintBooked = false;
             requestRepaint();
             return G_SOURCE_REMOVE; }, nullptr);
@@ -2917,6 +3525,8 @@ GdkPaintable* makeFramePaintable(GdkTexture* texture, const graphene_rect_t& bou
     return GDK_PAINTABLE(frame);
 }
 
+GdkTexture* makeMemoryFrameTexture(std::shared_ptr<App>, std::unique_ptr<std::vector<uint8_t>>, int width, int height);
+
 // Exercise the presentation node itself, without a Vulkan device or a window.
 // A stale frame keeps its origin and pixel size as the allocation changes.
 int smokeFramePaintable()
@@ -2980,6 +3590,31 @@ int smokeFramePaintable()
         }
         g_object_unref(paintable);
     }
+    // GDK may release a window's pixels on a render worker with no AppScope.
+    // Returning them must use the pool captured at creation, not that thread's
+    // default window or whichever window happens to be active later.
+    auto owner = std::make_shared<App>();
+    auto buffer = std::make_unique<std::vector<uint8_t>>(4, 255);
+    const auto* originalBuffer = buffer.get();
+    GdkTexture* pooledTexture = makeMemoryFrameTexture(owner, std::move(buffer), 1, 1);
+    std::thread reclaimer([pooledTexture] { g_object_unref(pooledTexture); });
+    reclaimer.join();
+    const bool didReturnToOwner = owner->framePool.take().get() == originalBuffer;
+    if (!didReturnToOwner)
+        ++failures;
+    g_print("smoke-frame-paintable: worker-release-owner=%s\n", didReturnToOwner ? "PASS" : "FAIL");
+    auto lastBuffer = std::make_unique<std::vector<uint8_t>>(4, 255);
+    GdkTexture* lastTexture = makeMemoryFrameTexture(owner, std::move(lastBuffer), 1, 1);
+    std::weak_ptr<App> lifetime = owner;
+    owner.reset();
+    const bool didKeepOwnerAlive = !lifetime.expired();
+    std::thread lastReclaimer([lastTexture] { g_object_unref(lastTexture); });
+    lastReclaimer.join();
+    const bool didReleaseOwner = lifetime.expired();
+    if (!didKeepOwnerAlive || !didReleaseOwner)
+        ++failures;
+    g_print("smoke-frame-paintable: texture-retains-owner=%d final-release-destroys-owner=%d\n", didKeepOwnerAlive, didReleaseOwner);
+
     g_print("smoke-frame-paintable: %s (%d failures; 1x/2x shrink, same size and grow)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }
@@ -2987,10 +3622,17 @@ int smokeFramePaintable()
 // A texture over the frame's host pixels. GTK reads the bytes lazily, so they
 // outlive this frame: the pooled buffer rides inside the GBytes and comes back
 // to the pool when GTK lets the bytes go.
-GdkTexture* makeMemoryFrameTexture(std::unique_ptr<std::vector<uint8_t>> frameBuffer, int width, int height)
+struct MemoryFrameRelease {
+    std::shared_ptr<App> owner;
+    std::unique_ptr<std::vector<uint8_t>> buffer;
+};
+
+GdkTexture* makeMemoryFrameTexture(std::shared_ptr<App> owner, std::unique_ptr<std::vector<uint8_t>> frameBuffer, int width, int height)
 {
-    std::vector<uint8_t>* frame = frameBuffer.release();
-    GBytes* bytes = g_bytes_new_with_free_func(frame->data(), frame->size(), [](gpointer pointer) { app().framePool.give(std::unique_ptr<std::vector<uint8_t>>(static_cast<std::vector<uint8_t>*>(pointer))); }, frame);
+    auto* release = new MemoryFrameRelease { std::move(owner), std::move(frameBuffer) };
+    GBytes* bytes = g_bytes_new_with_free_func(release->buffer->data(), release->buffer->size(), [](gpointer pointer) {
+        std::unique_ptr<MemoryFrameRelease> owned(static_cast<MemoryFrameRelease*>(pointer));
+        owned->owner->framePool.give(std::move(owned->buffer)); }, release);
     GdkTexture* texture = gdk_memory_texture_new(width, height, GDK_MEMORY_R8G8B8A8, bytes, static_cast<gsize>(width) * 4);
     g_bytes_unref(bytes);
     return texture;
@@ -3004,6 +3646,7 @@ constexpr std::uint64_t drmModifierLinear = 0;
 // What the dma-buf texture's destroy notify needs: the descriptor to close and
 // the token that frees the renderer's slot.
 struct ExportedFrameRelease {
+    std::shared_ptr<App> owner;
     int fileDescriptor;
     std::uint64_t releaseToken;
 };
@@ -3013,7 +3656,7 @@ struct ExportedFrameRelease {
 // the destroy notify closes it and returns the slot when GTK lets it go.
 // Null when GTK refuses the import, with the descriptor closed and the slot
 // returned.
-GdkTexture* makeExportedFrameTexture(GtkWidget* picture, const Ubiquitty::Linux::VulkanRenderer::ExportedFrame& frame)
+GdkTexture* makeExportedFrameTexture(std::shared_ptr<App> owner, GtkWidget* picture, const Ubiquitty::Linux::VulkanRenderer::ExportedFrame& frame)
 {
     GdkDmabufTextureBuilder* builder = gdk_dmabuf_texture_builder_new();
     gdk_dmabuf_texture_builder_set_display(builder, gtk_widget_get_display(picture));
@@ -3027,19 +3670,19 @@ GdkTexture* makeExportedFrameTexture(GtkWidget* picture, const Ubiquitty::Linux:
     gdk_dmabuf_texture_builder_set_fd(builder, 0, frame.fileDescriptor);
     gdk_dmabuf_texture_builder_set_stride(builder, 0, frame.stride);
     gdk_dmabuf_texture_builder_set_offset(builder, 0, frame.offset);
-    auto* release = new ExportedFrameRelease { frame.fileDescriptor, frame.releaseToken };
+    auto* release = new ExportedFrameRelease { std::move(owner), frame.fileDescriptor, frame.releaseToken };
     GError* error = nullptr;
     GdkTexture* texture = gdk_dmabuf_texture_builder_build(builder, [](gpointer data) {
         std::unique_ptr<ExportedFrameRelease> owned(static_cast<ExportedFrameRelease*>(data));
         ::close(owned->fileDescriptor);
-        app().vulkan.releaseExportedFrame(owned->releaseToken); }, release, &error);
+        owned->owner->vulkan.releaseExportedFrame(owned->releaseToken); }, release, &error);
     g_object_unref(builder);
     if (!texture) {
         g_warning("dma-buf import refused (%s); frames read back for this run", error ? error->message : "no reason given");
         if (error)
             g_error_free(error);
         ::close(release->fileDescriptor);
-        app().vulkan.releaseExportedFrame(release->releaseToken);
+        release->owner->vulkan.releaseExportedFrame(release->releaseToken);
         delete release;
     }
     return texture;
@@ -3069,14 +3712,20 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     auto* const hold = outerHold ? outerHold : &ownHold;
     Ubiquitty::Runtime::FrameDemand demand;
     demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
-    if (pane.session->liveReadDecline(*term, demand).decline != Ubiquitty::Runtime::FrameDecline::None)
+    if (pane.isFrameDeclined || (!pane.pendingCapture && pane.session->liveReadDecline(*term, demand).decline != Ubiquitty::Runtime::FrameDecline::None))
         return false;
     const int frameViewOffset = paneFrameViewOffset(pane, *term);
     std::unique_ptr<std::vector<uint8_t>> frameBuffer = app().framePool.take();
     std::vector<uint8_t>& rgba = *frameBuffer;
     int width = 0, height = 0;
     const double nowSeconds = static_cast<double>(g_get_monotonic_time()) / 1e6;
-    Ubiquitty::Linux::CursorOverlay cursor = resolvePresentedCursorOverlay(pane, nowSeconds, cursorPresentationInterval(picture));
+    Ubiquitty::Linux::CursorOverlay cursor = pane.pendingCapture ? resolveCursorOverlay(term)
+                                                                 : resolvePresentedCursorOverlay(pane, nowSeconds, cursorPresentationInterval(picture));
+    if (pane.pendingCapture) {
+        pane.pendingCapture->setCursorMixAlpha(cursor.blinkAlpha);
+        pane.pendingCapture->applyCursorPresentation(pane.cursorPresentation, nowSeconds, cursorPresentationInterval(picture),
+            nowSeconds < pane.cursorPresentationBypassUntil);
+    }
     scheduleCursorPresentation(pane, nowSeconds);
     if (&pane == activePane())
         scheduleCaretBlink(term);
@@ -3096,6 +3745,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
         chrome = layoutBeamForFrame(*term);
         hint = layoutHintForFrame(*pane.session, *term);
     }
+    app().rasterContext.setFrameHoverLink(pane.hoveredLink);
     app().rasterContext.setBeamChrome(&chrome);
     app().rasterContext.setHintChrome(&hint);
     const bool hasRichFrame = capturePaneRichText(pane, &cursor, frameViewOffset);
@@ -3109,8 +3759,12 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     // Both consume the same scrollback viewport offset + cursor (the CPU<->GPU oracle).
     // The placement's facts about the frame being drawn, read while the hold
     // stands so they describe this frame and not a later pass's.
-    const Ubiquitty::GridSize gridSize { term->columns, term->rows };
-    const Ubiquitty::CellPosition cursorPosition { term->screens.active->cursorY, term->screens.active->cursorX };
+    const Ubiquitty::GridSize gridSize = pane.pendingCapture
+        ? Ubiquitty::GridSize { pane.pendingCapture->columns(), pane.pendingCapture->rows() }
+        : Ubiquitty::GridSize { term->columns, term->rows };
+    const Ubiquitty::CellPosition cursorPosition = pane.pendingCapture
+        ? Ubiquitty::CellPosition { pane.pendingCapture->cursorRow(), pane.pendingCapture->cursorColumn() }
+        : Ubiquitty::CellPosition { term->screens.active->cursorY, term->screens.active->cursorX };
     const bool isProgramViewport = term->isTekModeActive || term->modes.fullscreenContent;
     const bool shouldFollowCursor = frameViewOffset == 0 && term->modes.isCursorVisible != 0;
     const Ubiquitty::Linux::ModelCaptureHandoff handoff {
@@ -3131,7 +3785,20 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     const bool shouldRenderOnGPU = app().isVulkanReady && !term->isTekModeActive;
     if (shouldRenderOnGPU && !hasRichFrame && app().vulkan.canExportFrames())
         app().vulkan.requestFrameExport();
-    bool ok = shouldRenderOnGPU ? app().vulkan.renderGrid(app().rasterContext, term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks, handoff) : app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks);
+    Ubiquitty::Rendering::FrameCapture::ViewTierOverrides capturedView;
+    if (pane.pendingCapture && pane.capturedSelectionSpanCount > 0) {
+        capturedView.selectionSpans = pane.capturedSelectionSpans.data();
+        capturedView.selectionSpanCount = pane.capturedSelectionSpanCount;
+        capturedView.selectionColor = pane.pendingCapture->selectionFillColor();
+        capturedView.isSelectionBehindText = pane.pendingCapture->isSelectionFillBehindText();
+        capturedView.hasSelectionForegroundOverride = pane.pendingCapture->hasSelectionForegroundOverride();
+        capturedView.selectionForeground = pane.pendingCapture->selectionForeground();
+    }
+    // Boundary frames own every byte the builder and image upload consume.
+    // Their CPU instance build must not block the next parser pass.
+    if (shouldRenderOnGPU && pane.pendingCapture && *hold)
+        (*hold)->release();
+    bool ok = shouldRenderOnGPU ? app().vulkan.renderGrid(app().rasterContext, term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks, handoff, pane.pendingCapture.get(), &capturedView) : app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks);
     const bool didDrawOnGPU = ok && shouldRenderOnGPU;
     const std::optional<Ubiquitty::Linux::VulkanRenderer::ExportedFrame> exportedFrame = didDrawOnGPU ? app().vulkan.takeExportedFrame() : std::nullopt;
     if (exportedFrame)
@@ -3140,8 +3807,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
         // A grid larger than any frame the device can draw is this frame's
         // size, not a failed GPU: a program's page length, a remote owner's
         // geometry or a large font put the model there, and the next grid that
-        // fits goes back to the GPU. The renderer declined it before its capture, so the hold
-        // still stands for the CPU raster. Any other failure — device lost, a
+        // fits goes back to the GPU. Any other failure — device lost, a
         // missing shader — must not freeze the window: the pane keeps its last
         // texture and every later frame fails the same way. That demotes to
         // the CPU raster once, for good; the exit path's teardown is gated on
@@ -3151,10 +3817,21 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
             g_warning("Vulkan render failed; demoting to the CPU raster for this run");
             app().isVulkanReady = false;
         }
+        // The GPU may have handed the model back before failing. The CPU
+        // fallback reads the current model throughout its raster pass.
+        hold->emplace(*pane.session);
         ok = app().rasterContext.rasterizeTerm(term, rgba, width, height, frameViewOffset, &pane.selection, &cursor, blinkTicks);
     }
     if (!ok)
         return true;
+    pane.presentedGridSize = gridSize;
+    pane.presentedCellPixels = { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) };
+    pane.presentedLetters.resize(static_cast<std::size_t>(gridSize.rows));
+    for (int row = 0; row < gridSize.rows; ++row) {
+        const auto letters = didDrawOnGPU ? app().vulkan.rowLetters(row) : app().rasterContext.rowLetters(row);
+        auto& saved = pane.presentedLetters[static_cast<std::size_t>(row)];
+        saved.assign(letters.begin(), letters.end());
+    }
     if (hasRichFrame) {
         const auto overlayHold = holdPaneModel(pane);
         pane.richText.composite(pane.richTextFrame, rgba, width, height,
@@ -3246,7 +3923,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
         }
     }
 
-    GdkTexture* texture = exportedFrame ? makeExportedFrameTexture(picture, *exportedFrame) : nullptr;
+    GdkTexture* texture = exportedFrame ? makeExportedFrameTexture(app().shared_from_this(), picture, *exportedFrame) : nullptr;
     if (exportedFrame && !texture) {
         // GTK refused the import: the frame exists only in GPU memory, so this
         // one is dropped, the export is switched off for the run, and the next
@@ -3256,7 +3933,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
         return true;
     }
     if (!texture)
-        texture = makeMemoryFrameTexture(std::move(frameBuffer), width, height);
+        texture = makeMemoryFrameTexture(app().shared_from_this(), std::move(frameBuffer), width, height);
     // The frame is drawn at its own size and clipped to the picture's
     // allocation, so a resize that has not yet produced its next frame shows the
     // old one unscaled instead of stretched to a different owner's grid. No
@@ -3686,6 +4363,12 @@ bool sendKey(guint keyval, guint keycode, GdkModifierType state)
     const int count = Ubiquitty::Runtime::encodeKey(activePane()->modes, activePane()->session->link(), press, bytes).length;
     if (count <= 0)
         return false;
+    if (Ubiquitty::Runtime::keyPressCountsAsUserActivity(press)) {
+        noteCursorInput(*activePane());
+        const auto hold = holdPaneModel(*activePane());
+        if (Ubiquitty::Modes::shouldSnapToTail(activePane()->session->terminal(), Ubiquitty::Modes::SnapTrigger::Keypress))
+            activePane()->viewOffset = 0;
+    }
     activePane()->session->sendInput({ bytes, static_cast<std::size_t>(count) });
     armPTYWriteDrain(activePane());
     return true;
@@ -3759,6 +4442,7 @@ void pasteText(std::string_view text)
 {
     if (text.empty())
         return;
+    noteCursorInput(*activePane());
     activePane()->session->sendPaste(std::string(text));
     armPTYWriteDrain(activePane());
 }
@@ -3802,6 +4486,7 @@ gboolean onFileDrop(GtkDropTarget*, const GValue* value, double, double, gpointe
     const std::string outputBuffer = assembleDroppedPaths(paths);
     if (outputBuffer.empty())
         return FALSE;
+    noteCursorInput(*pane);
     pane->session->sendInput(outputBuffer);
     armPTYWriteDrain(pane);
     return TRUE;
@@ -4547,7 +5232,8 @@ void onClipboardPasted(GObject* source, GAsyncResult* result, gpointer)
 {
     char* text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), result, nullptr);
     if (text) {
-        pasteText(text);
+        if (app().window && activePane())
+            pasteText(text);
         g_free(text);
     }
 }
@@ -4853,6 +5539,7 @@ void sendBytesToActivePane(const std::string& bytes)
 {
     if (bytes.empty())
         return;
+    noteCursorInput(*activePane());
     activePane()->session->sendInput(std::span<const char>(bytes.data(), bytes.size()));
     armPTYWriteDrain(activePane());
 }
@@ -4912,8 +5599,11 @@ void clearScrollbackAction()
 // Shift+PageUp both route through here with Core's one page amount.
 void offsetViewByLines(int lines)
 {
+    const int previousOffset = activePane()->viewOffset;
     activePane()->viewOffset += lines;
     clampActivePaneViewOffset(activePane()->session->terminal());
+    if (activePane()->viewOffset != previousOffset)
+        noteScrollIndicatorActivity(*activePane());
     requestRepaint();
 }
 
@@ -4933,6 +5623,7 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
 
     case ActionKind::SendBytes:
         if (!action.bytes.empty()) {
+            noteCursorInput(*activePane());
             activePane()->session->sendInput({ action.bytes.data(), action.bytes.size() });
             armPTYWriteDrain(activePane());
             activePane()->viewOffset = 0; // typing snaps to the live tail
@@ -4964,9 +5655,7 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
         offsetViewByLines(-page);
         break;
     case ActionKind::ScrollToTop:
-        activePane()->viewOffset = INT_MAX;
-        clampActivePaneViewOffset(activePane()->session->terminal());
-        requestRepaint();
+        offsetViewByLines(INT_MAX - activePane()->viewOffset);
         break;
     case ActionKind::ScrollToBottom:
         offsetViewByLines(-activePane()->viewOffset); // snap to the live tail
@@ -4994,14 +5683,12 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
     case ActionKind::ResetFontSize:
         applyFontZoom(app().defaultFontPixelSize);
         break;
-
     case ActionKind::IncreaseLineSpacing:
     case ActionKind::DecreaseLineSpacing: {
-        namespace Prefs = Ubiquitty::Preferences;
-        const double points = Prefs::Zoom::lineSpacingAfterPixelStep(app().lineSpacingPixels,
+        const double points = Ubiquitty::Preferences::Zoom::lineSpacingAfterPixelStep(app().lineSpacingPixels,
             deviceFontPixelsPerPoint(), action.kind == ActionKind::IncreaseLineSpacing ? 1 : -1);
-        (void)Prefs::configureOwnKey(Prefs::Key::FontLineSpacing,
-            Prefs::Value::ofNumber(Prefs::SerializeKind::Double, points));
+        (void)Ubiquitty::Preferences::configureOwnKey(Ubiquitty::Preferences::Key::FontLineSpacing,
+            Ubiquitty::Preferences::Value::ofNumber(Ubiquitty::Preferences::SerializeKind::Double, points));
         break;
     }
 
@@ -5024,6 +5711,7 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
         const std::string* body = Ubiquitty::Preferences::findMacroBody(Ubiquitty::Preferences::values(), action.name);
         std::string decoded;
         if (body && Ubiquitty::Input::decodeSendPayload(*body, decoded) && !decoded.empty()) {
+            noteCursorInput(*activePane());
             activePane()->session->sendInput(decoded);
             armPTYWriteDrain(activePane());
             activePane()->viewOffset = 0;
@@ -5135,6 +5823,38 @@ void rebuildFontsFromPreferences()
     app().rasterContext.resetSoftwareRenderer();
     app().vulkan.rebuildAtlas();
     const Ubiquitty::Rendering::RenderConfiguration configuration = Ubiquitty::Preferences::Effective::renderConfiguration(loadPreferences());
+    // The resolved family may change while a missing native face has left the
+    // window on its bitmap fallback. A manual bitmap toggle, in contrast,
+    // keeps a loaded native face and should survive unrelated typography edits.
+    const auto oldFamilyKind = Ubiquitty::Rendering::selectFontFamily(app().fontFamily).rasterizerKind;
+    const bool hasManualMode = app().glyphRasterizer && app().glyphRasterizer->ready()
+        && app().fontRasterizerKind != oldFamilyKind;
+    std::string family = configuration.fontFamily.string();
+    if (const char* environment = std::getenv("UBIQUITTY_FONT"))
+        family = environment;
+    const bool didFamilyChange = family != app().fontFamily;
+    app().fontFamily = std::move(family);
+    app().fallbackFontName = linuxSymbolFallbackName(configuration);
+    const auto selectedKind = Ubiquitty::Rendering::selectFontFamily(app().fontFamily).rasterizerKind;
+
+    // Compare configured sizes, not the zoomed size on the window. A save of
+    // another setting keeps a zoom, while an actual size edit updates both the
+    // live size and the reset target. An environment override wins on either
+    // side of the comparison just as it does at startup.
+    const auto configuredSize = [](const Ubiquitty::Rendering::RenderConfiguration& settings) {
+        double points = settings.fontSizePoints >= 4.0 && settings.fontSizePoints <= 256.0 ? settings.fontSizePoints : 12.0;
+        if (const char* environment = std::getenv("UBIQUITTY_FONT_SIZE")) {
+            const double parsed = std::strtod(environment, nullptr);
+            if (parsed >= 4.0 && parsed <= 256.0)
+                points = parsed;
+        }
+        return points;
+    };
+    if (configuredSize(configuration) != configuredSize(app().appliedRenderConfiguration)) {
+        app().fontSizePoints = configuredSize(configuration);
+        app().fontPixelSize = static_cast<int>(std::lround(app().fontSizePoints));
+        app().defaultFontPixelSize = app().fontPixelSize;
+    }
     // Spacing is configured in points and reaches both faces in device pixels,
     // so it scales with the display exactly as it does at startup. The bitmap
     // face is rebuilt with it in either mode: its cell carries the spacing.
@@ -5142,16 +5862,7 @@ void rebuildFontsFromPreferences()
     app().lineSpacingPixels = spacing.lineSpacingInPixels;
     app().trackingPixels = spacing.characterSpacingInPixels;
     Ubiquitty::Linux::emplaceBitmapFace(app().unifontRasterizer, app().fontSizePoints, deviceFontPixelsPerPoint(), spacing);
-    app().rasterContext.setEmbeddedBitmapScale(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::EmbeddedBitmap
-            ? Ubiquitty::Rendering::unifontScaleForRequestedSize(app().fontSizePoints, deviceFontPixelsPerPoint())
-            : 0);
     Ubiquitty::Linux::configureFontRouting(deviceFontPixelSize(), loadPreferences());
-    // Unifont is a bitmap face with no shaper, so it has no feature run to
-    // rebuild and `applyFontZoom` declines for the same reason.
-    if (app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::EmbeddedBitmap) {
-        applyFontMode();
-        return;
-    }
     app().fontFeatures = configuration.fontFeatures.string();
     app().fontVariations = configuration.fontVariations.string();
     app().ligatures = configuration.hasLigatures ? Ubiquitty::Linux::Ligatures::Enabled : Ubiquitty::Linux::Ligatures::Disabled;
@@ -5168,16 +5879,14 @@ void rebuildFontsFromPreferences()
     app().uprightWeight = configuration.fontWeight;
     app().boldWeight = configuration.boldFontWeight;
     app().widthPercent = configuration.fontWidthPercent;
-    // The size is not re-read here. app().fontSizePoints is also
-    // where applyFontZoom records a zoom step, so taking the configured size
-    // back would discard the zoom on any unrelated `[font]` edit. A size change
-    // that must take effect without a relaunch belongs on the zoom path, which
-    // already re-emplaces the rasterizer and re-derives the grid.
-    app().glyphRasterizer.emplace(deviceFontPixelSize(), app().fontFamily, app().fallbackFontName,
-        app().bundledFallbackPath, bundledFontPathForFamily(app().fontFamily), app().scale,
-        app().lineSpacingPixels, app().trackingPixels, app().uprightWeight, app().boldWeight,
-        app().widthPercent, app().fontVariations, app().fontFeatures, app().ligatures,
-        Ubiquitty::Preferences::buildFontRoutePreferences(loadPreferences()));
+    acquireSharedFonts();
+    const auto desiredKind = !didFamilyChange && hasManualMode ? app().fontRasterizerKind : selectedKind;
+    app().fontRasterizerKind = desiredKind == Ubiquitty::Rendering::FontRasterizerKind::Native && app().glyphRasterizer->ready()
+        ? Ubiquitty::Rendering::FontRasterizerKind::Native
+        : Ubiquitty::Rendering::FontRasterizerKind::EmbeddedBitmap;
+    app().rasterContext.setEmbeddedBitmapScale(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::EmbeddedBitmap
+            ? Ubiquitty::Rendering::unifontScaleForRequestedSize(app().fontSizePoints, deviceFontPixelsPerPoint())
+            : 0);
     applyFontMode();
 }
 
@@ -5242,7 +5951,7 @@ GtkWidget* makeConfigurationBar()
     gtk_action_bar_pack_start(GTK_ACTION_BAR(app().configurationBar), app().configurationLabel);
     GtkWidget* dismiss = gtk_button_new_with_label("Dismiss");
     gtk_widget_set_focus_on_click(dismiss, FALSE);
-    g_signal_connect(dismiss, "clicked", G_CALLBACK(onConfigurationBarDismissed), nullptr);
+    windowSignalConnect(dismiss, "clicked", G_CALLBACK(onConfigurationBarDismissed), nullptr);
     gtk_action_bar_pack_end(GTK_ACTION_BAR(app().configurationBar), dismiss);
     updateConfigurationBar();
     return app().configurationBar;
@@ -5253,6 +5962,7 @@ GtkWidget* makeConfigurationBar()
 // a redraw of everything — the frontend reads most keys where it uses them.
 void applyLiveConfiguration()
 {
+    refreshOmarchyAccent(app().liveThemeIndex);
     // Before the early return: the startup configure runs before the faces and
     // the window exist, and the bar shows the line it finds once it is built.
     showConfigurationDiagnostics();
@@ -5264,6 +5974,20 @@ void applyLiveConfiguration()
     applyProcessConfiguration(config);
     applyPerTerminalConfiguration(config);
     applyWindowGlobalRenderSettings(config);
+    const int configuredTheme = Ubiquitty::Runtime::launchThemeIndex(config);
+    const auto* configuredPalette = Ubiquitty::Themes::get(configuredTheme);
+    const std::string configuredName = configuredPalette ? configuredPalette->name : "";
+    const bool didConfiguredThemeChange = !app().configuredThemeName || *app().configuredThemeName != configuredName;
+    app().configuredThemeName = configuredName;
+    const int previousTheme = Ubiquitty::Themes::indexForName(app().liveThemeName.c_str());
+    const int selectedTheme = didConfiguredThemeChange || previousTheme < 0 ? configuredTheme : previousTheme;
+    const auto* theme = Ubiquitty::Themes::get(selectedTheme);
+    // A custom palette can change under the same name and index. An unrelated
+    // edit retains the user's live picker choice and application OSC colors.
+    if (theme && (selectedTheme != app().liveThemeIndex || app().appliedThemePalette != theme->serializeTOML()))
+        applyThemeToAllPanes(selectedTheme);
+    else
+        applyChromeTheme(selectedTheme);
     const Ubiquitty::Rendering::RenderConfiguration configuration = Ubiquitty::Preferences::Effective::renderConfiguration(config);
     if (!configuration.hasSameTypography(app().appliedRenderConfiguration))
         rebuildFontsFromPreferences();
@@ -5400,7 +6124,10 @@ gboolean onKeyPressed(GtkEventControllerKey* controller, guint keyval, guint key
 {
     if (doesMenuOwnKeys())
         return GDK_EVENT_PROPAGATE;
-    restartCaretBlink(true);
+    if (modifierVirtualKeyFor(keyval) == Ubiquitty::Keys::VirtualKey::None
+        && keyval != GDK_KEY_ISO_Level3_Shift && keyval != GDK_KEY_ISO_Level5_Shift
+        && keyval != GDK_KEY_Num_Lock && keyval != GDK_KEY_Scroll_Lock)
+        restartCaretBlink(true);
     updatePositionModifiers(keyval, state, Ubiquitty::Keys::KeyEventType::Press);
     updateHoverForModifierKey(keyval, state, Ubiquitty::Keys::KeyEventType::Press);
     // The break-out chord is native, above the key resolver and the host, so
@@ -5465,6 +6192,7 @@ gboolean onKeyPressed(GtkEventControllerKey* controller, guint keyval, guint key
             std::string utf8;
             Ubiquitty::Unicode::appendUTF8(utf8, compose.composed());
             activePane()->viewOffset = 0;
+            noteCursorInput(*activePane());
             activePane()->session->sendInput(utf8);
             armPTYWriteDrain(activePane());
             requestRepaint();
@@ -5551,13 +6279,23 @@ gboolean onKeyPressed(GtkEventControllerKey* controller, guint keyval, guint key
         return GDK_EVENT_STOP;
     }
 
+    Ubiquitty::Input::KeyChord defaultChord;
+    Ubiquitty::Input::BindingAction defaultAction;
+    if (mapKeyvalToChord(keyval, state, defaultChord)
+        && Ubiquitty::Input::resolveDefaultBinding(app().bindingTable, defaultChord, defaultAction)) {
+        executeBindingAction(defaultAction);
+        return GDK_EVENT_STOP;
+    }
+
     // Ctrl++ / Ctrl+= zoom the font in, Ctrl+- out, Ctrl+0 resets (View > Zoom
     // parity). No-op in Unifont mode. Consumed here.
-    if ((state & GDK_CONTROL_MASK) && (keyval == GDK_KEY_plus || keyval == GDK_KEY_equal || keyval == GDK_KEY_KP_Add)) {
+    if ((state & GDK_CONTROL_MASK)
+        && (((state & GDK_SHIFT_MASK) == 0 && (keyval == GDK_KEY_plus || keyval == GDK_KEY_equal)) || keyval == GDK_KEY_KP_Add)) {
         applyFontZoom(app().fontPixelSize + 1);
         return GDK_EVENT_STOP;
     }
-    if ((state & GDK_CONTROL_MASK) && (keyval == GDK_KEY_minus || keyval == GDK_KEY_KP_Subtract)) {
+    if ((state & GDK_CONTROL_MASK)
+        && (((state & GDK_SHIFT_MASK) == 0 && keyval == GDK_KEY_minus) || keyval == GDK_KEY_KP_Subtract)) {
         applyFontZoom(app().fontPixelSize - 1);
         return GDK_EVENT_STOP;
     }
@@ -5611,9 +6349,7 @@ gboolean onKeyPressed(GtkEventControllerKey* controller, guint keyval, guint key
         // Core's one page rule, shared with the macOS navigation chords.
         const int page = static_cast<int>(Ubiquitty::Keys::pageLinesForRows(activePane()->rows));
         if (keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) {
-            activePane()->viewOffset += (keyval == GDK_KEY_Page_Up) ? page : -page;
-            clampActivePaneViewOffset(activePane()->session->terminal());
-            requestRepaint();
+            offsetViewByLines(keyval == GDK_KEY_Page_Up ? page : -page);
             return GDK_EVENT_STOP;
         }
     }
@@ -5650,14 +6386,8 @@ gboolean onKeyPressed(GtkEventControllerKey* controller, guint keyval, guint key
             return GDK_EVENT_STOP;
     }
 
-    // Any key that sends input snaps the view back to the live tail, so typing
-    // returns to the prompt, when the Core's DEC-1011 scrollOnKeypress policy
-    // says so (shouldSnapToTail); otherwise a scrolled-back read holds.
-    {
-        const auto hold = holdPaneModel(*activePane());
-        if (Ubiquitty::Modes::shouldSnapToTail(activePane()->session->terminal(), Ubiquitty::Modes::SnapTrigger::Keypress))
-            activePane()->viewOffset = 0;
-    }
+    // sendKey snaps only input it actually encodes and classifies as user
+    // activity. A desktop shortcut's bare modifier must preserve scrollback.
     return sendKey(keyval, keycode, state) ? GDK_EVENT_STOP : GDK_EVENT_PROPAGATE;
 }
 
@@ -5694,6 +6424,10 @@ void onFocusEnter(GtkEventControllerFocus*, gpointer)
     activePane()->session->flushReplies();
     if (app().imContext)
         gtk_im_context_focus_in(app().imContext);
+    for (const auto& pane : app().panes) {
+        if (pane->isPointerPositionKnown)
+            updatePaneHoverCursor(*pane, pane->pointerX, pane->pointerY, static_cast<GdkModifierType>(0));
+    }
     // A backgrounded lock would trap a pointer no window owns; regaining
     // focus re-takes it without the program re-sending the mode.
     updatePointerLock();
@@ -5702,6 +6436,11 @@ void onFocusEnter(GtkEventControllerFocus*, gpointer)
 void onFocusLeave(GtkEventControllerFocus*, gpointer)
 {
     scheduleCaretBlink(nullptr);
+    app().hoverModifiers = static_cast<GdkModifierType>(0);
+    for (const auto& pane : app().panes) {
+        pane->hoverModifiers = static_cast<GdkModifierType>(0);
+        publishHoveredLink(*pane, {});
+    }
     activePane()->compose.reset();
     activePane()->keyPositionModifiers = 0;
     activePane()->session->setDesiredFocus(Ubiquitty::Modes::FocusState::Unfocused);
@@ -5759,7 +6498,7 @@ void bookPointerLockChordTick()
     const std::uint32_t ticks = pane->session->pointerLockChordTicksUntilDeadline();
     if (ticks == 0)
         return;
-    app().pointerLockChordTimerID = g_timeout_add(static_cast<guint>((ticks + 1) * 1000 / 60), onPointerLockChordTick, nullptr);
+    app().pointerLockChordTimerID = windowTimeoutAdd(static_cast<guint>((ticks + 1) * 1000 / 60), onPointerLockChordTick, nullptr);
 }
 
 // Reports one key event to the break-out chord and books its wake-up.
@@ -5929,8 +6668,14 @@ void reportPointerLockX11Motion(double widgetX, double widgetY, GdkModifierType 
 void onPointerLockWindowActiveNotify(GObject*, GParamSpec*, gpointer)
 {
     updatePointerLock();
-    if (app().window && !gtk_window_is_active(GTK_WINDOW(app().window)))
-        scheduleCaretBlink(nullptr);
+    if (app().window) {
+        const bool isActive = gtk_window_is_active(GTK_WINDOW(app().window));
+        activePane()->session->setDesiredFocus(isActive ? Ubiquitty::Modes::FocusState::Focused : Ubiquitty::Modes::FocusState::Unfocused);
+        if (isActive)
+            restartCaretBlink(false);
+        else
+            scheduleCaretBlink(nullptr);
+    }
     requestRepaint();
 }
 
@@ -5987,10 +6732,12 @@ void onIMCommit(GtkIMContext*, const char* text, gpointer)
 {
     if (!text || text[0] == '\0')
         return;
+    noteCursorInput(*activePane());
     activePane()->viewOffset = 0;
     activePane()->session->sendInput({ text, std::strlen(text) });
     armPTYWriteDrain(activePane());
     app().rasterContext.setPreedit(nullptr, 0);
+    app().hasInputMethodPreedit = false;
     requestRepaint();
 }
 
@@ -6002,6 +6749,7 @@ void onIMPreeditChanged(GtkIMContext* context, gpointer)
     int cursorPosition = 0; // glyph caret within the preedit; unused (we draw the whole run)
     gtk_im_context_get_preedit_string(context, &text, &attributes, &cursorPosition);
     const std::vector<std::uint32_t> codePoints = codePointsFromUTF8(text);
+    app().hasInputMethodPreedit = !codePoints.empty();
     app().rasterContext.setPreedit(codePoints.data(), static_cast<int>(codePoints.size()));
     if (attributes)
         pango_attr_list_unref(attributes);
@@ -6014,6 +6762,7 @@ void onIMPreeditChanged(GtkIMContext* context, gpointer)
 void onIMPreeditEnd(GtkIMContext*, gpointer)
 {
     app().rasterContext.setPreedit(nullptr, 0);
+    app().hasInputMethodPreedit = false;
     requestRepaint();
 }
 
@@ -6038,48 +6787,46 @@ void updateIMCursorLocation(Ubiquitty::CellPosition cursor)
 
 // Mouse reporting.
 
-// Map a pointer position (widget pixels) to a zero-based terminal cell, clamped
-// to the live grid. The cell is the font-derived runtime cell (same metric the
-// grid + window are sized at).
-// The pixel along the grid a widget point stands at, in device pixels from
-// the grid's left edge, through the picture placement.
-double gridXAtPoint(double x, double y)
+// Each pane keeps the letter positions of its own displayed frame. The shared
+// renderer may have built another pane since that picture was presented.
+double xInCellsAtPanePoint(const LinuxPane& pane, double x, double y, int row)
 {
-    const auto point = activePane()->presentation.picturePoint({ static_cast<float>(x * app().scale), static_cast<float>(y * app().scale) });
-    return static_cast<double>(point.x);
+    const auto hold = holdPaneModel(pane);
+    const auto point = pane.presentation.picturePoint({ static_cast<float>(x * app().scale), static_cast<float>(y * app().scale) });
+    const auto letters = pane.presentedRowLetters(row);
+    if (!letters.empty())
+        return Ubiquitty::Rendering::letterXInCells(letters, point.x);
+    const double pitch = pane.presentedCellPixels.width > 0 ? pane.presentedCellPixels.width : app().rasterContext.cellWidth();
+    const int columns = pane.presentedGridSize.columns > 0 ? pane.presentedGridSize.columns : pane.session->terminal()->columns;
+    return pitch > 0 ? std::clamp(point.x / pitch, 0.0, static_cast<double>(columns)) : 0;
 }
 
-// The column under a pixel along a row of the frame on screen: the letter
-// there where the primary face laid the row out as proportional runs, else
-// the column at the pitch. The renderer that drew the frame answers, GPU or
-// CPU, from the layout it kept (LetterLayout.h).
-int columnAtGridX(int row, double xInPixels)
+void cellAtPanePoint(const LinuxPane& pane, double x, double y, int& row, int& column)
 {
-    return app().isVulkanReady ? app().vulkan.columnAt(row, xInPixels) : app().rasterContext.columnAt(row, xInPixels);
-}
-
-// Where along its row a widget point stands, in cells, for the pointer fact:
-// on a row laid out as letters the letter under it plus the fraction crossed.
-double xInCellsAtPoint(double x, double y, int row)
-{
-    const double xInPixels = gridXAtPoint(x, y);
-    return app().isVulkanReady ? app().vulkan.xInCellsAt(row, xInPixels) : app().rasterContext.xInCellsAt(row, xInPixels);
+    // Convert widget points to device pixels, then undo the picture placement
+    // once. Hit testing always addresses the host's actual grid.
+    const auto* terminal = pane.session->terminal();
+    const auto hold = holdPaneModel(pane);
+    const auto point = pane.presentation.picturePoint({ static_cast<float>(x * app().scale), static_cast<float>(y * app().scale) });
+    const Ubiquitty::CellPosition cell = Ubiquitty::Rendering::pointToCell(point, {},
+        pane.presentedCellPixels.width > 0 ? pane.presentedCellPixels : Ubiquitty::FloatSize { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) },
+        pane.presentedGridSize.columns > 0 ? pane.presentedGridSize : terminal ? Ubiquitty::GridSize { terminal->columns, terminal->rows }
+                                                                               : Ubiquitty::GridSize {},
+        Ubiquitty::Rendering::RowClamp::Clamped);
+    row = cell.row;
+    // The row is the grid's; the column along it is the frame's, which on a
+    // proportional face's row is the letter under the point.
+    const auto letters = pane.presentedRowLetters(cell.row);
+    column = !letters.empty() ? Ubiquitty::Rendering::letterColumnAt(letters, point.x) : cell.column;
+    if (terminal) {
+        row = std::clamp(row, 0, std::max(terminal->rows - 1, 0));
+        column = std::clamp(column, 0, std::max(terminal->columns - 1, 0));
+    }
 }
 
 void cellAtPoint(double x, double y, int& row, int& column)
 {
-    // Convert widget points to device pixels, then undo the picture placement
-    // once. Hit testing always addresses the host's actual grid.
-    const auto* terminal = activePane()->session->terminal();
-    const auto hold = holdPaneModel(*activePane());
-    const auto point = activePane()->presentation.picturePoint({ static_cast<float>(x * app().scale), static_cast<float>(y * app().scale) });
-    const Ubiquitty::CellPosition cell = Ubiquitty::Rendering::pointToCell(point, {},
-        { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) },
-        terminal ? Ubiquitty::GridSize { terminal->columns, terminal->rows } : Ubiquitty::GridSize {}, Ubiquitty::Rendering::RowClamp::Clamped);
-    row = cell.row;
-    // The row is the grid's; the column along it is the frame's, which on a
-    // proportional face's row is the letter under the point.
-    column = terminal ? std::clamp(columnAtGridX(cell.row, static_cast<double>(point.x)), 0, std::max(terminal->columns - 1, 0)) : cell.column;
+    cellAtPanePoint(*activePane(), x, y, row, column);
 }
 
 // Map a pointer position (widget pixels) to the 1-based device-pixel coordinate
@@ -6123,44 +6870,15 @@ LinkSource linkURIAtCell(int row, int column, char* outputBuffer, int outputCapa
     if (!outputBuffer || outputCapacity < 1)
         return LinkSource::None;
     outputBuffer[0] = '\0';
-    const Ubiquitty::Terminal* term = activePane()->session->terminal();
-    if (!term)
+    if (!activePane()->session->resolveLinkAtVisibleCell(activePane()->viewOffset, row, column, Ubiquitty::Screen::LinkScanScope::Any))
         return LinkSource::None;
-    const auto hold = holdPaneModel(*activePane());
-
-    // OSC 8 hyperlink: the cell carries a link id; resolve it to the interned
-    // URI through the Terminal's link table.
-    const Ubiquitty::Cell* cell = Ubiquitty::Screen::visibleCell(term, activePane()->viewOffset, row, column);
-    if (cell) {
-        const uint16_t id = cell->linkID();
-        if (id != 0) {
-            const char* uri = Ubiquitty::Attributes::Hyperlinks::uri(term, id);
-            if (uri && uri[0] != '\0') {
-                int o = 0;
-                for (; uri[o] != '\0' && o < outputCapacity - 1; ++o)
-                    outputBuffer[o] = uri[o];
-                outputBuffer[o] = '\0';
-                return o > 0 ? LinkSource::Declared : LinkSource::None;
-            }
-        }
-    }
-
-    // No OSC 8 link: scan the row's codePoints for a bare URL covering `column`.
-    const int paneColumns = activePane()->columns;
-    if (column < 0 || column >= paneColumns)
-        return LinkSource::None;
-    std::vector<uint32_t> rowCodePoints(static_cast<std::size_t>(paneColumns));
-    const int viewOffset = activePane()->viewOffset;
-    for (int x = 0; x < paneColumns; ++x) {
-        const Ubiquitty::Cell* rc = Ubiquitty::Screen::visibleCell(term, viewOffset, row, x);
-        rowCodePoints[static_cast<std::size_t>(x)] = (rc != nullptr && rc->codePoint != 0) ? rc->codePoint : static_cast<uint32_t>(' ');
-    }
-    const bool isGuessed = Ubiquitty::Attributes::LinkRun::urlMatchSpanAtColumn(rowCodePoints.data(), paneColumns, column, { outputBuffer, static_cast<std::size_t>(outputCapacity) }).has_value();
-    return isGuessed ? LinkSource::Guessed : LinkSource::None;
+    const std::string uri = activePane()->session->resolvedLinkURI();
+    g_strlcpy(outputBuffer, uri.c_str(), static_cast<std::size_t>(outputCapacity));
+    return activePane()->session->resolvedLinkIsHyperlink() ? LinkSource::Declared : LinkSource::Guessed;
 }
 
 // Whether a primary click with these modifiers opens a link from this source.
-// Ctrl opens any link, as Command does on macOS. A plain click opens only what
+// Ctrl or Super opens any link, as Command does on macOS. A plain click opens only what
 // the program declared, and only while [selection] osc8_click_opens is on: a
 // guess is the terminal's reading of the text, and a plain click is how a
 // reader focuses and selects, so acting on a guess there launches something
@@ -6170,7 +6888,7 @@ bool linkClickOpens(LinkSource source, std::string_view uri, GdkModifierType sta
 {
     if (source == LinkSource::None)
         return false;
-    if ((state & GDK_CONTROL_MASK) != 0)
+    if ((state & (GDK_CONTROL_MASK | GDK_SUPER_MASK)) != 0)
         return true;
     if (Ubiquitty::Attributes::LinkRun::requiresLinkModifier(uri))
         return false;
@@ -6262,9 +6980,15 @@ bool forwardPointerFact(LinuxPane& pane, Ubiquitty::Runtime::TerminalSession::Po
     Ubiquitty::Input::PointerButton button, double x, double y, GdkModifierType state, int clickCount)
 {
     int row = 0, column = 0;
-    cellAtPoint(x, y, row, column);
+    cellAtPanePoint(pane, x, y, row, column);
     int pixelX = -1, pixelY = -1;
-    sgrPixelArgsForPoint(x, y, pixelX, pixelY);
+    if (&pane == activePane()) {
+        sgrPixelArgsForPoint(x, y, pixelX, pixelY);
+    } else if (pane.mouseModes.mouseSGRPixelsActive) {
+        const auto point = pane.presentation.picturePoint({ static_cast<float>(x * app().scale), static_cast<float>(y * app().scale) });
+        pixelX = std::max(1, static_cast<int>(point.x) + 1);
+        pixelY = std::max(1, static_cast<int>(point.y) + 1);
+    }
     Ubiquitty::Runtime::TerminalSession::PointerFact fact;
     fact.kind = kind;
     fact.button = button;
@@ -6275,7 +6999,7 @@ bool forwardPointerFact(LinuxPane& pane, Ubiquitty::Runtime::TerminalSession::Po
     // Where along the row the pointer is, unrounded, for the caret the ladder
     // resolves: on a row laid out as letters, the letter and the fraction of
     // it crossed.
-    fact.xInCells = xInCellsAtPoint(x, y, row);
+    fact.xInCells = xInCellsAtPanePoint(pane, x, y, row);
     fact.hasShift = (state & GDK_SHIFT_MASK) != 0;
     fact.hasAlternate = (state & GDK_ALT_MASK) != 0;
     fact.hasControl = (state & GDK_CONTROL_MASK) != 0;
@@ -6369,21 +7093,58 @@ const char* cursorNameForShape(Ubiquitty::MousePointerShape shape)
 // Resolve the pointer shape and apply it. Which shape ranks above which is
 // Core's — Input::pointerShape — so this decides nothing beyond the facts only a
 // frontend holds.
-void updateHoverCursor(double x, double y, GdkModifierType state)
+void publishHoveredLink(LinuxPane& pane, const Ubiquitty::Rendering::FrameHoverLink& next)
 {
-    if (!app().focusedPicture)
+    const auto& previous = pane.hoveredLink;
+    const bool didChange = previous.isActive != next.isActive || previous.linkID != next.linkID
+        || previous.rowAbsoluteFirst != next.rowAbsoluteFirst || previous.rowAbsoluteLast != next.rowAbsoluteLast
+        || previous.columnFirst != next.columnFirst || previous.columnLast != next.columnLast
+        || previous.spanColumnFirst != next.spanColumnFirst || previous.spanColumnLast != next.spanColumnLast
+        || previous.textDigest != next.textDigest;
+    if (!didChange)
         return;
-    Ubiquitty::Terminal* term = activePane()->session->terminal();
-    const auto hold = holdPaneModel(*activePane());
+    pane.hoveredLink = next;
+    pane.session->setSyncFrameHoverLink(next);
+    pane.pendingCapture.reset();
+    pane.captureConfiguration.reset();
+    pane.isFrameDeclined = false;
+    requestRepaint();
+}
 
+void updatePaneHoverCursor(LinuxPane& pane, double x, double y, GdkModifierType state)
+{
+    if (!pane.picture && (&pane != activePane() || !app().focusedPicture))
+        return;
+    Ubiquitty::Terminal* term = pane.session->terminal();
+    pane.hoverModifiers = state;
+    if (&pane == activePane())
+        app().hoverModifiers = state;
+    pane.hoverModelGeneration = pane.session->readSnapshot().modelGeneration;
+    pane.hoverViewOffset = pane.viewOffset;
     int row = 0, column = 0;
-    cellAtPoint(x, y, row, column);
-    char uri[Ubiquitty::VT::maxLinkURILength];
-
+    cellAtPanePoint(pane, x, y, row, column);
+    const bool hasModifier = (state & (GDK_CONTROL_MASK | GDK_SUPER_MASK)) != 0;
+    const bool found = pane.session->resolveLinkAtVisibleCell(pane.viewOffset, row, column,
+        hasModifier ? Ubiquitty::Screen::LinkScanScope::Any : Ubiquitty::Screen::LinkScanScope::Declared);
     Ubiquitty::Input::PointerContext context;
-    // The hand promises what a click would do, so it follows the same rule.
-    const LinkSource source = linkURIAtCell(row, column, uri, static_cast<int>(sizeof(uri)));
-    context.isOverLink = linkClickOpens(source, uri, state);
+    const LinkSource source = !found              ? LinkSource::None
+        : pane.session->resolvedLinkIsHyperlink() ? LinkSource::Declared
+                                                  : LinkSource::Guessed;
+    context.isOverLink = linkClickOpens(source, pane.session->resolvedLinkURI(), state);
+    Ubiquitty::Rendering::FrameHoverLink hover;
+    if (context.isOverLink) {
+        hover.isActive = true;
+        hover.linkID = pane.session->resolvedLinkID();
+        hover.rowAbsoluteFirst = pane.session->resolvedLinkRowFirst();
+        hover.rowAbsoluteLast = pane.session->resolvedLinkRowLast();
+        hover.columnFirst = pane.session->resolvedLinkColumnFirst();
+        hover.columnLast = pane.session->resolvedLinkColumnLast();
+        hover.spanColumnFirst = pane.session->resolvedLinkSpanColumnFirst();
+        hover.spanColumnLast = pane.session->resolvedLinkSpanColumnLast();
+        hover.textDigest = pane.session->resolvedLinkTextDigest();
+    }
+    publishHoveredLink(pane, hover);
+    const auto hold = holdPaneModel(pane);
     // Which chord makes a drag rectangular is the reader's ([selection]
     // block_select_modifier) and Core matches it, so this arm reports what is
     // held and hard-codes no modifier. The same state answers whether such a
@@ -6397,6 +7158,8 @@ void updateHoverCursor(double x, double y, GdkModifierType state)
         moment, Ubiquitty::Input::pointerPolicyFromPreferences(Ubiquitty::Preferences::values()));
     context.isRectangularSelectArmed = Ubiquitty::Input::localDragIsRectangular(reporting);
     context.selectionBypassesMouseReporting = Ubiquitty::Input::allowsLocalDragSelect(reporting);
+    if (context.isRectangularSelectArmed || (moment.isMouseReporting && !context.selectionBypassesMouseReporting))
+        publishHoveredLink(pane, {});
     // Read for completeness -- onMouseMotion already routes every X11-backend
     // locked event through reportPointerLockX11Motion and returns before this
     // runs, so this only matters if that ranking ever changes.
@@ -6406,14 +7169,25 @@ void updateHoverCursor(double x, double y, GdkModifierType state)
     // than being answered wrongly here.
 
     const Ubiquitty::MousePointerShape shape = Ubiquitty::Input::pointerShape(term, context);
-    if (shape == app().hoverCursorShape)
+    if (shape == pane.hoverCursorShape)
         return;
-    gtk_widget_set_cursor_from_name(app().focusedPicture, cursorNameForShape(shape));
-    app().hoverCursorShape = shape;
+    gtk_widget_set_cursor_from_name(pane.picture ? pane.picture : app().focusedPicture, cursorNameForShape(shape));
+    pane.hoverCursorShape = shape;
+    if (&pane == activePane())
+        app().hoverCursorShape = shape;
 }
 
-void onMouseMotion(GtkEventControllerMotion* motion, gdouble x, gdouble y, gpointer)
+void updateHoverCursor(double x, double y, GdkModifierType state)
 {
+    updatePaneHoverCursor(*activePane(), x, y, state);
+}
+
+void onMouseMotion(GtkEventControllerMotion* motion, gdouble x, gdouble y, gpointer userData)
+{
+    LinuxPane* pane = userData != nullptr ? static_cast<LinuxPane*>(userData) : activePane();
+    pane->pointerX = x;
+    pane->pointerY = y;
+    pane->isPointerPositionKnown = true;
     const GdkModifierType state = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(motion));
     if (app().isPointerLocked && app().pointerLockOS.backend == Ubiquitty::Linux::PointerLockBackendKind::X11) {
         // The lock owns every event on this backend: no hover affordance, no
@@ -6429,60 +7203,117 @@ void onMouseMotion(GtkEventControllerMotion* motion, gdouble x, gdouble y, gpoin
         // locator watches it, and a move nothing took is the hover
         // affordance's -- the hand cursor over a link. Under reporting the
         // application owns the pointer, so the cursor is left alone.
-        const bool isReported = forwardPointerFact(*activePane(), Ubiquitty::Runtime::TerminalSession::PointerFact::Kind::Motion,
+        const bool isReported = forwardPointerFact(*pane, Ubiquitty::Runtime::TerminalSession::PointerFact::Kind::Motion,
             Ubiquitty::Input::PointerButton::None, x, y, state, 1);
         app().isHoverPointKnown = !isReported;
         app().hoverX = x;
         app().hoverY = y;
         if (!isReported)
-            updateHoverCursor(x, y, state);
+            updatePaneHoverCursor(*pane, x, y, state);
+        else
+            publishHoveredLink(*pane, {});
         return;
     }
     // A held button's motion is a drag fact: the ladder reports it under a
     // motion-tracking mode or extends the open local selection.
-    forwardPointerFact(*activePane(), Ubiquitty::Runtime::TerminalSession::PointerFact::Kind::Motion,
+    forwardPointerFact(*pane, Ubiquitty::Runtime::TerminalSession::PointerFact::Kind::Motion,
         app().heldPointerButton, x, y, state, 1);
 }
 
 // The pointer left a pane, so there is no hover for a modifier key to re-ask.
-void onMouseLeave(GtkEventControllerMotion*, gpointer) { app().isHoverPointKnown = false; }
+void onMouseEnter(GtkEventControllerMotion* motion, gdouble x, gdouble y, gpointer userData)
+{
+    LinuxPane* pane = userData != nullptr ? static_cast<LinuxPane*>(userData) : activePane();
+    pane->pointerX = x;
+    pane->pointerY = y;
+    pane->isPointerPositionKnown = true;
+    if (!app().isPointerLocked) {
+        app().hoverX = x;
+        app().hoverY = y;
+        app().isHoverPointKnown = true;
+        const auto state = motion ? gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(motion)) : static_cast<GdkModifierType>(0);
+        updatePaneHoverCursor(*pane, x, y, state);
+    }
+}
+
+void onMouseLeave(GtkEventControllerMotion*, gpointer userData)
+{
+    LinuxPane* pane = userData != nullptr ? static_cast<LinuxPane*>(userData) : activePane();
+    pane->isPointerPositionKnown = false;
+    app().isHoverPointKnown = false;
+    publishHoveredLink(*pane, {});
+}
 
 // The modifiers held once a key has gone down or up. Which of them a modifier
 // key's own event carries differs between the X11 and Wayland backends, so the
 // key's edge is applied here rather than read from the event.
 GdkModifierType modifiersAfterKey(guint keyval, GdkModifierType state, Ubiquitty::Keys::KeyEventType edge)
 {
-    if (keyval != GDK_KEY_Control_L && keyval != GDK_KEY_Control_R)
-        return state;
-    const unsigned held = edge == Ubiquitty::Keys::KeyEventType::Release ? (state & ~GDK_CONTROL_MASK) : (state | GDK_CONTROL_MASK);
+    const auto modifier = keyval == GDK_KEY_Control_L || keyval == GDK_KEY_Control_R ? GDK_CONTROL_MASK
+        : keyval == GDK_KEY_Super_L || keyval == GDK_KEY_Super_R                     ? GDK_SUPER_MASK
+                                                                                     : static_cast<GdkModifierType>(0);
+    const unsigned held = edge == Ubiquitty::Keys::KeyEventType::Release ? (state & ~modifier) : (state | modifier);
     return static_cast<GdkModifierType>(held);
 }
 
-// Ctrl decides whether a click opens a guessed link (linkClickOpens), and the
+// Ctrl or Super decides whether a click opens a guessed link (linkClickOpens), and the
 // hand promises what a click would do, so it re-asks at the last hover point
 // when Ctrl goes down or up. Pressing a key moves no pointer, so no motion
 // event would, and macOS re-asks on flagsChanged for the same reason.
 void updateHoverForModifierKey(guint keyval, GdkModifierType state, Ubiquitty::Keys::KeyEventType edge)
 {
-    if (keyval != GDK_KEY_Control_L && keyval != GDK_KEY_Control_R)
+    if (keyval != GDK_KEY_Control_L && keyval != GDK_KEY_Control_R && keyval != GDK_KEY_Super_L && keyval != GDK_KEY_Super_R)
         return;
-    if (!app().isHoverPointKnown || app().isPointerLocked || app().heldPointerButton != Ubiquitty::Input::PointerButton::Other)
+    if (app().isPointerLocked || app().heldPointerButton != Ubiquitty::Input::PointerButton::Other)
         return;
-    updateHoverCursor(app().hoverX, app().hoverY, modifiersAfterKey(keyval, state, edge));
+    const auto held = modifiersAfterKey(keyval, state, edge);
+    for (const auto& pane : app().panes) {
+        if (pane->isPointerPositionKnown)
+            updatePaneHoverCursor(*pane, pane->pointerX, pane->pointerY, held);
+    }
 }
 
 // The wheel-scroll policy from [mouse] config: wheel_lines (base lines per notch,
 // Core's default when unset) × wheel_speed (multiplier). The delta ->
-// line-count math is portable Core (ScrollTuning), shared with macOS. The trackpad
-// knobs are not consulted here — GTK feeds the local-scrollback path discrete
-// wheel notches, so this is always the (non-precise) wheel path.
+// line-count math is portable Core (ScrollTuning), shared with macOS. Surface
+// deltas arrive in logical pixels, so precise scrolling also supplies the
+// logical cell height and the independent trackpad speed.
 Ubiquitty::Screen::ScrollTuning::Policy currentWheelPolicy()
 {
     const Ubiquitty::Preferences::Values& config = loadPreferences();
     Ubiquitty::Screen::ScrollTuning::Policy policy;
     policy.baseLinesPerTick = static_cast<double>(Ubiquitty::Preferences::Effective::wheelLines(config));
     policy.speed = Ubiquitty::Preferences::Effective::wheelSpeed(config);
+    policy.trackpadSpeed = Ubiquitty::Preferences::Effective::trackpadSpeed(config);
+    policy.pointsPerLine = app().rasterContext.cellHeight() / app().scale;
     return policy;
+}
+
+graphene_point_t pointerPointForScroll(const LinuxPane& pane, GtkEventController* ctrl)
+{
+    // Scroll events may omit position (Broadway does), and native event
+    // positions are surface-relative rather than picture-relative. Enter and
+    // motion already provide the correct pane-local point, including when a
+    // TUI owns pointer reporting, so use that point for the wheel as well.
+    double px = pane.pointerX, py = pane.pointerY;
+    if (!pane.isPointerPositionKnown) {
+        if (GdkEvent* event = gtk_event_controller_get_current_event(ctrl)) {
+            double ex = 0, ey = 0;
+            if (gdk_event_get_position(event, &ex, &ey)) {
+                GtkWidget* picture = gtk_event_controller_get_widget(ctrl);
+                GtkNative* native = gtk_widget_get_native(picture);
+                double offsetX = 0, offsetY = 0;
+                gtk_native_get_surface_transform(native, &offsetX, &offsetY);
+                const graphene_point_t surfacePoint { static_cast<float>(ex - offsetX), static_cast<float>(ey - offsetY) };
+                graphene_point_t picturePoint;
+                if (gtk_widget_compute_point(GTK_WIDGET(native), picture, &surfacePoint, &picturePoint)) {
+                    px = picturePoint.x;
+                    py = picturePoint.y;
+                }
+            }
+        }
+    }
+    return { static_cast<float>(px), static_cast<float>(py) };
 }
 
 gboolean onMouseScroll(GtkEventControllerScroll* scroll, gdouble deltaX, gdouble deltaY, gpointer userData)
@@ -6501,17 +7332,9 @@ gboolean onMouseScroll(GtkEventControllerScroll* scroll, gdouble deltaX, gdouble
     fact.deltaX = -deltaX;
     fact.deltaY = -deltaY;
     GtkEventController* ctrl = GTK_EVENT_CONTROLLER(scroll);
-    double px = 0, py = 0;
-    if (GdkEvent* event = gtk_event_controller_get_current_event(ctrl)) {
-        // A smooth scroll is a continuous surface; a notched wheel arrives
-        // with a direction.
-        fact.isPrecise = gdk_scroll_event_get_direction(event) == GDK_SCROLL_SMOOTH;
-        double ex = 0, ey = 0;
-        if (gdk_event_get_position(event, &ex, &ey)) {
-            px = ex;
-            py = ey;
-        }
-    }
+    fact.isPrecise = gtk_event_controller_scroll_get_unit(scroll) == GDK_SCROLL_UNIT_SURFACE;
+    const graphene_point_t point = pointerPointForScroll(*activePane(), ctrl);
+    const double px = point.x, py = point.y;
     int row = 0, column = 0;
     cellAtPoint(px, py, row, column);
     int pixelX = -1, pixelY = -1;
@@ -6526,8 +7349,11 @@ gboolean onMouseScroll(GtkEventControllerScroll* scroll, gdouble deltaX, gdouble
     fact.hasControl = (state & GDK_CONTROL_MASK) != 0;
     const Ubiquitty::Runtime::TerminalSession::ScrollOutcome outcome = activePane()->session->scrollFact(fact, currentWheelPolicy());
     if (outcome.linesToOffsetView != 0) {
+        const int previousOffset = activePane()->viewOffset;
         activePane()->viewOffset += static_cast<int>(outcome.linesToOffsetView);
         clampActivePaneViewOffset(term);
+        if (activePane()->viewOffset != previousOffset)
+            noteScrollIndicatorActivity(*activePane());
         requestRepaint();
     }
     if (outcome.wasConsumed) {
@@ -6827,7 +7653,7 @@ void armPTYWriteDrain(LinuxPane* pane)
     const int fileDescriptor = pane->session->fileDescriptor();
     if (fileDescriptor < 0)
         return;
-    pane->ptyWriteSource = g_unix_fd_add(fileDescriptor, G_IO_OUT, onPTYWritable, pane);
+    pane->ptyWriteSource = windowUnixFDAdd(fileDescriptor, G_IO_OUT, onPTYWritable, pane);
 }
 
 gboolean onPtyReadable(gint, GIOCondition, gpointer userData)
@@ -6916,6 +7742,73 @@ void paintProgressSegment(cairo_t* cr, GtkWidget* widget, double x, double y, do
     cairo_fill(cr);
 }
 
+// A transient, noninteractive rectangle: Core owns its geometry and fade.
+// The one-shot timer sleeps through the hold, then runs only during the fade.
+gboolean onScrollIndicatorDue(gpointer)
+{
+    app().scrollIndicatorSource = 0;
+    const auto now = Ubiquitty::PAL::monotonicTicks().count;
+    bool isVisible = false;
+    forEachVisibleLeaf([&](LinuxPane& pane) {
+        isVisible = isVisible || Ubiquitty::scrollIndicatorAlpha(pane.lastScrollIndicatorTick, now) > 0;
+    });
+    if (app().scrollIndicator) {
+        gtk_widget_set_visible(app().scrollIndicator, isVisible);
+        gtk_widget_queue_draw(app().scrollIndicator);
+    }
+    if (isVisible)
+        app().scrollIndicatorSource = windowTimeoutAdd(16, onScrollIndicatorDue, nullptr);
+    return G_SOURCE_REMOVE;
+}
+
+void noteScrollIndicatorActivity(LinuxPane& pane)
+{
+    pane.lastScrollIndicatorTick = std::max(std::uint32_t { 1 }, Ubiquitty::PAL::monotonicTicks().count);
+    if (!app().scrollIndicator)
+        return;
+    gtk_widget_set_visible(app().scrollIndicator, TRUE);
+    gtk_widget_queue_draw(app().scrollIndicator);
+    if (app().scrollIndicatorSource != 0)
+        g_source_remove(app().scrollIndicatorSource);
+    app().scrollIndicatorSource = windowTimeoutAdd(1000, onScrollIndicatorDue, nullptr);
+}
+
+void drawScrollIndicator(GtkDrawingArea* area, cairo_t* cr, int, int, gpointer)
+{
+    const auto now = Ubiquitty::PAL::monotonicTicks().count;
+    forEachVisibleLeaf([&](LinuxPane& pane) {
+        graphene_rect_t bounds;
+        if (!pane.picture || !gtk_widget_compute_bounds(pane.picture, GTK_WIDGET(area), &bounds))
+            return;
+        const auto hold = holdPaneModel(pane);
+        const auto* term = pane.session->terminal();
+        if (!term)
+            return;
+        Ubiquitty::Rendering::ScrollIndicatorParameters parameters;
+        parameters.alpha = Ubiquitty::scrollIndicatorAlpha(pane.lastScrollIndicatorTick, now);
+        parameters.scrollbackCount = Ubiquitty::Screen::scrollbackCount(term);
+        parameters.rows = term->rows;
+        parameters.viewOffset = pane.viewOffset;
+        // The overlay covers the pane's padding too. Measure the shared
+        // thumb's right inset from that outer edge, rather than the grid.
+        parameters.viewportSizeInPixels = { bounds.size.width + gtk_widget_get_margin_end(pane.picture), bounds.size.height };
+        parameters.isFullScreen = true; // square Omarchy window corners
+        Ubiquitty::Rendering::OverlayQuad quad;
+        if (!Ubiquitty::Rendering::buildScrollIndicatorQuad(parameters, quad))
+            return;
+        const auto color = term->palette.indexed[4];
+        const auto* theme = app().liveThemeIndex >= 0 ? Ubiquitty::Themes::get(app().liveThemeIndex) : nullptr;
+        if (app().omarchyAccent && theme && theme->name && std::string_view(theme->name) == "Omarchy") {
+            const auto accent = *app().omarchyAccent;
+            cairo_set_source_rgba(cr, ((accent >> 16) & 255) / 255.0, ((accent >> 8) & 255) / 255.0, (accent & 255) / 255.0, quad.alpha);
+        } else {
+            cairo_set_source_rgba(cr, color.red / 65535.0, color.green / 65535.0, color.blue / 65535.0, quad.alpha);
+        }
+        cairo_rectangle(cr, bounds.origin.x + quad.minX, bounds.origin.y + quad.minY, quad.maxX - quad.minX, quad.maxY - quad.minY);
+        cairo_fill(cr);
+    });
+}
+
 // Draw a bar on the top edge of every visible pane that reports progress. Each
 // pane's (kind, value) comes from its own Terminal; the tint role is the shared
 // progressTint (focused pane = accent, unfocused split pane = gray, error
@@ -7002,13 +7895,13 @@ void publishAccessibleTerminal()
 {
     if (!app().accessibleTerminal)
         return;
-    const double now = static_cast<double>(Ubiquitty::PAL::monotonicMicros()) / 1e6;
+    const double now = static_cast<double>(g_get_monotonic_time()) / 1e6;
     if (now - app().lastAccessiblePublishSeconds >= accessiblePublishIntervalSeconds) {
         publishAccessibleTerminalNow();
         return;
     }
     if (app().accessiblePublishSource == 0)
-        app().accessiblePublishSource = g_timeout_add(static_cast<guint>(accessiblePublishIntervalSeconds * 1000.0), onAccessiblePublishDue, nullptr);
+        app().accessiblePublishSource = windowTimeoutAdd(static_cast<guint>(accessiblePublishIntervalSeconds * 1000.0), onAccessiblePublishDue, nullptr);
 }
 
 void publishAccessibleTerminalNow()
@@ -7017,7 +7910,7 @@ void publishAccessibleTerminalNow()
     LinuxPane* pane = activePane();
     if (!accessible || !pane || !pane->picture)
         return;
-    app().lastAccessiblePublishSeconds = static_cast<double>(Ubiquitty::PAL::monotonicMicros()) / 1e6;
+    app().lastAccessiblePublishSeconds = static_cast<double>(g_get_monotonic_time()) / 1e6;
     graphene_rect_t bounds;
     if (!gtk_widget_compute_bounds(pane->picture, accessible, &bounds))
         return;
@@ -7028,6 +7921,73 @@ void publishAccessibleTerminalNow()
         Ubiquitty::Linux::Accessibility::snapshot(pane->session->terminal(), pane->viewOffset, &pane->selection.state),
         { bounds.origin.x + presentation.origin.x / scale, bounds.origin.y + presentation.origin.y / scale },
         { logicalCellWidth() * presentation.scale, logicalCellHeight() * presentation.scale });
+}
+
+// Keep frames admitted at parser boundaries instead of looking for the same
+// boundary again after the parser has already started the next redraw.
+void preparePaneFrame(LinuxPane& pane)
+{
+    const auto hoverSnapshot = pane.session->readSnapshot();
+    if (pane.isPointerPositionKnown && !app().isPointerLocked
+        && (pane.hoverModelGeneration != hoverSnapshot.modelGeneration || pane.hoverViewOffset != pane.viewOffset))
+        updatePaneHoverCursor(pane, pane.pointerX, pane.pointerY, pane.hoverModifiers);
+    const auto& configuration = app().rasterContext.renderConfiguration();
+    const int cellWidth = app().rasterContext.cellWidth();
+    const int cellHeight = app().rasterContext.cellHeight();
+    const bool isFocused = &pane == activePane() && app().window && gtk_window_is_active(GTK_WINDOW(app().window));
+    bool canUseBoundaryFrames = app().isVulkanReady;
+    {
+        const auto hold = holdPaneModel(pane);
+        const auto* terminal = pane.session->terminal();
+        canUseBoundaryFrames = canUseBoundaryFrames && terminal && !terminal->isTekModeActive
+            && terminal->richTextBlocks.blocks(Ubiquitty::RichText::activeScreen(*terminal)).empty()
+            && pane.richTextFrame.richTextQuads().empty();
+    }
+    if (app().isVulkanReady && (!pane.captureConfiguration || *pane.captureConfiguration != configuration || pane.captureCellWidth != cellWidth || pane.captureCellHeight != cellHeight || pane.isCaptureFocused != isFocused)) {
+        auto geometry = app().rasterContext.frameCaptureGeometry();
+        geometry.isFocused = isFocused;
+        pane.session->setSyncFrameCaptureGeometry(geometry);
+        pane.captureConfiguration = configuration;
+        pane.captureCellWidth = cellWidth;
+        pane.captureCellHeight = cellHeight;
+        pane.isCaptureFocused = isFocused;
+        pane.captureViewOffset = -1;
+    }
+    pane.session->setSyncFramePresentation(canUseBoundaryFrames
+            ? Ubiquitty::Runtime::PanePresentation::Presented
+            : Ubiquitty::Runtime::PanePresentation::Hidden);
+    const auto viewHistory = pane.selection.viewportObservedHistory;
+    const bool isViewOffsetHeld = Ubiquitty::Selection::isViewOffsetHeldByHistory(pane.selection);
+    const int registeredViewOffset = pane.captureViewOffset >= 0 && pane.isCaptureViewOffsetHeld
+        ? Ubiquitty::Selection::heldViewOffset(pane.captureViewOffset, pane.captureViewHistory, viewHistory)
+        : pane.captureViewOffset;
+    if (registeredViewOffset != pane.viewOffset || pane.isCaptureViewOffsetHeld != isViewOffsetHeld) {
+        pane.session->setSyncFrameViewOffset(pane.viewOffset,
+            isViewOffsetHeld ? Ubiquitty::Input::ViewportHold::Hold : Ubiquitty::Input::ViewportHold::Follow, viewHistory);
+        pane.captureViewOffset = pane.viewOffset;
+        pane.captureViewHistory = viewHistory;
+        pane.isCaptureViewOffsetHeld = isViewOffsetHeld;
+    }
+    Ubiquitty::Runtime::FrameDemand demand;
+    demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
+    demand.selection = &pane.selection;
+    const auto snapshot = pane.session->readSnapshot();
+    pane.capturedSelectionSpans.resize(static_cast<std::size_t>(Ubiquitty::Selection::viewportSpanCapacity(snapshot.rows, snapshot.columns)));
+    demand.selectionSpans = { pane.capturedSelectionSpans.data(), pane.capturedSelectionSpans.size() };
+    const bool isPaneFocused = &pane == activePane();
+    const bool hasPaneOverlay = isPaneFocused && (app().beamSession.isOpen() || app().hasInputMethodPreedit || *Ubiquitty::Input::hintText(pane.session->hintShowing(), Ubiquitty::Input::ModifierVocabulary::Words) != '\0');
+    demand.keepsSearchLive = !canUseBoundaryFrames || hasPaneOverlay || app().beamFindPane.get() == &pane;
+    Ubiquitty::Runtime::FrameSupply supply;
+    pane.pendingCapture.reset(pane.session->takeFrame(demand, supply));
+    if (pane.pendingCapture && supply.selection.needed > supply.selection.count) {
+        pane.capturedSelectionSpans.resize(static_cast<std::size_t>(supply.selection.needed));
+        supply.selection = pane.session->selectionForTakenFrame(&pane.selection, *pane.pendingCapture,
+            { pane.capturedSelectionSpans.data(), pane.capturedSelectionSpans.size() }, supply.selectionEnds);
+    }
+    pane.capturedSelectionSpanCount = supply.selection.count;
+    pane.isFrameDeclined = supply.route == Ubiquitty::Runtime::FrameRoute::Declined;
+    if (pane.isFrameDeclined)
+        ++app().perfWindow.withheldTicks;
 }
 
 gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
@@ -7065,15 +8025,8 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         };
         if (viewport.width != pane.presentationViewport.width || viewport.height != pane.presentationViewport.height)
             requestRepaint();
-        const Ubiquitty::GridSize dims = Ubiquitty::Rendering::gridFromViewport({ static_cast<float>(gtk_widget_get_width(pane.picture)), static_cast<float>(gtk_widget_get_height(pane.picture)) }, {}, 0.0f, { logicalCellWidth(), logicalCellHeight() }, Ubiquitty::Rendering::GridFloor::None);
-        const int c = dims.columns;
-        const int r = dims.rows;
-        const bool didResizeGrid = c >= 1 && r >= 1 && (c != pane.columns || r != pane.rows);
-        if (didResizeGrid) {
-            pane.columns = c;
-            pane.rows = r;
+        if (updatePaneGridFromAllocation(pane))
             requestRepaint();
-        }
         // Stages pixels before the owner sees the grid, so a local program
         // receives one complete winsize and a remote picture is never reflowed here.
         publishPanePixelGeometry(pane);
@@ -7094,36 +8047,28 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     // on screen rather than frozen until it ends. Asked before the hold below:
     // the rule stamps the block under the model lock itself.
     //
-    // The decision is takeFrame's, as every frontend's is. This frontend
-    // registers no capture geometry, so the drain captures nothing for it and
-    // the answer is a read of the model or a decline; a capture handed back
-    // regardless is released, and the model read.
-    Ubiquitty::Runtime::FrameDemand demand;
-    demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
-    demand.selection = &activePane()->selection;
-    Ubiquitty::Runtime::FrameSupply supply;
-    if (Ubiquitty::Rendering::FrameCapture* capture = activePane()->session->takeFrame(demand, supply))
-        ::releaseFrameCapture(capture);
-    const bool shouldHoldForSync = supply.route == Ubiquitty::Runtime::FrameRoute::Declined;
+    // Every visible leaf takes its admitted boundary frame, or the live read
+    // Core permits when native overlays need the current model.
+    forEachVisibleLeaf([](LinuxPane& pane) { preparePaneFrame(pane); });
     // Core's drive recommends continuous presentation while the screen
     // changes at frame rate: the grid moves between any two ticks, so a frame
     // is owed on each whatever the delivery cadence, as the Swift arm's frame
     // clock resumes on the same recommendation. Only an ingesting pane: the
     // inline drain's own deliveries already ask per drain.
-    if (activePane()->isIngesting && activePane()->session->isAdaptivePresentation()) {
+    forEachVisibleLeaf([](LinuxPane& pane) {
+        if (!pane.isIngesting || !pane.session->isAdaptivePresentation())
+            return;
         // GTK only exposes the panel interval after the picture is rooted.
         // Refresh the driver's rate before asking it whether output still
         // warrants a vblank frame. FrameDriver's interval is atomic because
         // the ingest thread reads it while the main thread updates it here.
-        const double frameInterval = cursorPresentationInterval(activePane()->picture);
-        if (frameInterval != activePane()->session->presentationFrameIntervalSeconds())
-            activePane()->session->setPresentationFrameIntervalSeconds(frameInterval);
-        if (activePane()->session->isPresentationRecommendedContinuous())
+        const double frameInterval = cursorPresentationInterval(pane.picture);
+        if (frameInterval != pane.session->presentationFrameIntervalSeconds())
+            pane.session->setPresentationFrameIntervalSeconds(frameInterval);
+        if (pane.session->isPresentationRecommendedContinuous())
             requestRepaint();
-    }
+    });
     ++app().perfWindow.ticks;
-    if (shouldHoldForSync)
-        ++app().perfWindow.withheldTicks;
     // The tick's own reads of the focused model, ended before the paint: each
     // pane's frame takes its own hold and hands it back at the renderer's
     // capture boundary, which a hold here would outlast. The pointer fact
@@ -7166,15 +8111,11 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     });
     if (doesBlinkOweFrame)
         requestRepaint();
-    // A withheld present keeps the flag: clearing it would discard a completed
-    // frame already marked for paint, turning a delayed frame into a lost one.
-    // The tick stays installed while the flag stands, so the frame the rule
-    // releases is drawn on the next tick. This still only defers, which is
-    // weaker than macOS -- that frontend captures the complete frame at the
-    // sync-clear instant and presents it mid-block, so a continuous BSU/ESU
-    // stream keeps delivering at the native rate rather than falling back to
-    // the watchdog's cadence.
-    if (app().isRepaintPending && !shouldHoldForSync) {
+    // Keep a withheld present pending until a tick can draw it. A pane's
+    // captured sync-clear frame remains available across the next update
+    // block, so continuous BSU/ESU output can present completed frames at
+    // native cadence without waiting for the watchdog.
+    if (app().isRepaintPending) {
         // Repaint every visible leaf (a split tab shows N at once); each is still one
         // texture from one renderGrid/rasterizeTerm call keyed to its own term.
         // The frame's own reads of the focused model come first, under the
@@ -7183,9 +8124,14 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         // accessible snapshot of the grid it paints.
         const float paintedBlinkAlpha = resolveCursorOverlay(activePane()->session->terminal()).blinkAlpha;
         publishAccessibleTerminal();
+        if (hold)
+            hold->release();
         bool didDrawEveryLeaf = true;
         forEachVisibleLeaf([&](LinuxPane& pane) {
-            didDrawEveryLeaf = renderPaneInto(pane, pane.picture, &pane == activePane() ? &hold : nullptr) && didDrawEveryLeaf;
+            didDrawEveryLeaf = renderPaneInto(pane, pane.picture, nullptr) && didDrawEveryLeaf;
+            if (pane.pendingCapture && pane.session->hasFrameChangesAfter(*pane.pendingCapture))
+                didDrawEveryLeaf = false;
+            pane.pendingCapture.reset();
         });
         activePane()->lastCursorBlinkAlpha = paintedBlinkAlpha;
         app().lastBlinkPaintTicks = nowBlinkTicks; // advance the text-blink phase baseline
@@ -7204,7 +8150,7 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     //
     // The progress bar drives its own redraw through its own widget, so a
     // paused clock does not freeze it.
-    const double tickSeconds = static_cast<double>(Ubiquitty::PAL::monotonicMicros()) / 1e6;
+    const double tickSeconds = static_cast<double>(g_get_monotonic_time()) / 1e6;
     if (!app().isRepaintPending && app().frameDriver.idleExpired(tickSeconds)) {
         app().frameDriver.setMode(Ubiquitty::Runtime::FrameMode::OnDemand);
         app().tickCallbackID = 0;
@@ -7227,7 +8173,7 @@ void requestRepaint(RepaintCause cause)
     // Output activity extends continuous drive even without a widget. A
     // cursor-only step changes pixels but does not extend that drive.
     if (cause == RepaintCause::Activity) {
-        const double now = static_cast<double>(Ubiquitty::PAL::monotonicMicros()) / 1e6;
+        const double now = static_cast<double>(g_get_monotonic_time()) / 1e6;
         (void)app().frameDriver.noteActivity(now);
     }
 
@@ -7236,7 +8182,7 @@ void requestRepaint(RepaintCause cause)
     if (app().tickCallbackID != 0)
         return;
     app().frameDriver.setMode(Ubiquitty::Runtime::FrameMode::Continuous);
-    app().tickCallbackID = gtk_widget_add_tick_callback(app().paneContainer, onTick, nullptr, nullptr);
+    app().tickCallbackID = windowTickAdd(app().paneContainer, onTick, nullptr, nullptr);
 }
 
 // Build this pane's GtkPicture + its OWN event controllers (each carrying &pane, so
@@ -7277,23 +8223,24 @@ void attachPaneControllers(LinuxPane& pane)
 
     GtkGesture* mouseClick = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(mouseClick), 0);
-    g_signal_connect(mouseClick, "pressed", G_CALLBACK(onMousePressed), &pane);
-    g_signal_connect(mouseClick, "released", G_CALLBACK(onMouseReleased), &pane);
+    windowSignalConnect(mouseClick, "pressed", G_CALLBACK(onMousePressed), &pane);
+    windowSignalConnect(mouseClick, "released", G_CALLBACK(onMouseReleased), &pane);
     gtk_widget_add_controller(pane.picture, GTK_EVENT_CONTROLLER(mouseClick));
 
     GtkEventController* motion = gtk_event_controller_motion_new();
-    g_signal_connect(motion, "motion", G_CALLBACK(onMouseMotion), &pane);
-    g_signal_connect(motion, "leave", G_CALLBACK(onMouseLeave), &pane);
+    windowSignalConnect(motion, "enter", G_CALLBACK(onMouseEnter), &pane);
+    windowSignalConnect(motion, "motion", G_CALLBACK(onMouseMotion), &pane);
+    windowSignalConnect(motion, "leave", G_CALLBACK(onMouseLeave), &pane);
     gtk_widget_add_controller(pane.picture, motion);
 
     // File drop: a file dropped on this pane writes its escaped path(s) to the
     // prompt (the macOS file drag & drop, via the shared Input::shellEscapedPath).
     GtkDropTarget* fileDrop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
-    g_signal_connect(fileDrop, "drop", G_CALLBACK(onFileDrop), &pane);
+    windowSignalConnect(fileDrop, "drop", G_CALLBACK(onFileDrop), &pane);
     gtk_widget_add_controller(pane.picture, GTK_EVENT_CONTROLLER(fileDrop));
 
     GtkEventController* scroll = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
-    g_signal_connect(scroll, "scroll", G_CALLBACK(onMouseScroll), &pane);
+    windowSignalConnect(scroll, "scroll", G_CALLBACK(onMouseScroll), &pane);
     gtk_widget_add_controller(pane.picture, scroll);
 }
 
@@ -7302,6 +8249,7 @@ void attachPaneControllers(LinuxPane& pane)
 // drainBriefly and never dispatch the source; under GTK it drives onPtyReadable.
 bool bindPane(LinuxPane& pane, PaneID paneID)
 {
+    pane.ownerApp = &app();
     Ubiquitty::Runtime::TerminalSession* session = app().model->session(paneID);
     if (!session)
         return false;
@@ -7350,7 +8298,7 @@ bool bindPane(LinuxPane& pane, PaneID paneID)
         beginPaneIngest(pane);
     const int fileDescriptor = session->fileDescriptor();
     if (!pane.isIngesting && fileDescriptor >= 0)
-        pane.ptySource = Ubiquitty::Linux::addPTYReadWatch(fileDescriptor, onPtyReadable, &pane);
+        pane.ptySource = windowUnixFDAdd(fileDescriptor, static_cast<GIOCondition>(G_IO_IN | G_IO_HUP | G_IO_ERR), onPtyReadable, &pane, G_PRIORITY_HIGH_IDLE + 20);
     return true;
 }
 
@@ -7388,7 +8336,7 @@ bool launchShell()
     // [appearance] background_opacity: <1 lets the desktop show through behind the
     // (opaque) text via the per-cell background alpha. Default 1.0 (opaque), like macOS.
     applyWindowGlobalRenderSettings(config);
-    const bool shouldRunRequestedCommand = app().launchRequest != nullptr
+    const bool shouldRunRequestedCommand = app().launchRequest.has_value()
         && app().launchRequest->status == Ubiquitty::Runtime::LaunchRequest::Status::Command
         && !app().didConsumeLaunchRequest;
     if (shouldRunRequestedCommand)
@@ -7396,9 +8344,12 @@ bool launchShell()
     // A window with no command of its own opens a login session and is
     // recorded; one opened to run a named command is not a login and stays out
     // of the session table.
-    const SurfaceID surface = app().model->addWindowSurface(shouldRunRequestedCommand
-            ? Ubiquitty::Runtime::LaunchCommand::fromArguments(app().launchRequest->command)
-            : Ubiquitty::Runtime::LaunchCommand::loginSession());
+    Ubiquitty::Runtime::LaunchCommand command = shouldRunRequestedCommand
+        ? Ubiquitty::Runtime::LaunchCommand::fromArguments(app().launchRequest->command)
+        : Ubiquitty::Runtime::LaunchCommand::loginSession();
+    if (!app().launchDirectory.empty())
+        command.setInitialDirectory(app().launchDirectory);
+    const SurfaceID surface = app().model->addWindowSurface(command);
     if (surface == Layout::invalidSurface)
         return false;
     app().panes.push_back(std::make_unique<LinuxPane>());
@@ -7466,7 +8417,7 @@ void rebuildTabStrip()
                 gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(button), GTK_TOGGLE_BUTTON(group));
             g_object_set_data(G_OBJECT(button), "ubiquitty-tab-id", GUINT_TO_POINTER(tab));
             // Programmatic selection emits toggled, not clicked.
-            g_signal_connect(button, "clicked", G_CALLBACK(onTabButtonClicked), nullptr);
+            windowSignalConnect(button, "clicked", G_CALLBACK(onTabButtonClicked), nullptr);
             gtk_box_append(GTK_BOX(app().tabStrip), button);
         }
         gtk_button_set_label(GTK_BUTTON(button), label.c_str());
@@ -7677,7 +8628,7 @@ GtkWidget* buildPaneWidget(const Panes::Tree& tree, int nodeIndex)
     gtk_widget_set_hexpand(paned, TRUE);
     gtk_widget_set_vexpand(paned, TRUE);
     g_object_set_data(G_OBJECT(paned), "ubiquitty-node", GINT_TO_POINTER(nodeIndex));
-    g_signal_connect(paned, "notify::position", G_CALLBACK(onDividerMoved), nullptr);
+    windowSignalConnect(paned, "notify::position", G_CALLBACK(onDividerMoved), nullptr);
     return paned;
 }
 
@@ -7694,9 +8645,12 @@ void rebuildPaneTree()
         return;
     // Detach the live pictures before tearing down the old tree, so the old GtkPaned
     // disposal can't take them (belt-and-braces alongside their ref).
-    for (auto& pane : app().panes)
+    for (auto& pane : app().panes) {
+        pane->session->setSyncFramePresentation(Ubiquitty::Runtime::PanePresentation::Hidden);
+        pane->pendingCapture.reset();
         if (pane->picture)
             unmountPicture(pane->picture);
+    }
     if (GtkWidget* old = gtk_widget_get_first_child(app().paneContainer); old)
         gtk_box_remove(GTK_BOX(app().paneContainer), old);
     if (GtkWidget* root = buildPaneWidget(*tree, tree->root()); root)
@@ -7828,7 +8782,7 @@ void onUpdateNowChosen(GObject* source, GAsyncResult* result, gpointer)
         showUpdateResult(Ubiquitty::Linux::Updater::Status::UpdateFailed);
         return;
     }
-    g_child_watch_add(processID, onUpdateApplyExited, nullptr);
+    windowChildWatchAdd(processID, onUpdateApplyExited, nullptr);
 }
 
 // The dialog's heading for an update outcome; the updater's sentence is its
@@ -7866,7 +8820,7 @@ void showUpdateResult(Ubiquitty::Linux::Updater::Status status)
         gtk_alert_dialog_set_buttons(dialog, buttons);
         gtk_alert_dialog_set_default_button(dialog, 1);
         gtk_alert_dialog_set_cancel_button(dialog, 0);
-        gtk_alert_dialog_choose(dialog, parent, nullptr, onUpdateNowChosen, nullptr);
+        gtk_alert_dialog_choose(dialog, parent, nullptr, onWindowAsyncReady, windowAsyncData(onUpdateNowChosen, nullptr));
     } else {
         gtk_alert_dialog_show(dialog, parent);
     }
@@ -7906,7 +8860,7 @@ void onCheckUpdateAction(GSimpleAction*, GVariant*, gpointer)
         showUpdateResult(Ubiquitty::Linux::Updater::Status::Error);
         return;
     }
-    g_child_watch_add(processID, onUpdateCheckExited, nullptr);
+    windowChildWatchAdd(processID, onUpdateCheckExited, nullptr);
 }
 
 void onAboutAction(GSimpleAction*, GVariant*, gpointer)
@@ -7933,7 +8887,7 @@ void onSecondaryPress(GtkGestureClick* gesture, gint, gdouble, gdouble, gpointer
 }
 
 // The visible menu button and the context menu share the application's actions.
-void installUpdateMenu(GtkApplication* gtkApplication)
+void installUpdateMenu(GtkApplication*)
 {
     static const GActionEntry entries[] = {
         { "new-tab", +[](GSimpleAction*, GVariant*, gpointer) { newTab(); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
@@ -7942,22 +8896,27 @@ void installUpdateMenu(GtkApplication* gtkApplication)
         { "check-update", onCheckUpdateAction, nullptr, nullptr, nullptr, { 0, 0, 0 } },
         { "about", onAboutAction, nullptr, nullptr, nullptr, { 0, 0, 0 } },
     };
-    g_action_map_add_action_entries(G_ACTION_MAP(gtkApplication), entries, G_N_ELEMENTS(entries), nullptr);
+    for (const auto& entry : entries) {
+        GSimpleAction* action = g_simple_action_new(entry.name, nullptr);
+        windowSignalConnect(action, "activate", G_CALLBACK(entry.activate), nullptr);
+        g_action_map_add_action(G_ACTION_MAP(app().window), G_ACTION(action));
+        g_object_unref(action);
+    }
     GMenu* menu = g_menu_new();
     GMenu* session = g_menu_new();
-    g_menu_append(session, "New Tab", "app.new-tab");
-    g_menu_append(session, "Close Pane", "app.close-pane");
-    g_menu_append(session, "Find…", "app.find");
+    g_menu_append(session, "New Tab", "win.new-tab");
+    g_menu_append(session, "Close Pane", "win.close-pane");
+    g_menu_append(session, "Find…", "win.find");
     g_menu_append_section(menu, nullptr, G_MENU_MODEL(session));
     g_object_unref(session);
     GMenu* application = g_menu_new();
-    g_menu_append(application, "Check for Updates…", "app.check-update");
-    g_menu_append(application, "About Ubiquitty", "app.about");
+    g_menu_append(application, "Check for Updates…", "win.check-update");
+    g_menu_append(application, "About Ubiquitty", "win.about");
     g_menu_append_section(menu, nullptr, G_MENU_MODEL(application));
     g_object_unref(application);
     if (app().menuButton) {
         gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(app().menuButton), G_MENU_MODEL(menu));
-        g_signal_connect(gtk_menu_button_get_popover(GTK_MENU_BUTTON(app().menuButton)), "closed",
+        windowSignalConnect(gtk_menu_button_get_popover(GTK_MENU_BUTTON(app().menuButton)), "closed",
             G_CALLBACK(+[](GtkPopover*, gpointer) {
                 GtkWidget* target = app().searchBar && gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(app().searchBar))
                     ? app().searchEntry
@@ -7971,7 +8930,7 @@ void installUpdateMenu(GtkApplication* gtkApplication)
 
     GtkGesture* click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
-    g_signal_connect(click, "pressed", G_CALLBACK(onSecondaryPress), nullptr);
+    windowSignalConnect(click, "pressed", G_CALLBACK(onSecondaryPress), nullptr);
     gtk_widget_add_controller(app().window, GTK_EVENT_CONTROLLER(click));
 }
 
@@ -8027,12 +8986,27 @@ void completePendingClipboardRead(PendingClipboardRead* pending, bool approved)
             approved ? Ubiquitty::OSC::ClipboardReadDecision::Approved : Ubiquitty::OSC::ClipboardReadDecision::Refused);
 }
 
+void discardPendingClipboardRead(gpointer data)
+{
+    std::unique_ptr<PendingClipboardRead> pending(static_cast<PendingClipboardRead*>(data));
+    completePendingClipboardRead(pending.get(), false);
+    if (pending->itemStream)
+        g_input_stream_close(pending->itemStream, nullptr, nullptr);
+    g_clear_object(&pending->itemStream);
+    g_clear_object(&pending->sourceClipboard);
+}
+
 // Stage an approved internal-buffer read + complete the query (defined below).
 void approveInternalBufferRead(PendingClipboardRead* pending);
 
 // Publishes the complete capture before resolving the pending read.
 void stageCapturedClipboardAndComplete(PendingClipboardRead* pending)
 {
+    if (!pending->requester.get()) {
+        g_clear_object(&pending->sourceClipboard);
+        delete pending;
+        return;
+    }
     pending->client->provideClipboardReadBytes(pending->buffer,
         std::span<const char>(pending->textCaptured.data(), pending->textCaptured.size()));
     std::vector<Ubiquitty::ClipboardItem> items;
@@ -8057,7 +9031,7 @@ void onClipboardItemChunk(GObject* source, GAsyncResult* result, gpointer userDa
     if (count > 0 && pending->capturedBytes + pending->itemBytes.size() + static_cast<std::size_t>(count) <= limit) {
         pending->itemBytes.append(pending->readChunk.data(), static_cast<std::size_t>(count));
         g_input_stream_read_async(pending->itemStream, pending->readChunk.data(), pending->readChunk.size(),
-            G_PRIORITY_DEFAULT, nullptr, onClipboardItemChunk, pending);
+            G_PRIORITY_DEFAULT, nullptr, onWindowAsyncReady, windowAsyncData(onClipboardItemChunk, pending, discardPendingClipboardRead));
         return;
     }
     if (count == 0) {
@@ -8079,7 +9053,7 @@ void onClipboardItemOpened(GObject* source, GAsyncResult* result, gpointer userD
         return;
     }
     g_input_stream_read_async(pending->itemStream, pending->readChunk.data(), pending->readChunk.size(),
-        G_PRIORITY_DEFAULT, nullptr, onClipboardItemChunk, pending);
+        G_PRIORITY_DEFAULT, nullptr, onWindowAsyncReady, windowAsyncData(onClipboardItemChunk, pending, discardPendingClipboardRead));
 }
 
 void captureNextClipboardItem(PendingClipboardRead* pending)
@@ -8091,7 +9065,7 @@ void captureNextClipboardItem(PendingClipboardRead* pending)
     }
     pending->itemBytes.clear();
     const char* types[] = { pending->typesToCapture[pending->nextType++].c_str(), nullptr };
-    gdk_clipboard_read_async(pending->sourceClipboard, types, G_PRIORITY_DEFAULT, nullptr, onClipboardItemOpened, pending);
+    gdk_clipboard_read_async(pending->sourceClipboard, types, G_PRIORITY_DEFAULT, nullptr, onWindowAsyncReady, windowAsyncData(onClipboardItemOpened, pending, discardPendingClipboardRead));
 }
 
 void onClipboardReadForOSC52(GObject* source, GAsyncResult* result, gpointer userData)
@@ -8128,7 +9102,7 @@ void onClipboardReadChosen(GObject* source, GAsyncResult* result, gpointer userD
             gdk_clipboard_read_text_async(pending->buffer == Ubiquitty::ClipboardBuffer::Primary
                     ? gtk_widget_get_primary_clipboard(app().window)
                     : gtk_widget_get_clipboard(app().window),
-                nullptr, onClipboardReadForOSC52, pending);
+                nullptr, onWindowAsyncReady, windowAsyncData(onClipboardReadForOSC52, pending, discardPendingClipboardRead));
         else
             approveInternalBufferRead(pending);
         return; // pending freed in the read-completion path
@@ -8142,6 +9116,10 @@ void onClipboardReadChosen(GObject* source, GAsyncResult* result, gpointer userD
 // calls here for Allow/Prompt; Prompt asks first).
 void approveInternalBufferRead(PendingClipboardRead* pending)
 {
+    if (!pending->requester.get()) {
+        delete pending;
+        return;
+    }
     const std::string bytes = pending->client->internalBuffer(pending->buffer);
     pending->client->provideClipboardReadBytes(pending->buffer, std::span<const char>(bytes.data(), bytes.size()));
     // No typed staging call: the client scopes its typed serves to the
@@ -8168,7 +9146,7 @@ void beginClipboardRead(PendingClipboardRead* pending)
             gdk_clipboard_read_text_async(pending->buffer == Ubiquitty::ClipboardBuffer::Primary
                     ? gtk_widget_get_primary_clipboard(app().window)
                     : gtk_widget_get_clipboard(app().window),
-                nullptr, onClipboardReadForOSC52, pending);
+                nullptr, onWindowAsyncReady, windowAsyncData(onClipboardReadForOSC52, pending, discardPendingClipboardRead));
         else
             approveInternalBufferRead(pending);
         return;
@@ -8179,14 +9157,33 @@ void beginClipboardRead(PendingClipboardRead* pending)
     gtk_alert_dialog_set_buttons(dialog, buttons);
     gtk_alert_dialog_set_default_button(dialog, 0);
     gtk_alert_dialog_set_cancel_button(dialog, 0);
-    gtk_alert_dialog_choose(dialog, GTK_WINDOW(app().window), nullptr, onClipboardReadChosen, pending);
+    gtk_alert_dialog_choose(dialog, GTK_WINDOW(app().window), nullptr, onWindowAsyncReady, windowAsyncData(onClipboardReadChosen, pending, discardPendingClipboardRead));
     g_object_unref(dialog);
 }
 
+struct PendingClipboardPost {
+    std::shared_ptr<App> owner;
+    PendingClipboardRead* read;
+};
+
 gboolean onClipboardReadDue(gpointer data)
 {
-    beginClipboardRead(static_cast<PendingClipboardRead*>(data));
+    auto& post = *static_cast<PendingClipboardPost*>(data);
+    AppScope scope(*post.owner);
+    PendingClipboardRead* read = std::exchange(post.read, nullptr);
+    if (app().isClosing)
+        discardPendingClipboardRead(read);
+    else
+        beginClipboardRead(read);
     return G_SOURCE_REMOVE;
+}
+
+void discardClipboardPost(gpointer data)
+{
+    std::unique_ptr<PendingClipboardPost> post(static_cast<PendingClipboardPost*>(data));
+    AppScope scope(*post->owner);
+    if (post->read)
+        discardPendingClipboardRead(post->read);
 }
 
 // The parser's ask, on its own thread: the request is recorded with a weak
@@ -8196,9 +9193,10 @@ gboolean onClipboardReadDue(gpointer data)
 bool requestClipboardReadFromGTK(Ubiquitty::Linux::LinuxClipboardClient* client, void* requester, Ubiquitty::ClipboardBuffer buffer, std::string_view setSpec, Ubiquitty::ClipboardReadConfirmation confirmation)
 {
     auto* pane = static_cast<LinuxPane*>(requester);
-    if (!pane)
+    if (!pane || !pane->ownerApp)
         return false;
-    if (client->isOnUIThread() && !app().window)
+    AppScope scope(*pane->ownerApp);
+    if (client->isOnUIThread() && (app().isClosing || !app().window))
         return false; // no window (headless) — Core drops the query cleanly
     auto* pending = new PendingClipboardRead();
     pending->client = client;
@@ -8213,16 +9211,22 @@ bool requestClipboardReadFromGTK(Ubiquitty::Linux::LinuxClipboardClient* client,
     if (client->isOnUIThread())
         beginClipboardRead(pending);
     else
-        g_main_context_invoke_full(nullptr, G_PRIORITY_DEFAULT, onClipboardReadDue, pending, nullptr);
+        g_main_context_invoke_full(nullptr, G_PRIORITY_DEFAULT, onClipboardReadDue,
+            new PendingClipboardPost { app().shared_from_this(), pending }, discardClipboardPost);
     return true;
 }
 
-void onActivate(GtkApplication* gtkApplication, gpointer)
+void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runtime::LaunchRequest> request, std::string directory, std::string windowApplicationID = {})
 {
+    App& owner = createWindowApp();
+    AppScope scope(owner);
+    owner.launchRequest = std::move(request);
+    owner.launchDirectory = std::move(directory);
+    owner.windowApplicationID = std::move(windowApplicationID);
     app().application = gtkApplication; // for g_application_send_notification (the unfocused-bell notify)
     app().fontDPI = displayFontDPI();
     readToolkitCaretSettings();
-    if (!app().configurationWatcher.start()) {
+    if (!defaultApp().configurationWatcher.start()) {
         g_printerr("ubiquitty-linux: unable to watch config.toml for changes\n");
     }
     // Configuration FIRST: Core is configured from the stored document
@@ -8247,8 +9251,7 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     // keeps them byte-identical). This also sets the font-derived runtime cell the
     // grid + window are sized at; the menu can swap it live (applyFontMode).
     setupFonts();
-    app().vulkan.setGlyphRasterizer(currentRasterizer());
-    app().vulkan.setLigatureRasterizer(currentRasterizer());
+    configureSharedGlyphRenderer(app().vulkan);
     if (!launchShell()) {
         g_printerr("ubiquitty-linux: failed to launch shell\n");
         return;
@@ -8269,6 +9272,9 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
         const int launchTheme = Ubiquitty::Runtime::launchThemeIndex(config);
         if (launchTheme >= 0) {
             app().liveThemeIndex = launchTheme;
+            app().liveThemeName = Ubiquitty::Themes::get(launchTheme)->name;
+            app().configuredThemeName = app().liveThemeName;
+            app().appliedThemePalette = Ubiquitty::Themes::get(launchTheme)->serializeTOML();
             if (Ubiquitty::Terminal* term = activePane()->session->terminal()) {
                 const auto hold = holdPaneModel(*activePane());
                 (void)Ubiquitty::Themes::applyThemeToTerminal(*term, launchTheme);
@@ -8280,6 +9286,9 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     if (!app().isVulkanReady)
         g_printerr("ubiquitty-linux: Vulkan init failed — falling back to the CPU renderer\n");
     app().window = gtk_application_window_new(gtkApplication);
+    g_object_set_data(G_OBJECT(app().window), "ubiquitty-window-state", &app());
+    windowLifecycleSignalConnect(app().window, "close-request", G_CALLBACK(onWindowCloseRequested), nullptr);
+    windowLifecycleSignalConnect(app().window, "unrealize", G_CALLBACK(onWindowUnrealized), nullptr);
     gtk_window_set_title(GTK_WINDOW(app().window), "Ubiquitty (Linux)");
     // Initial geometry is pinned to exactly startupColumns x startupRows below by requesting
     // the focused pane picture's natural size — sizing the *window* here can't
@@ -8294,6 +9303,13 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     app().paneContainer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_hexpand(app().paneContainer, TRUE);
     gtk_widget_set_vexpand(app().paneContainer, TRUE);
+    // The toplevel maps before its children. Its map callback cannot install
+    // our clock until this container maps, including when the child program
+    // is silent and never supplies an output delivery to wake the first tick.
+    windowSignalConnect(app().paneContainer, "map", G_CALLBACK(+[](GtkWidget*, gpointer) {
+        requestRepaint();
+    }),
+        nullptr);
     gtk_box_append(GTK_BOX(app().paneContainer), activePane()->picture);
 
     // Open at exactly the launch grid: pin the focused pane picture's natural
@@ -8303,26 +9319,36 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     gtk_widget_set_size_request(activePane()->picture,
         static_cast<int>(activePane()->columns * logicalCellWidth() + 0.5f),
         static_cast<int>(activePane()->rows * logicalCellHeight() + 0.5f));
-    g_signal_connect(app().window, "map", G_CALLBACK(onWindowMappedRelaxSize), activePane()->picture);
-    g_signal_connect(app().window, "unmap", G_CALLBACK(onWindowUnmapped), nullptr);
-    g_signal_connect(app().window, "realize", G_CALLBACK(onWindowRealized), nullptr);
+    windowSignalConnect(app().window, "map", G_CALLBACK(onWindowMappedRelaxSize), activePane()->picture);
+    windowSignalConnect(app().window, "unmap", G_CALLBACK(onWindowUnmapped), nullptr);
+    windowSignalConnect(app().window, "realize", G_CALLBACK(onWindowRealized), nullptr);
     // HiDPI: re-rasterize at the device cell when the window lands on (or moves to)
     // a scaled monitor — the initial map on a HiDPI display fires this 1 -> N.
-    g_signal_connect(app().window, "notify::scale-factor", G_CALLBACK(onScaleFactorChanged), nullptr);
+    windowSignalConnect(app().window, "notify::scale-factor", G_CALLBACK(onScaleFactorChanged), nullptr);
     if (GtkSettings* settings = gtk_widget_get_settings(app().window)) {
-        g_signal_connect_object(settings, "notify::gtk-xft-dpi", G_CALLBACK(onScaleFactorChanged), app().window, G_CONNECT_DEFAULT);
-        g_signal_connect_object(settings, "notify::gtk-fontconfig-timestamp", G_CALLBACK(+[](GObject*, GParamSpec*, gpointer) {
+        windowSignalConnectObject(settings, "notify::gtk-xft-dpi", G_CALLBACK(onScaleFactorChanged), app().window, G_CONNECT_DEFAULT);
+        windowSignalConnectObject(settings, "notify::gtk-fontconfig-timestamp", G_CALLBACK(+[](GObject*, GParamSpec*, gpointer) {
+            rebuildFontsFromPreferences();
             for (const auto& pane : app().panes) {
                 pane->richText.invalidateFonts();
                 publishPaneTypography(*pane);
             }
             requestRepaint(); }), app().window, G_CONNECT_DEFAULT);
-        // The caret's settings all share GtkSettings' gtk-cursor- prefix.
-        g_signal_connect_object(settings, "notify", G_CALLBACK(+[](GObject*, GParamSpec* property, gpointer) {
-            if (!std::string_view(g_param_spec_get_name(property)).starts_with("gtk-cursor-"))
+        windowSignalConnectObject(settings, "notify", G_CALLBACK(+[](GObject*, GParamSpec* property, gpointer) {
+            const std::string_view name(g_param_spec_get_name(property));
+            if (name == "gtk-theme-name" || name == "gtk-application-prefer-dark-theme") {
+                windowIdleAddFull(G_PRIORITY_DEFAULT_IDLE, +[](gpointer) -> gboolean {
+                    refreshNativeLinkAccentColor();
+                    return G_SOURCE_REMOVE;
+                }, nullptr, nullptr);
+            }
+            // The caret's settings all share GtkSettings' gtk-cursor- prefix.
+            if (!name.starts_with("gtk-cursor-"))
                 return;
             readToolkitCaretSettings();
-            requestRepaint(); }), app().window, G_CONNECT_DEFAULT);
+            for (const auto& pane : app().panes)
+                pane->captureConfiguration.reset();
+            restartCaretBlink(false); }), app().window, G_CONNECT_DEFAULT);
     }
 
     // The find bar sits above the terminal in a vertical box; GtkSearchBar reveals
@@ -8337,11 +9363,11 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     gtk_box_append(GTK_BOX(searchRow), app().searchLabel);
     gtk_search_bar_set_child(GTK_SEARCH_BAR(app().searchBar), searchRow);
     gtk_search_bar_connect_entry(GTK_SEARCH_BAR(app().searchBar), GTK_EDITABLE(app().searchEntry));
-    g_signal_connect(app().searchEntry, "search-changed", G_CALLBACK(onSearchChanged), nullptr);
-    g_signal_connect(app().searchEntry, "activate", G_CALLBACK(onSearchActivate), nullptr);
-    g_signal_connect(app().searchEntry, "next-match", G_CALLBACK(onSearchNext), nullptr);
-    g_signal_connect(app().searchEntry, "previous-match", G_CALLBACK(onSearchPrevious), nullptr);
-    g_signal_connect(app().searchEntry, "stop-search", G_CALLBACK(onSearchStop), nullptr);
+    windowSignalConnect(app().searchEntry, "search-changed", G_CALLBACK(onSearchChanged), nullptr);
+    windowSignalConnect(app().searchEntry, "activate", G_CALLBACK(onSearchActivate), nullptr);
+    windowSignalConnect(app().searchEntry, "next-match", G_CALLBACK(onSearchNext), nullptr);
+    windowSignalConnect(app().searchEntry, "previous-match", G_CALLBACK(onSearchPrevious), nullptr);
+    windowSignalConnect(app().searchEntry, "stop-search", G_CALLBACK(onSearchStop), nullptr);
 
     app().tabStrip = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     GtkWidget* tabScroll = gtk_scrolled_window_new();
@@ -8355,7 +9381,7 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     gtk_widget_set_tooltip_text(plus, "New Tab (Ctrl+Shift+T)");
     gtk_accessible_update_property(GTK_ACCESSIBLE(plus), GTK_ACCESSIBLE_PROPERTY_LABEL, "New Tab", -1);
     gtk_widget_set_focus_on_click(plus, FALSE);
-    g_signal_connect(plus, "clicked", G_CALLBACK(onNewTabClicked), nullptr);
+    windowSignalConnect(plus, "clicked", G_CALLBACK(onNewTabClicked), nullptr);
     gtk_box_append(GTK_BOX(tabBar), plus);
     app().menuButton = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(app().menuButton), "open-menu-symbolic");
@@ -8366,6 +9392,7 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     GtkWidget* layout = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_append(GTK_BOX(layout), app().searchBar);
     gtk_box_append(GTK_BOX(layout), tabBar);
+    gtk_widget_set_visible(tabBar, !UBIQUITTY_LINUX_CHROMELESS);
     // The pane area sits under a GtkOverlay so the OSC 9;4 progress bars draw
     // above the grid texture without disturbing the per-pane picture mounting
     // (the macOS per-pane bars are likewise overlaid siblings). One full-area
@@ -8391,9 +9418,17 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     gtk_widget_set_valign(app().progressBar, GTK_ALIGN_FILL);
     gtk_widget_set_can_target(app().progressBar, FALSE); // clicks/scroll reach the grid
     gtk_widget_set_visible(app().progressBar, FALSE); // shown only with live progress
-    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(app().progressBar), drawProgressBar, nullptr, nullptr);
+    windowDrawingAreaSetDrawFunc(GTK_DRAWING_AREA(app().progressBar), drawProgressBar, nullptr, nullptr);
     gtk_overlay_add_overlay(GTK_OVERLAY(paneOverlay), app().progressBar);
     gtk_overlay_set_measure_overlay(GTK_OVERLAY(paneOverlay), app().progressBar, FALSE);
+    app().scrollIndicator = gtk_drawing_area_new();
+    gtk_widget_set_halign(app().scrollIndicator, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(app().scrollIndicator, GTK_ALIGN_FILL);
+    gtk_widget_set_can_target(app().scrollIndicator, FALSE);
+    gtk_widget_set_visible(app().scrollIndicator, FALSE);
+    windowDrawingAreaSetDrawFunc(GTK_DRAWING_AREA(app().scrollIndicator), drawScrollIndicator, nullptr, nullptr);
+    gtk_overlay_add_overlay(GTK_OVERLAY(paneOverlay), app().scrollIndicator);
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(paneOverlay), app().scrollIndicator, FALSE);
     gtk_box_append(GTK_BOX(layout), paneOverlay);
     // Under the panes, hidden until the configuration has a line to show; the
     // startup configure above has already left one if the file holds an error.
@@ -8404,37 +9439,12 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     // carries the background alpha, so the window + its widgets just need a transparent
     // background-color for the compositor to blend the desktop through. Best-effort
     // — the see-through depends on a compositing WM (Wayland / X11 compositor).
-    if (app().rasterContext.backgroundOpacity() < 1.0f) {
-        GtkCssProvider* provider = gtk_css_provider_new();
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations" // load_from_data: 4.12 wants load_from_string
-        gtk_css_provider_load_from_data(provider, "window.ubiquitty-translucent, window.ubiquitty-translucent * { background-color: transparent; }", -1);
-#pragma GCC diagnostic pop
-        gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(provider);
-        gtk_widget_add_css_class(app().window, "ubiquitty-translucent");
-    } else {
-        // Opaque + a configured theme: paint the window and the pane container with
-        // the theme background so the padding (a GTK margin around the grid picture)
-        // reads as the terminal background instead of the GTK/Adwaita window color.
-        // Unless [appearance] titlebar_style = "native", also replace the system
-        // title bar with a GtkHeaderBar painted the same, with the title and the
-        // window controls (close/minimise/maximise) in the theme foreground so they
-        // stay legible on the continuous background.
-        const int themeIndex = Ubiquitty::Runtime::launchThemeIndex(config);
-        if (Ubiquitty::Themes::get(themeIndex)) {
-            // The colours through the shared painter, so a later theme change
-            // reaches the chrome by the same route; the class and the header bar
-            // are widget structure and are attached once.
-            applyChromeTheme(themeIndex);
-            gtk_widget_add_css_class(app().window, "ubiquitty-themed-bg");
-            gtk_widget_add_css_class(app().paneContainer, "ubiquitty-themed-bg");
-            if (config.titlebarStyle != Ubiquitty::Preferences::TitlebarStyle::Native) {
-                GtkWidget* header = gtk_header_bar_new();
-                gtk_widget_add_css_class(header, "ubiquitty-titlebar");
-                gtk_window_set_titlebar(GTK_WINDOW(app().window), header);
-            }
-        }
+    const int themeIndex = Ubiquitty::Runtime::launchThemeIndex(config);
+    applyChromeTheme(themeIndex);
+    if (!UBIQUITTY_LINUX_CHROMELESS && config.titlebarStyle != Ubiquitty::Preferences::TitlebarStyle::Native) {
+        GtkWidget* header = gtk_header_bar_new();
+        gtk_widget_add_css_class(header, "ubiquitty-titlebar");
+        gtk_window_set_titlebar(GTK_WINDOW(app().window), header);
     }
 
     GtkEventController* keys = gtk_event_controller_key_new();
@@ -8442,10 +9452,10 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     // can take Return or Space for itself. The input method is still filtered
     // explicitly inside the handler.
     gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
-    g_signal_connect(keys, "key-pressed", G_CALLBACK(onKeyPressed), nullptr);
+    windowSignalConnect(keys, "key-pressed", G_CALLBACK(onKeyPressed), nullptr);
     // key-released forwards bare-modifier releases under Kitty REPORT_ALL +
     // REPORT_EVENTS (the shared symbol drops it otherwise); parity with macOS.
-    g_signal_connect(keys, "key-released", G_CALLBACK(onKeyReleased), nullptr);
+    windowSignalConnect(keys, "key-released", G_CALLBACK(onKeyReleased), nullptr);
     gtk_widget_add_controller(app().window, keys);
 
     // Input method (dead keys / compose / CJK), parity with macOS. onKeyPressed
@@ -8454,9 +9464,9 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     // accelerators above keep priority and the commit path stays explicit.
     app().imContext = gtk_im_multicontext_new();
     gtk_im_context_set_client_widget(app().imContext, app().window);
-    g_signal_connect(app().imContext, "commit", G_CALLBACK(onIMCommit), nullptr);
-    g_signal_connect(app().imContext, "preedit-changed", G_CALLBACK(onIMPreeditChanged), nullptr);
-    g_signal_connect(app().imContext, "preedit-end", G_CALLBACK(onIMPreeditEnd), nullptr);
+    windowSignalConnect(app().imContext, "commit", G_CALLBACK(onIMCommit), nullptr);
+    windowSignalConnect(app().imContext, "preedit-changed", G_CALLBACK(onIMPreeditChanged), nullptr);
+    windowSignalConnect(app().imContext, "preedit-end", G_CALLBACK(onIMPreeditEnd), nullptr);
 
     // Focus reporting (DECSET 1004): drive Core's windowFocused on every
     // window focus transition. setFocused always runs — Core gates the CSI I /
@@ -8464,14 +9474,14 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     // just records the state (read by bellWantsNotification for the unfocused
     // bell). The unfocused/hollow cursor look is an overlay concern.
     GtkEventController* focus = gtk_event_controller_focus_new();
-    g_signal_connect(focus, "enter", G_CALLBACK(onFocusEnter), nullptr);
-    g_signal_connect(focus, "leave", G_CALLBACK(onFocusLeave), nullptr);
+    windowSignalConnect(focus, "enter", G_CALLBACK(onFocusEnter), nullptr);
+    windowSignalConnect(focus, "leave", G_CALLBACK(onFocusLeave), nullptr);
     gtk_widget_add_controller(app().window, focus);
     // The pointer-lock focus fact's other half: window activation can change
     // with no focus-in/out edge of its own (another app's window comes
     // forward over this one).
-    g_signal_connect(app().window, "notify::"
-                                   "is-active",
+    windowSignalConnect(app().window, "notify::"
+                                      "is-active",
         G_CALLBACK(onPointerLockWindowActiveNotify), nullptr);
 
     // Mouse reporting + text selection controllers are per-pane (each pane's picture
@@ -8485,13 +9495,113 @@ void onActivate(GtkApplication* gtkApplication, gpointer)
     // one owner and the first frame is asked for the way every later one is.
     requestRepaint();
     // Poll the foreground process + working directory for the rich window title.
-    g_timeout_add(750, onTitleRefresh, nullptr);
+    windowTimeoutAdd(750, onTitleRefresh, nullptr);
     // Refresh the process inspector's tree while it's open.
-    g_timeout_add(1000, onInspectorRefresh, nullptr);
+    windowTimeoutAdd(1000, onInspectorRefresh, nullptr);
 
     installUpdateMenu(gtkApplication);
 
+    gtk_window_set_decorated(GTK_WINDOW(app().window), !UBIQUITTY_LINUX_CHROMELESS);
     gtk_window_present(GTK_WINDOW(app().window));
+}
+
+// Activations from app actions and the desktop open a normal login window;
+// commands belong only to the invocation that explicitly supplied them.
+void onActivate(GtkApplication* application, gpointer)
+{
+    openWindowApp(application, std::nullopt, {});
+}
+
+int openWindowFromArguments(GtkApplication* application, int argc, const char* const* argv, const char* directory)
+{
+    auto request = Ubiquitty::Runtime::parseLaunchArguments(argc, argv);
+    if (request.status == Ubiquitty::Runtime::LaunchRequest::Status::Error)
+        return 2;
+    openWindowApp(application, std::move(request), directory ? directory : "");
+    return 0;
+}
+
+Ubiquitty::Runtime::LaunchRequest launchRequestFromCommandLine(GApplicationCommandLine* commandLine)
+{
+    int argc = 0;
+    char** arguments = g_application_command_line_get_arguments(commandLine, &argc);
+    // GtkApplication consumes its separator while parsing its own options.
+    // Carry child argv in a typed option array, so literal child --/-e/options
+    // remain data and cannot be confused with that consumed separator.
+    GVariant* child = g_variant_dict_lookup_value(g_application_command_line_get_options_dict(commandLine),
+        "ubiquitty-exec", G_VARIANT_TYPE_STRING_ARRAY);
+    std::vector<const char*> launchArguments;
+    const gchar** childArguments = nullptr;
+    if (child) {
+        gsize count = 0;
+        childArguments = g_variant_get_strv(child, &count);
+        launchArguments = { argc > 0 ? arguments[0] : "ubiquitty", "--" };
+        for (gsize index = 0; index < count; ++index)
+            launchArguments.push_back(childArguments[index]);
+    } else {
+        for (int index = 0; index < argc; ++index)
+            launchArguments.push_back(arguments[index]);
+    }
+    auto request = Ubiquitty::Runtime::parseLaunchArguments(static_cast<int>(launchArguments.size()), launchArguments.data());
+    g_free(childArguments);
+    if (child)
+        g_variant_unref(child);
+    g_strfreev(arguments);
+    return request;
+}
+
+// Wayland app IDs are window metadata; the process keeps its fixed D-Bus ID.
+bool isValidWindowApplicationID(std::string_view value)
+{
+    return !value.empty() && value.size() <= 255 && std::ranges::all_of(value, [](unsigned char character) {
+        return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-';
+    });
+}
+
+std::expected<std::string, std::string> windowApplicationIDFromArguments(int argc, const char* const* argv)
+{
+    std::string result;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (argument == "--app-id") {
+            if (++index >= argc)
+                return std::unexpected("--app-id needs a value");
+            result = argv[index];
+        } else if (argument.starts_with("--app-id=")) {
+            result = argument.substr(9);
+        } else {
+            continue;
+        }
+        if (!isValidWindowApplicationID(result))
+            return std::unexpected("--app-id needs a nonempty identifier using letters, digits, dots, underscores or hyphens");
+    }
+    return result;
+}
+
+void registerLaunchOptions(GApplication* application)
+{
+    g_application_add_main_option(application, "app-id", 0, G_OPTION_FLAG_NONE, G_OPTION_ARG_STRING, "Window application ID", "ID");
+    g_application_add_main_option(application, "ubiquitty-exec", 0,
+        G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_STRING_ARRAY, "Child argument", nullptr);
+}
+
+int onApplicationCommandLine(GApplication* application, GApplicationCommandLine* commandLine, gpointer)
+{
+    auto request = launchRequestFromCommandLine(commandLine);
+    if (request.status == Ubiquitty::Runtime::LaunchRequest::Status::Error) {
+        g_application_command_line_printerr(commandLine, "ubiquitty: %s\n", request.error.c_str());
+        return 2;
+    }
+    const char* directory = g_application_command_line_get_cwd(commandLine);
+    const char* windowApplicationID = nullptr;
+    g_variant_dict_lookup(g_application_command_line_get_options_dict(commandLine), "app-id", "&s", &windowApplicationID);
+    if (windowApplicationID && !isValidWindowApplicationID(windowApplicationID)) {
+        g_application_command_line_printerr(commandLine, "ubiquitty: invalid --app-id\n");
+        return 2;
+    }
+    openWindowApp(GTK_APPLICATION(application), std::move(request), directory ? directory : "", windowApplicationID ? windowApplicationID : "");
+    return 0;
 }
 
 // Headless self-tests.
@@ -8918,11 +10028,60 @@ int smokeCursorAlpha()
     return didPass ? 0 : 1;
 }
 
+bool smokeScrollIndicator()
+{
+    if (!gtk_init_check()) {
+        g_printerr("smoke-scroll-indicator: GTK display unavailable\n");
+        return false;
+    }
+    Ubiquitty::Rendering::ScrollIndicatorParameters parameters;
+    parameters.alpha = 1;
+    parameters.scrollbackCount = 100;
+    parameters.rows = 20;
+    parameters.viewportSizeInPixels = { 320, 240 };
+    parameters.isFullScreen = true;
+    Ubiquitty::Rendering::OverlayQuad bottom;
+    Ubiquitty::Rendering::OverlayQuad top;
+    const bool hasBottom = Ubiquitty::Rendering::buildScrollIndicatorQuad(parameters, bottom);
+    parameters.viewOffset = 100;
+    const bool hasTop = Ubiquitty::Rendering::buildScrollIndicatorQuad(parameters, top);
+    const bool isGeometryCorrect = hasBottom && hasTop && top.minY < bottom.minY
+        && top.minX == bottom.minX && top.maxX == bottom.maxX && top.minX > 0 && top.maxX < 320;
+    const std::uint32_t stamp = 100;
+    const bool doesFade = Ubiquitty::scrollIndicatorAlpha(stamp, stamp + 59) == 1
+        && Ubiquitty::scrollIndicatorAlpha(stamp, stamp + 78) > 0
+        && Ubiquitty::scrollIndicatorAlpha(stamp, stamp + 78) < 1
+        && Ubiquitty::scrollIndicatorAlpha(stamp, stamp + 96) == 0;
+    parameters.alpha = 0;
+    const bool isHidden = !Ubiquitty::Rendering::buildScrollIndicatorQuad(parameters, top);
+    GtkWidget* const savedOverlay = app().scrollIndicator;
+    app().scrollIndicator = GTK_WIDGET(g_object_ref_sink(gtk_drawing_area_new()));
+    gtk_widget_set_can_target(app().scrollIndicator, FALSE);
+    noteScrollIndicatorActivity(*activePane());
+    const bool didWake = gtk_widget_get_visible(app().scrollIndicator) && app().scrollIndicatorSource != 0
+        && !gtk_widget_get_can_target(app().scrollIndicator);
+    if (app().scrollIndicatorSource != 0) {
+        g_source_remove(app().scrollIndicatorSource);
+        app().scrollIndicatorSource = 0;
+    }
+    activePane()->lastScrollIndicatorTick = Ubiquitty::PAL::monotonicTicks().count - 100;
+    onScrollIndicatorDue(nullptr);
+    const bool didSleep = !gtk_widget_get_visible(app().scrollIndicator) && app().scrollIndicatorSource == 0;
+    g_object_unref(app().scrollIndicator);
+    app().scrollIndicator = savedOverlay;
+    const bool didPass = isGeometryCorrect && doesFade && isHidden && didWake && didSleep;
+    g_print("smoke-scroll-indicator: geometry=%d fade=%d wake=%d sleep=%d -- %s\n", isGeometryCorrect, doesFade, didWake, didSleep,
+        didPass ? "PASS" : "FAIL");
+    return didPass;
+}
+
 bool smokeCursorPresentation(Ubiquitty::Linux::VulkanRenderer& renderer)
 {
+    const bool doesScrollIndicatorPass = smokeScrollIndicator();
     LinuxPane& pane = *activePane();
     pane.session->start(6, 24);
     pane.cursorPresentation.reset();
+    pane.cursorPresentationBypassUntil = 0;
     Ubiquitty::Terminal* term = pane.session->terminal();
     if (!term) {
         return false;
@@ -8949,7 +10108,7 @@ bool smokeCursorPresentation(Ubiquitty::Linux::VulkanRenderer& renderer)
         { "move-held", "\x1b[2;13H", 10.140, 1, 6 },
         { "move-settled", "", 10.157, 1, 12 },
     };
-    bool didPass = true;
+    bool didPass = doesScrollIndicatorPass;
     std::vector<uint8_t> baseline;
     for (const Step& step : steps) {
         Ubiquitty::processBytes(term, step.bytes);
@@ -8975,6 +10134,41 @@ bool smokeCursorPresentation(Ubiquitty::Linux::VulkanRenderer& renderer)
     }
 
     pane.cursorPresentation.reset();
+    Ubiquitty::processBytes(term, "\x1b[2 q\x1b[2;7H\x1b[?25h");
+    (void)resolvePresentedCursorOverlay(pane, 20.000, 1.0 / 60.0);
+    noteCursorInput(pane, 20.001);
+    Ubiquitty::processBytes(term, "x");
+    const auto typed = resolvePresentedCursorOverlay(pane, 20.002, 1.0 / 60.0);
+    const bool doesTypingMoveImmediately = typed.presentation->row == 1 && typed.presentation->column == 7
+        && !pane.cursorPresentation.isHolding();
+    didPass = didPass && doesTypingMoveImmediately;
+    g_print("smoke-cursor: presentation typed-cell-immediate -- %s\n", doesTypingMoveImmediately ? "PASS" : "FAIL");
+
+    const auto geometry = app().rasterContext.frameCaptureGeometry();
+    Ubiquitty::Rendering::TerminalSnapshotOptions options;
+    options.style = geometry.style;
+    options.isFocused = true;
+    options.cursorMixAlpha = 1.0f;
+    options.cellHeightPoints = geometry.cellHeightPoints;
+    options.lineSpacingPoints = geometry.lineSpacingPoints;
+    options.toolkitCaret = geometry.toolkitCaret;
+    std::unique_ptr<Ubiquitty::Rendering::FrameCapture, LinuxPane::FrameRelease> captured(Ubiquitty::Rendering::FrameCapture::make());
+    noteCursorInput(pane, 20.003);
+    Ubiquitty::processBytes(term, "y");
+    const bool didCaptureTyping = captured->capture(*term, options, geometry.metrics, geometry.glyphSlot);
+    captured->applyCursorPresentation(pane.cursorPresentation, 20.004, 1.0 / 60.0, 20.004 < pane.cursorPresentationBypassUntil);
+    const bool doesCapturedTypingMoveImmediately = didCaptureTyping && captured->cursorRow() == 1 && captured->cursorColumn() == 8
+        && !pane.cursorPresentation.isHolding();
+    didPass = didPass && doesCapturedTypingMoveImmediately;
+    g_print("smoke-cursor: presentation captured-typed-cell-immediate -- %s\n", doesCapturedTypingMoveImmediately ? "PASS" : "FAIL");
+    Ubiquitty::processBytes(term, "z");
+    const auto afterInputWindow = resolvePresentedCursorOverlay(pane, 20.200, 1.0 / 60.0);
+    const bool doesRedrawStillHold = afterInputWindow.presentation->column == 8 && pane.cursorPresentation.isHolding();
+    didPass = didPass && doesRedrawStillHold;
+    g_print("smoke-cursor: presentation redraw-hold-after-input -- %s\n", doesRedrawStillHold ? "PASS" : "FAIL");
+
+    pane.cursorPresentation.reset();
+    pane.cursorPresentationBypassUntil = 0;
     Ubiquitty::processBytes(term, "\x1b[2;7H\x1b[?25h");
     (void)resolvePresentedCursorOverlay(pane, 10.158, 1.0 / 60.0);
     Ubiquitty::processBytes(term, "\x1b[?25l\x1b[2;1H\x1b#6\x1b[5;19H");
@@ -9032,6 +10226,28 @@ bool smokeCursorPresentation(Ubiquitty::Linux::VulkanRenderer& renderer)
         scheduleCursorPresentation(closingPane, closeSeconds);
         closedSource = closingPane.cursorPresentationSource;
     }
+    // Modifier-only input must preserve both GTK's phase/timeout and the
+    // recent-typing presentation deadline, even when Kitty reports the key.
+    app().caretBlinkCycleStartMicros = 123;
+    app().caretInteractionMicros = 456;
+    pane.cursorPresentationBypassUntil = 7;
+    GtkIMContext* const savedIMContext = app().imContext;
+    app().imContext = nullptr;
+    bool doModifiersPreserveBlink = true;
+    for (const guint key : { GDK_KEY_Shift_L, GDK_KEY_Control_L, GDK_KEY_Alt_L, GDK_KEY_Super_L, GDK_KEY_Caps_Lock }) {
+        onKeyPressed(nullptr, key, 0, static_cast<GdkModifierType>(0), nullptr);
+        onKeyReleased(nullptr, key, 0, static_cast<GdkModifierType>(0), nullptr);
+        doModifiersPreserveBlink = doModifiersPreserveBlink && app().caretBlinkCycleStartMicros == 123
+            && app().caretInteractionMicros == 456 && pane.cursorPresentationBypassUntil == 7;
+    }
+    restartCaretBlink(true);
+    noteCursorInput(pane, 30);
+    const bool doesTypingResetBlink = app().caretBlinkCycleStartMicros != 123 && app().caretInteractionMicros != 456
+        && pane.cursorPresentationBypassUntil > 30;
+    app().imContext = savedIMContext;
+    didPass = didPass && doModifiersPreserveBlink && doesTypingResetBlink;
+    g_print("smoke-cursor: modifier-only-preserves-phase=%d typing-resets=%d -- %s\n", doModifiersPreserveBlink,
+        doesTypingResetBlink, doModifiersPreserveBlink && doesTypingResetBlink ? "PASS" : "FAIL");
     const bool didCancelOnClose = closedSource != 0 && g_main_context_find_source_by_id(nullptr, closedSource) == nullptr;
     didPass = didPass && didCancelOnClose;
     g_print("smoke-cursor: presentation close-cancels-deadline -- %s\n", didCancelOnClose ? "PASS" : "FAIL");
@@ -9412,6 +10628,188 @@ int smokeGTKCaret()
     return didPass ? 0 : 1;
 }
 
+bool smokeGlyphPrefixStability(Ubiquitty::Linux::VulkanRenderer& renderer, Ubiquitty::Linux::RasterContext& context)
+{
+    constexpr int rows = 6;
+    constexpr int columns = 64;
+    constexpr std::string_view prefix = "IlM09 AVWX";
+    constexpr int comparedColumns = 7;
+    Ubiquitty::Runtime::TerminalRuntime runtime;
+    runtime.init(Ubiquitty::Runtime::RuntimeInitParameters { rows, columns, false });
+    Ubiquitty::Terminal* terminal = runtime.borrowTermForRender();
+    if (!terminal)
+        return false;
+    Ubiquitty::processBytes(terminal, "\x1b[?25l");
+    const auto geometry = context.frameCaptureGeometry();
+    Ubiquitty::Rendering::TerminalSnapshotOptions options;
+    options.drawCursor = false;
+    options.style = geometry.style;
+    options.cellHeightPoints = geometry.cellHeightPoints;
+    options.lineSpacingPoints = geometry.lineSpacingPoints;
+    options.toolkitCaret = geometry.toolkitCaret;
+    std::unique_ptr<Ubiquitty::Rendering::FrameCapture, LinuxPane::FrameRelease> captured(Ubiquitty::Rendering::FrameCapture::make());
+    Ubiquitty::Rendering::FrameCapture::ViewTierOverrides emptyView;
+    const auto prefixPixels = [&](const std::vector<std::uint8_t>& pixels, int width, int height) {
+        const int comparedWidth = std::min(width, comparedColumns * context.cellWidth());
+        std::vector<std::uint8_t> result;
+        if (width <= 0 || height <= 0 || pixels.size() != static_cast<std::size_t>(width) * height * 4)
+            return result;
+        result.reserve(static_cast<std::size_t>(comparedWidth) * height * 4);
+        for (int row = 0; row < height; ++row) {
+            const auto first = pixels.begin() + static_cast<std::size_t>(row) * width * 4;
+            result.insert(result.end(), first, first + comparedWidth * 4);
+        }
+        return result;
+    };
+    const std::array<std::string_view, 4> styles { "0", "1", "3", "1;3" };
+    const std::array<std::string_view, 8> suffixes { "", "i", "WW", "M0i", ".aW9", "12345", "W1i9M0", "" };
+    std::vector<std::uint8_t> referencePrefix;
+    bool didPass = true;
+    for (const auto suffix : suffixes) {
+        for (std::size_t row = 0; row < styles.size(); ++row) {
+            const std::string line = std::format("\x1b[{};1H\x1b[{}m{}{}\x1b[0m\x1b[K", row + 1, styles[row], prefix, suffix);
+            Ubiquitty::processBytes(terminal, line);
+        }
+        std::vector<std::uint8_t> livePixels, capturedPixels;
+        int liveWidth = 0, liveHeight = 0, capturedWidth = 0, capturedHeight = 0;
+        const bool didDrawLive = renderer.renderGrid(context, terminal, livePixels, liveWidth, liveHeight);
+        const bool didCapture = captured->capture(*terminal, options, geometry.metrics, geometry.glyphSlot);
+        const bool didDrawCaptured = didCapture && renderer.renderGrid(context, terminal, capturedPixels, capturedWidth, capturedHeight, 0, nullptr, nullptr, 0, {}, captured.get(), &emptyView);
+        const auto livePrefix = prefixPixels(livePixels, liveWidth, liveHeight);
+        if (referencePrefix.empty())
+            referencePrefix = livePrefix;
+        const bool isStable = didDrawLive && didDrawCaptured && !livePrefix.empty()
+            && liveWidth == capturedWidth && liveHeight == capturedHeight
+            && livePixels == capturedPixels && livePrefix == referencePrefix;
+        didPass = didPass && isStable;
+        g_print("smoke-cursor: glyph-prefix suffix-length=%zu live==captured and unchanged-prefix -- %s\n", suffix.size(), isStable ? "PASS" : "FAIL");
+    }
+    return didPass;
+}
+
+bool smokeCapturedRetainedFrames(Ubiquitty::Linux::VulkanRenderer& renderer)
+{
+    constexpr int rows = 6;
+    constexpr int columns = 20;
+    Ubiquitty::Runtime::TerminalRuntime runtime;
+    runtime.init(Ubiquitty::Runtime::RuntimeInitParameters { rows, columns, false });
+    Ubiquitty::Terminal* terminal = runtime.borrowTermForRender();
+    if (!terminal)
+        return false;
+    Ubiquitty::processBytes(terminal, "\x1b[?25lAAAA BBBB\r\nCCCC DDDD\r\nEEEE FFFF\r\nGGGG HHHH");
+    const auto geometry = app().rasterContext.frameCaptureGeometry();
+    Ubiquitty::Rendering::TerminalSnapshotOptions options;
+    options.drawCursor = false;
+    options.style = geometry.style;
+    options.cellHeightPoints = geometry.cellHeightPoints;
+    options.lineSpacingPoints = geometry.lineSpacingPoints;
+    options.toolkitCaret = geometry.toolkitCaret;
+    std::unique_ptr<Ubiquitty::Rendering::FrameCapture, LinuxPane::FrameRelease> captured(Ubiquitty::Rendering::FrameCapture::make());
+    std::array<std::uint8_t, rows> dirtyRows;
+    dirtyRows.fill(1);
+    const auto captureRecord = [&](std::uint64_t sequence, std::uint64_t baseSequence) {
+        Ubiquitty::Rendering::FrameRecordHeader header;
+        header.sequence = sequence;
+        header.baseSequence = baseSequence;
+        header.viewGeneration = 1;
+        header.paletteGeneration = terminal->paletteEpoch;
+        header.kind = baseSequence == 0 ? Ubiquitty::Rendering::FrameRecordKind::Full : Ubiquitty::Rendering::FrameRecordKind::Delta;
+        Ubiquitty::Rendering::FrameDamage damage;
+        damage.canReuse = baseSequence != 0;
+        Ubiquitty::Rendering::CapturedRowRefresh refresh;
+        refresh.canReuseRows = damage.canReuse;
+        refresh.rowDirty = dirtyRows;
+        return captured->captureRecord(*terminal, options, geometry.metrics, geometry.glyphSlot, header, damage, refresh);
+    };
+    Ubiquitty::Rendering::FrameCapture::ViewTierOverrides emptyView;
+    const auto render = [&](Ubiquitty::Terminal* owner, const Ubiquitty::Rendering::FrameCapture::ViewTierOverrides* view,
+                            std::vector<std::uint8_t>& pixels) {
+        int width = 0, height = 0;
+        return renderer.renderGrid(app().rasterContext, owner, pixels, width, height, 0, nullptr, nullptr, 0, {}, captured.get(), view)
+            && width == columns * app().rasterContext.cellWidth() && height == rows * app().rasterContext.cellHeight();
+    };
+    bool didPass = true;
+    const auto check = [&](bool isMet, const char* name) {
+        didPass = didPass && isMet;
+        g_print("smoke-cursor: captured-retained %s -- %s\n", name, isMet ? "PASS" : "FAIL");
+    };
+    std::vector<std::uint8_t> full, incremental, reference;
+    if (!captureRecord(1, 0) || !render(terminal, &emptyView, full)) {
+        check(false, "initial full frame");
+        return false;
+    }
+    Ubiquitty::processBytes(terminal, "\x1b[3;1HIIII JJJJ");
+    dirtyRows.fill(0);
+    dirtyRows[2] = 1;
+    const std::uint64_t partialBefore = renderer.partialFrameCount();
+    const bool didDrawDelta = captureRecord(2, 1) && render(terminal, &emptyView, incremental);
+    check(didDrawDelta && renderer.partialFrameCount() == partialBefore + 1, "sparse delta loads the target");
+    check(render(terminal, nullptr, reference) && incremental == reference, "sparse delta matches a whole rebuild");
+
+    // Restate a known empty view before each refusal, so the refusal is the
+    // lineage check rather than the conservative unknown-tier fallback.
+    if (!render(terminal, &emptyView, full))
+        return false;
+    Ubiquitty::processBytes(terminal, "\x1b[2;1HKKKK LLLL");
+    dirtyRows.fill(0);
+    dirtyRows[1] = 1;
+    const std::uint64_t beforeGap = renderer.partialFrameCount();
+    check(captureRecord(4, 3) && render(terminal, &emptyView, incremental)
+            && renderer.partialFrameCount() == beforeGap,
+        "a skipped base rebuilds whole");
+    check(render(terminal, nullptr, reference) && incremental == reference, "a skipped base keeps every pixel");
+    if (!render(terminal, &emptyView, full))
+        return false;
+
+    Ubiquitty::Runtime::TerminalRuntime otherRuntime;
+    otherRuntime.init(Ubiquitty::Runtime::RuntimeInitParameters { rows, columns, false });
+    Ubiquitty::Terminal* otherTerminal = otherRuntime.borrowTermForRender();
+    const std::uint64_t beforeOwnerChange = renderer.partialFrameCount();
+    dirtyRows.fill(0);
+    check(otherTerminal && captureRecord(5, 4) && render(otherTerminal, &emptyView, incremental)
+            && renderer.partialFrameCount() == beforeOwnerChange,
+        "another pane cannot load this target");
+    check(otherTerminal && render(otherTerminal, nullptr, reference) && incremental == reference, "another pane keeps every pixel");
+    if (!render(otherTerminal, &emptyView, full))
+        return false;
+    auto viewWithExternalDamage = emptyView;
+    viewWithExternalDamage.overlayDirtyRows = dirtyRows.data();
+    viewWithExternalDamage.overlayDirtyRowCount = rows;
+    const std::uint64_t beforeExternalDamage = renderer.partialFrameCount();
+    check(captureRecord(6, 5) && render(otherTerminal, &viewWithExternalDamage, incremental)
+            && renderer.partialFrameCount() == beforeExternalDamage,
+        "external overlay damage rebuilds whole");
+    check(render(nullptr, &emptyView, reference) && incremental == reference, "a capture needs no live model read");
+    return didPass;
+}
+
+bool smokeTrackedGlyphPrefixes()
+{
+    const auto bundledPath = bundledFontPathForFamily("JetBrains Mono");
+    bool didPass = true;
+    for (const int tracking : { -3, 3 }) {
+        Ubiquitty::Linux::FreeTypeRasterizer rasterizer(deviceFontPixelSize(), "JetBrains Mono", std::string(), std::string(),
+            bundledPath, app().scale, app().lineSpacingPixels, tracking);
+        Ubiquitty::Linux::RasterContext context;
+        context.setRenderConfiguration(app().rasterContext.renderConfiguration());
+        context.setDeviceScale(app().scale);
+        context.setGlyphRasterizer(rasterizer);
+        Ubiquitty::Linux::VulkanRenderer renderer;
+        renderer.setGlyphRasterizer(rasterizer);
+        renderer.setLigatureRasterizer(rasterizer);
+        if (!rasterizer.ready() || !renderer.init()) {
+            g_print("smoke-cursor: tracked-prefix tracking=%d unavailable -- FAIL\n", tracking);
+            renderer.shutdown();
+            return false;
+        }
+        const bool isStable = smokeGlyphPrefixStability(renderer, context);
+        g_print("smoke-cursor: tracked-prefix tracking=%d -- %s\n", tracking, isStable ? "PASS" : "FAIL");
+        didPass = didPass && isStable;
+        renderer.shutdown();
+    }
+    return didPass;
+}
+
 int smokeCursor()
 {
     setupFonts();
@@ -9484,6 +10882,43 @@ int smokeCursor()
         g_print("smoke-cursor: %-9s CPU==GPU %s (%dx%d)\n", testCase.name, oracleLabel(!didCompareGPU ? OracleOutcome::NotCompared : (same ? OracleOutcome::Matched : OracleOutcome::Differed)), cpuWidth, cpuHeight);
         allPass = allPass && same;
 
+        // A parser-boundary frame must keep its own text and palette even if
+        // the parser advances, while GTK supplies its presentation-time blink.
+        const auto geometry = app().rasterContext.frameCaptureGeometry();
+        Ubiquitty::Rendering::TerminalSnapshotOptions options;
+        options.style = geometry.style;
+        options.isFocused = testCase.focused;
+        options.cellHeightPoints = geometry.cellHeightPoints;
+        options.lineSpacingPoints = geometry.lineSpacingPoints;
+        options.toolkitCaret = geometry.toolkitCaret;
+        const char* steadyStyle = testCase.shape == Ubiquitty::Cursor::Shape::Bar ? "\x1b[6 q"
+                                                                                  : (testCase.shape == Ubiquitty::Cursor::Shape::Underline ? "\x1b[4 q" : "\x1b[2 q");
+        Ubiquitty::processBytes(term, steadyStyle);
+        std::unique_ptr<Ubiquitty::Rendering::FrameCapture, LinuxPane::FrameRelease> captured(Ubiquitty::Rendering::FrameCapture::make());
+        const bool didCapture = captured->capture(*term, options, geometry.metrics, geometry.glyphSlot);
+        bool areCapturedPhasesEqual = didCapture;
+        for (const float alpha : { 1.0f, 0.75f, 0.5f, 0.25f, 0.0f }) {
+            cursor.blinkAlpha = alpha;
+            captured->setCursorMixAlpha(alpha);
+            std::vector<uint8_t> livePixels, capturedPixels;
+            int liveWidth = 0, liveHeight = 0, capturedWidth = 0, capturedHeight = 0;
+            const bool didDrawLive = renderer.renderGrid(app().rasterContext, term, livePixels, liveWidth, liveHeight, 0, nullptr, &cursor);
+            const bool didDrawCapture = renderer.renderGrid(app().rasterContext, term, capturedPixels, capturedWidth, capturedHeight, 0, nullptr, &cursor, 0, {}, captured.get());
+            areCapturedPhasesEqual = areCapturedPhasesEqual && didDrawLive && didDrawCapture
+                && liveWidth == capturedWidth && liveHeight == capturedHeight && livePixels == capturedPixels;
+        }
+        g_print("smoke-cursor: %-9s captured GTK blink phases -- %s\n", testCase.name, areCapturedPhasesEqual ? "PASS" : "FAIL");
+        allPass = allPass && areCapturedPhasesEqual;
+        std::vector<uint8_t> beforeAdvance, afterAdvance;
+        int beforeWidth = 0, beforeHeight = 0, afterWidth = 0, afterHeight = 0;
+        const bool didDrawBeforeAdvance = renderer.renderGrid(app().rasterContext, term, beforeAdvance, beforeWidth, beforeHeight, 0, nullptr, &cursor, 0, {}, captured.get());
+        Ubiquitty::processBytes(term, "\x1b]11;#550099\x07\x1b[2J\x1b[Hnext redraw");
+        const bool didDrawAfterAdvance = renderer.renderGrid(app().rasterContext, term, afterAdvance, afterWidth, afterHeight, 0, nullptr, &cursor, 0, {}, captured.get());
+        const bool isCaptureStable = didDrawBeforeAdvance && didDrawAfterAdvance && beforeWidth == afterWidth && beforeHeight == afterHeight
+            && beforeAdvance == afterAdvance;
+        g_print("smoke-cursor: %-9s capture survives next redraw -- %s\n", testCase.name, isCaptureStable ? "PASS" : "FAIL");
+        allPass = allPass && isCaptureStable;
+
         // Leave the bar PNG on disk for an eyeball check.
         if (std::string_view(testCase.name) == "bar" && cpuOk) {
             const std::vector<uint8_t> png = Ubiquitty::Rendering::encodePNG(cpu, { cpuWidth, cpuHeight });
@@ -9496,6 +10931,9 @@ int smokeCursor()
         }
     }
     allPass = smokeCursorPresentation(renderer) && allPass;
+    allPass = smokeCapturedRetainedFrames(renderer) && allPass;
+    allPass = smokeGlyphPrefixStability(renderer, app().rasterContext) && allPass;
+    allPass = smokeTrackedGlyphPrefixes() && allPass;
     renderer.shutdown();
     g_print("smoke-cursor: %s\n", allPass ? "PASS" : "FAIL");
     return allPass ? 0 : 1;
@@ -10457,16 +11895,12 @@ int smokeDoubledRun()
             const bool didRenderGPUFrame = renderer.renderGrid(app().rasterContext, term, gpu, gpuWidth, gpuHeight);
             const std::uint32_t glyphInstances = renderer.lastFrameProportionalInstanceCount();
             const std::uint32_t stripInstances = renderer.lastFrameProportionalStripInstanceCount();
-            // Which letters of a doubled row are a quad wider than the rect it
-            // samples. Both faces cut each letter from the windows of its
-            // doubled master, mapped 1:1 — the native face at the doubled em,
-            // the bitmap tier from the strike the doubled size draws from —
-            // and only the run's one space, which has no ink to window, is
-            // still a stretched cell. Counted exactly, so a letter falling back
-            // to the stretch fails here.
+            // Both dedicated glyphs and overlapping whole-run strips must
+            // rasterize ink at the doubled size. Empty spaces can retain a
+            // stretched quad; inspect actual atlas coverage so they cannot
+            // conceal a letter falling back to a stretched native-size mask.
             const std::uint32_t stretchedInstances = renderer.lastFrameStretchedProportionalInstanceCount();
-            const std::uint32_t doubledRows = scene.rowAttribute == 3 ? 2u : 1u;
-            const std::uint32_t expectedStretched = doubledRows;
+            const std::uint32_t stretchedInkInstances = renderer.lastFrameStretchedProportionalInstanceCount(Ubiquitty::Linux::VulkanRenderer::CoverageFilter::Inked);
             std::vector<std::uint8_t> cpu;
             int cpuWidth = 0;
             int cpuHeight = 0;
@@ -10483,13 +11917,15 @@ int smokeDoubledRun()
                         inkedPixelsOnTheDoubledRow += std::memcmp(cpu.data() + index, background, 3) != 0;
                 }
             }
-            const bool hasExpectedPopulation = scene.isProportional ? stretchedInstances == expectedStretched : glyphInstances == 0 && stripInstances == 0;
+            const bool hasExpectedPopulation = scene.isProportional
+                ? glyphInstances + stripInstances > 0 && stretchedInkInstances == 0
+                : glyphInstances == 0 && stripInstances == 0;
             const bool didPass = hasMatchingDimensions && differingPixels == 0
                 && hasExpectedPopulation && inkedPixelsOnTheDoubledRow > 0;
             failures += !didPass;
-            g_print("  %s %s row-attribute=%u h=%u glyphs=%u strips=%u stretched=%u doubled-row-ink=%zu differing=%zu %s\n", armName,
+            g_print("  %s %s row-attribute=%u h=%u glyphs=%u strips=%u stretched=%u stretched-ink=%u doubled-row-ink=%zu differing=%zu %s\n", armName,
                 scene.isProportional ? "proportional" : "mono", static_cast<unsigned>(scene.rowAttribute), static_cast<unsigned>(alignment), glyphInstances, stripInstances, stretchedInstances,
-                inkedPixelsOnTheDoubledRow, differingPixels, didPass ? "PASS" : "FAIL");
+                stretchedInkInstances, inkedPixelsOnTheDoubledRow, differingPixels, didPass ? "PASS" : "FAIL");
         }
         renderer.shutdown();
         app().rasterContext.resetSoftwareRenderer();
@@ -12342,6 +13778,25 @@ int smokeMouse()
         g_print("smoke-mouse: %-11.*s Cb=%d %s\n", static_cast<int>(expectation.label.size()), expectation.label.data(), expectation.buttonCode, matches ? "PASS" : "FAIL");
         didPass = didPass && matches;
     }
+    // A scroll need not carry coordinates. The pointer's pane-local point
+    // must survive even while the host owns mouse reporting; defaulting to
+    // (0,0) sends tmux's wheel to its top-left pane instead of the hovered pane.
+    const double pointerX = 5.5 * app().rasterContext.cellWidth() / app().scale;
+    const double pointerY = 2.5 * app().rasterContext.cellHeight() / app().scale;
+    onMouseEnter(nullptr, pointerX, pointerY, activePane());
+    const graphene_point_t point = pointerPointForScroll(*activePane(), nullptr);
+    Ubiquitty::Input::ScrollFact wheel;
+    int wheelRow = 0, wheelColumn = 0;
+    cellAtPoint(point.x, point.y, wheelRow, wheelColumn);
+    wheel.row = wheelRow;
+    wheel.column = wheelColumn;
+    wheel.deltaY = 1;
+    Ubiquitty::Input::PointerLadder ladder;
+    const auto routedWheel = Ubiquitty::Input::routeScroll(ladder, *term, wheel, currentWheelPolicy());
+    const bool didWheelTargetPass = routedWheel.wasConsumed
+        && std::string_view(routedWheel.bytes.data(), static_cast<std::size_t>(routedWheel.byteLength)) == "\x1b[<64;6;3M";
+    didPass = didPass && didWheelTargetPass;
+    g_print("smoke-mouse: wheel-at-pointer=%s\n", didWheelTargetPass ? "PASS" : "FAIL");
     g_print("smoke-mouse: unsupported-buttons=%s overall=%s\n", unsupportedRefused ? "PASS" : "FAIL", didPass ? "PASS" : "FAIL");
     return didPass ? 0 : 1;
 }
@@ -12432,7 +13887,32 @@ int smokeScrollback()
     const bool doesFrameHoldRows = frameOffset == probeOffset + 3 && topInFrame == topAtHistory;
     g_print("smoke-scrollback: held at offset %d over 3 rows not yet delivered, frame offset %d, top row = \"%s\" -- %s\n", probeOffset,
         frameOffset, topInFrame.c_str(), doesFrameHoldRows ? "PASS" : "FAIL");
-    return didPass && doesFrameHoldRows ? 0 : 1;
+    // A compositor consumes the workspace number after Super goes down.
+    // Receiving that bare modifier and a focus-out/in must preserve the view,
+    // including when Kitty explicitly asks for modifier reports.
+    const auto savedModes = pane.modes;
+    const bool wasScrollOnKeypressEnabled = term->modes.scrollOnKeypress;
+    term->modes.scrollOnKeypress = true;
+    pane.viewOffset = probeOffset;
+    onKeyPressed(nullptr, GDK_KEY_Super_L, 0, GDK_SUPER_MASK, nullptr);
+    onFocusLeave(nullptr, nullptr);
+    onFocusEnter(nullptr, nullptr);
+    const bool doesWorkspaceSwitchHold = pane.viewOffset == probeOffset;
+    pane.modes.kittyKeyboardFlags = { 8, 8 }; // REPORT_ALL includes bare modifiers.
+    onKeyPressed(nullptr, GDK_KEY_Super_L, 0, GDK_SUPER_MASK, nullptr);
+    const bool doesReportedModifierHold = pane.viewOffset == probeOffset;
+    pane.modes = savedModes;
+    onKeyPressed(nullptr, GDK_KEY_a, 0, static_cast<GdkModifierType>(0), nullptr);
+    const bool doesTypingSnap = pane.viewOffset == 0;
+    pane.viewOffset = probeOffset;
+    term->modes.scrollOnKeypress = false;
+    onKeyPressed(nullptr, GDK_KEY_b, 0, static_cast<GdkModifierType>(0), nullptr);
+    const bool doesDisabledPolicyHold = pane.viewOffset == probeOffset;
+    term->modes.scrollOnKeypress = wasScrollOnKeypressEnabled;
+    const bool doesInputPolicyPass = doesWorkspaceSwitchHold && doesReportedModifierHold && doesTypingSnap && doesDisabledPolicyHold;
+    g_print("smoke-scrollback: workspace-switch=%d reported-modifier=%d typing-snaps=%d disabled-policy=%d -- %s\n",
+        doesWorkspaceSwitchHold, doesReportedModifierHold, doesTypingSnap, doesDisabledPolicyHold, doesInputPolicyPass ? "PASS" : "FAIL");
+    return didPass && doesFrameHoldRows && doesInputPolicyPass ? 0 : 1;
 }
 
 // Selection + copy-to-clipboard self-test. Feeds a known two-line screen,
@@ -12518,6 +13998,59 @@ int smokeSelection()
     int hostCPUWidth = 0, hostCPUHeight = 0, hostGPUWidth = 0, hostGPUHeight = 0;
     const bool didRasterizeHostCPU = app().rasterContext.rasterizeTerm(term, hostCPU, hostCPUWidth, hostCPUHeight, activePane()->viewOffset, &activePane()->selection);
     const bool didRenderHostGPU = renderer.renderGrid(app().rasterContext, term, hostGPU, hostGPUWidth, hostGPUHeight, activePane()->viewOffset, &activePane()->selection);
+    // A boundary frame freezes the grid before the pointer's next gesture.
+    // Selection is the view's present-time overlay, so moving or clearing it
+    // must change this same captured picture without waiting for more output.
+    const auto geometry = app().rasterContext.frameCaptureGeometry();
+    Ubiquitty::Rendering::TerminalSnapshotOptions options;
+    options.style = geometry.style;
+    options.drawCursor = false;
+    options.cellHeightPoints = geometry.cellHeightPoints;
+    options.lineSpacingPoints = geometry.lineSpacingPoints;
+    options.toolkitCaret = geometry.toolkitCaret;
+    std::unique_ptr<Ubiquitty::Rendering::FrameCapture, LinuxPane::FrameRelease> boundary(Ubiquitty::Rendering::FrameCapture::make());
+    bool didCapturedSelectionPass = boundary->capture(*term, options, geometry.metrics, geometry.glyphSlot);
+    std::vector<Ubiquitty::Rendering::SelectionRowSpan> spans(static_cast<std::size_t>(Ubiquitty::Selection::viewportSpanCapacity(term->rows, term->columns)));
+    Ubiquitty::Linux::CursorOverlay hiddenCursor;
+    std::vector<uint8_t> unselectedCapture;
+    for (const int selectedRow : { -1, 0, 1, -1 }) {
+        Ubiquitty::Selection::init(activePane()->selection);
+        if (selectedRow >= 0) {
+            Ubiquitty::Selection::beginGesture(activePane()->selection, *term, selectedRow, 1, 1, 0, plainStyle);
+            Ubiquitty::Selection::dragGesture(activePane()->selection, *term, selectedRow, 3, 0);
+        }
+        Ubiquitty::Selection::ViewportEnds ends;
+        const auto selected = activePane()->session->viewSelectionOverCapture(&activePane()->selection, *boundary,
+            { spans.data(), spans.size() }, ends);
+        Ubiquitty::Rendering::FrameCapture::ViewTierOverrides view;
+        view.selectionSpans = spans.data();
+        view.selectionSpanCount = selected.count;
+        view.selectionColor = boundary->selectionFillColor();
+        view.isSelectionBehindText = boundary->isSelectionFillBehindText();
+        view.hasSelectionForegroundOverride = boundary->hasSelectionForegroundOverride();
+        view.selectionForeground = boundary->selectionForeground();
+        std::vector<uint8_t> referencePixels, capturedPixels;
+        int referenceWidth = 0, referenceHeight = 0, capturedWidth = 0, capturedHeight = 0;
+        const bool didDrawReference = renderer.renderGrid(app().rasterContext, term, referencePixels, referenceWidth, referenceHeight,
+            0, &activePane()->selection, &hiddenCursor);
+        const bool didDrawCaptured = renderer.renderGrid(app().rasterContext, term, capturedPixels, capturedWidth, capturedHeight,
+            0, &activePane()->selection, &hiddenCursor, 0, {}, boundary.get(), &view);
+        bool didCopyCurrentSelection = true;
+        if (selectedRow >= 0) {
+            const std::string wanted = selectedRow == 0 ? "BCD" : "GHI";
+            didCopyCurrentSelection = selected.count > 0 && selectionText() == wanted
+                && copySelectionToClipboard() && Ubiquitty::Linux::Clipboard::lastSetText() == wanted;
+        }
+        const bool didPicturesAgree = didDrawReference && didDrawCaptured
+            && referenceWidth == capturedWidth && referenceHeight == capturedHeight && referencePixels == capturedPixels;
+        if (unselectedCapture.empty())
+            unselectedCapture = capturedPixels;
+        const bool didSelectionChangePicture = selectedRow < 0 ? capturedPixels == unselectedCapture : capturedPixels != unselectedCapture;
+        didCapturedSelectionPass = didCapturedSelectionPass && didPicturesAgree && didCopyCurrentSelection && didSelectionChangePicture;
+        g_print("smoke-selection: captured row %d spans=%d copied=%d same=%d changed=%d -- %s\n", selectedRow, selected.count,
+            static_cast<int>(didCopyCurrentSelection), static_cast<int>(didPicturesAgree), static_cast<int>(didSelectionChangePicture),
+            didPicturesAgree && didCopyCurrentSelection && didSelectionChangePicture ? "PASS" : "FAIL");
+    }
     renderer.shutdown();
     const bool didCompareHost = didRasterizeHostCPU && didRenderHostGPU;
     const bool didHostOracleAgree = !didCompareHost
@@ -12534,7 +14067,7 @@ int smokeSelection()
         }
     }
 
-    const bool didPass = extracted == "BCD" && copied && captured == "BCD" && didWidePass && didOracleAgree && didHostOracleAgree;
+    const bool didPass = extracted == "BCD" && copied && captured == "BCD" && didWidePass && didOracleAgree && didHostOracleAgree && didCapturedSelectionPass;
     g_print("smoke-selection: extracted=\"%s\" clipboard=\"%s\" "
             "CPU==GPU(with selection)=%s CPU==GPU(behind the text, OSC 17)=%s -- %s\n",
         extracted.c_str(), captured.c_str(), oracleLabel(!didCompareGPU ? OracleOutcome::NotCompared : (didOracleAgree ? OracleOutcome::Matched : OracleOutcome::Differed)),
@@ -13131,6 +14664,7 @@ int smokePointerLock()
 // line handler, which is `ln -s` recording the argument it receives.
 int smokeLink()
 {
+    setupFonts();
     activePane()->session->start(startupRows, startupColumns);
     Ubiquitty::Terminal* term = activePane()->session->terminal();
     if (!term) {
@@ -13174,6 +14708,7 @@ int smokeLink()
     const GdkModifierType plain = static_cast<GdkModifierType>(0);
     expect(linkDispatchAtCell(0, 1, plain, 1).action == LocalLinkAction::Open, "a plain click opens a declared link");
     expect(linkDispatchAtCell(1, 8, plain, 1).action == LocalLinkAction::Refuse, "a plain click leaves a guessed link alone");
+    expect(linkDispatchAtCell(1, 8, GDK_SUPER_MASK, 1).target == "https://example.com/guess", "Super opens a guessed link");
     expect(linkDispatchAtCell(1, 8, GDK_CONTROL_MASK, 1).target == "https://example.com/guess", "Ctrl opens a guessed link");
     expect(linkDispatchAtCell(0, 1, plain, 2).action == LocalLinkAction::Refuse, "the second press of a double-click opens nothing");
     // The hand over the guess follows Ctrl as it goes down and up, as the
@@ -13198,15 +14733,95 @@ int smokeLink()
         app().hoverX = (8.5 * app().rasterContext.cellWidth()) / app().scale;
         app().hoverY = (1.5 * app().rasterContext.cellHeight()) / app().scale;
         app().isHoverPointKnown = true;
+        activePane()->pointerX = app().hoverX;
+        activePane()->pointerY = app().hoverY;
+        activePane()->isPointerPositionKnown = true;
         app().hoverCursorShape = Ubiquitty::MousePointerShape::Default;
         int hoverRow = -1;
         int hoverColumn = -1;
         cellAtPoint(app().hoverX, app().hoverY, hoverRow, hoverColumn);
         expect(hoverRow == 1 && hoverColumn == 8, "the resting pointer is over the guess");
+        std::vector<std::uint8_t> restingPixels;
+        std::vector<std::uint8_t> hoveredPixels;
+        int pixelWidth = 0;
+        int pixelHeight = 0;
+        app().rasterContext.setFrameHoverLink({});
+        const bool didDrawResting = app().rasterContext.rasterizeTerm(term, restingPixels, pixelWidth, pixelHeight);
+        const auto blinkStart = app().caretBlinkCycleStartMicros;
         onKeyPressed(nullptr, GDK_KEY_Control_L, 0, plain, nullptr);
+        expect(activePane()->hoveredLink.isActive && activePane()->hoveredLink.linkID == 0,
+            "Ctrl publishes a verified guessed-link span to the renderer");
+        app().rasterContext.setFrameHoverLink(activePane()->hoveredLink);
+        const bool didDrawHover = app().rasterContext.rasterizeTerm(term, hoveredPixels, pixelWidth, pixelHeight);
+        const auto metrics = currentRasterizer().cellMetrics();
+        const int firstRuleRow = std::clamp(app().rasterContext.cellHeight() + static_cast<int>(std::ceil(metrics.baselineFromTop)),
+            0, std::max(pixelHeight - 1, 0));
+        const int lastRuleRow = std::min(pixelHeight, app().rasterContext.cellHeight() * 2);
+        bool hasVisibleRule = false;
+        if (didDrawResting && didDrawHover && restingPixels.size() == hoveredPixels.size()) {
+            for (int y = firstRuleRow; y < lastRuleRow; ++y) {
+                for (int x = 4 * app().rasterContext.cellWidth(); x < 29 * app().rasterContext.cellWidth() && x < pixelWidth; ++x) {
+                    const auto pixel = static_cast<std::size_t>(y * pixelWidth + x) * 4;
+                    hasVisibleRule |= std::memcmp(restingPixels.data() + pixel, hoveredPixels.data() + pixel, 4) != 0;
+                }
+            }
+        }
+        expect(hasVisibleRule, "Ctrl hover draws the guessed URL underline below the text baseline");
+        expect(app().caretBlinkCycleStartMicros == blinkStart, "link-modifier hover does not restart cursor blinking");
         expect(app().hoverCursorShape == Ubiquitty::MousePointerShape::Pointer, "Ctrl going down over a guess raises the hand");
         onKeyReleased(nullptr, GDK_KEY_Control_L, 0, GDK_CONTROL_MASK, nullptr);
         expect(app().hoverCursorShape != Ubiquitty::MousePointerShape::Pointer, "and Ctrl coming up lowers it");
+        expect(!activePane()->hoveredLink.isActive, "Ctrl release clears the underline without pointer motion");
+        onKeyPressed(nullptr, GDK_KEY_Super_L, 0, plain, nullptr);
+        expect(activePane()->hoveredLink.isActive && app().hoverCursorShape == Ubiquitty::MousePointerShape::Pointer,
+            "Super hover publishes the same link affordance");
+        onKeyReleased(nullptr, GDK_KEY_Super_L, 0, GDK_SUPER_MASK, nullptr);
+        expect(!activePane()->hoveredLink.isActive, "Super release clears the underline without pointer motion");
+        updateHoverCursor((1.5 * app().rasterContext.cellWidth()) / app().scale,
+            (0.5 * app().rasterContext.cellHeight()) / app().scale, GDK_SUPER_MASK);
+        expect(activePane()->hoveredLink.isActive && activePane()->hoveredLink.linkID == id,
+            "OSC 8 hover preserves its declaring ID for discontiguous runs");
+        onMouseLeave(nullptr, activePane());
+        expect(!activePane()->hoveredLink.isActive, "leaving a pane removes link emphasis");
+        LinuxPane* const focusedBeforeHover = activePane();
+        auto other = std::make_unique<LinuxPane>();
+        other->headlessSession.reset(Ubiquitty::Runtime::TerminalSession::make());
+        other->session = other->headlessSession.get();
+        other->session->start(startupRows, startupColumns);
+        other->picture = GTK_WIDGET(g_object_ref_sink(gtk_picture_new()));
+        Ubiquitty::processBytes(other->session->terminal(), "https://background.example");
+        LinuxPane* const otherPane = other.get();
+        app().panes.push_back(std::move(other));
+        onMouseEnter(nullptr, app().rasterContext.cellWidth() * 2.5 / app().scale,
+            app().rasterContext.cellHeight() * 0.5 / app().scale, otherPane);
+        onKeyPressed(nullptr, GDK_KEY_Super_L, 0, plain, nullptr);
+        expect(otherPane->hoveredLink.isActive && otherPane->hoverCursorShape == Ubiquitty::MousePointerShape::Pointer,
+            "Super hover resolves a nonfocused pane at its own pointer position");
+        expect(activePane() == focusedBeforeHover, "hovering another split preserves keyboard focus");
+        onKeyReleased(nullptr, GDK_KEY_Super_L, 0, GDK_SUPER_MASK, nullptr);
+        expect(!otherPane->hoveredLink.isActive, "modifier release clears a nonfocused pane underline");
+        onMouseLeave(nullptr, otherPane);
+        auto previousLetters = std::move(focusedBeforeHover->presentedLetters);
+        const auto previousGrid = focusedBeforeHover->presentedGridSize;
+        const auto previousCell = focusedBeforeHover->presentedCellPixels;
+        focusedBeforeHover->presentedLetters = { { { 0, 10 }, { 10, 2 } } };
+        otherPane->presentedLetters = { { { 0, 2 }, { 2, 10 } } };
+        focusedBeforeHover->presentedGridSize = otherPane->presentedGridSize = { 2, 1 };
+        focusedBeforeHover->presentedCellPixels = otherPane->presentedCellPixels = { 12, 20 };
+        int inactiveRow = -1, inactiveColumn = -1, focusedRow = -1, focusedColumn = -1;
+        cellAtPanePoint(*otherPane, 3.0 / app().scale, 1.0 / app().scale, inactiveRow, inactiveColumn);
+        cellAtPanePoint(*focusedBeforeHover, 3.0 / app().scale, 1.0 / app().scale, focusedRow, focusedColumn);
+        expect(inactiveRow == 0 && inactiveColumn == 1 && focusedRow == 0 && focusedColumn == 0,
+            "each pane hit-tests its displayed proportional letters independently of focus and the last renderer");
+        expect(std::abs(xInCellsAtPanePoint(*otherPane, 3.0 / app().scale, 1.0 / app().scale, 0) - 1.1) < 1e-6,
+            "inactive-pane insertion fractions follow the displayed letter advance");
+        focusedBeforeHover->presentedLetters = std::move(previousLetters);
+        focusedBeforeHover->presentedGridSize = previousGrid;
+        focusedBeforeHover->presentedCellPixels = previousCell;
+        g_object_unref(otherPane->picture);
+        otherPane->picture = nullptr;
+        app().panes.pop_back();
+        app().rasterContext.setFrameHoverLink({});
         app().isHoverPointKnown = false;
         app().focusedPicture = nullptr;
         g_object_unref(picture);
@@ -13344,6 +14959,14 @@ int smokeLink()
     rmdir(folder.c_str());
     rmdir(scratch);
     g_free(scratch);
+
+    Ubiquitty::processBytes(term, "\033[2J\033[H");
+    const std::string wrappedURL = "https://example.com/" + std::string(static_cast<std::size_t>(startupColumns), 'a');
+    Ubiquitty::processBytes(term, wrappedURL);
+    expect(linkDispatchAtCell(1, 1, GDK_SUPER_MASK, 1).target == wrappedURL,
+        "Super-click resolves the complete URL across a soft wrap");
+    expect(linkDispatchAtCell(1, 1, GDK_CONTROL_MASK, 1).target == wrappedURL,
+        "Ctrl-click resolves the same wrapped URL through Core");
 
     g_print("smoke-link: %s\n", didPass ? "PASS" : "FAIL");
     return didPass ? 0 : 1;
@@ -14834,7 +16457,7 @@ int smokeBeam()
         rebuildFontsFromPreferences();
     }
     bool didShaperFollow = false;
-    if (app().glyphRasterizer.has_value()) {
+    if (static_cast<bool>(app().glyphRasterizer)) {
         const std::array<std::uint32_t, 2> arrow { '=', '>' };
         std::array<Ubiquitty::Linux::FreeTypeRasterizer::ShapedGlyph, 2> shaped {};
         auto substitutions = [&]() {
@@ -14956,6 +16579,447 @@ int smokeBeam()
     return didPass ? 0 : 1;
 }
 
+int smokeLaunchForwarding()
+{
+    if (!gtk_init_check()) {
+        g_printerr("smoke-launch-forwarding: GTK needs a display\n");
+        return 1;
+    }
+    bool didPass = true;
+    const auto check = [&](bool isMet, const char* label) {
+        g_print("smoke-launch-forwarding: %s -- %s\n", label, isMet ? "PASS" : "FAIL");
+        didPass = didPass && isMet;
+    };
+    // Exercise GtkApplication's actual option parser, not only our post-parse
+    // helper: GTK consumes a plain -- separator before the command-line signal.
+    GtkApplication* parser = gtk_application_new("org.ubiquitty.launch-parser-test",
+        static_cast<GApplicationFlags>(G_APPLICATION_NON_UNIQUE | G_APPLICATION_HANDLES_COMMAND_LINE));
+    registerLaunchOptions(G_APPLICATION(parser));
+    struct ParsedLaunch {
+        Ubiquitty::Runtime::LaunchRequest request;
+        std::string applicationID;
+    } parsed;
+    g_signal_connect(parser, "command-line", G_CALLBACK(+[](GApplication*, GApplicationCommandLine* commandLine, gpointer data) -> int {
+        auto& parsed = *static_cast<ParsedLaunch*>(data);
+        parsed.request = launchRequestFromCommandLine(commandLine);
+        const char* identifier = nullptr;
+        if (g_variant_dict_lookup(g_application_command_line_get_options_dict(commandLine), "app-id", "&s", &identifier))
+            parsed.applicationID = identifier;
+        return 0;
+    }),
+        &parsed);
+    std::vector<std::string> parserWords { "ubiquitty", "--app-id=org.omarchy.btop", "--ubiquitty-exec=/bin/printf", "--ubiquitty-exec=--",
+        "--ubiquitty-exec=-e", "--ubiquitty-exec=argument with spaces" };
+    std::vector<char*> parserArgv;
+    for (auto& word : parserWords)
+        parserArgv.push_back(word.data());
+    parserArgv.push_back(nullptr);
+    const int parserStatus = g_application_run(G_APPLICATION(parser), static_cast<int>(parserWords.size()), parserArgv.data());
+    check(parserStatus == 0 && parsed.request.status == Ubiquitty::Runtime::LaunchRequest::Status::Command
+            && parsed.request.command == std::vector<std::string> { "/bin/printf", "--", "-e", "argument with spaces" },
+        "GTK option parsing preserves literal child separators, options and spaces");
+    check(parsed.applicationID == "org.omarchy.btop", "GTK forwarding preserves the per-window application ID");
+    const std::array<const char*, 6> spacedID { "ubiquitty", "--app-id", "org.omarchy.btop", "-e", "env", "--app-id=child" };
+    const auto split = Ubiquitty::Runtime::parseLaunchArguments(6, spacedID.data());
+    const auto identifier = windowApplicationIDFromArguments(split.terminalArgumentCount, spacedID.data());
+    check(identifier && *identifier == "org.omarchy.btop"
+            && split.command == std::vector<std::string> { "env", "--app-id=child" },
+        "space-separated application ID preserves the child argument boundary");
+    const std::array<const char*, 2> emptyID { "ubiquitty", "--app-id=" };
+    const std::array<const char*, 2> missingID { "ubiquitty", "--app-id" };
+    const std::array<const char*, 2> invalidID { "ubiquitty", "--app-id=not an identifier" };
+    check(!windowApplicationIDFromArguments(2, emptyID.data()) && !windowApplicationIDFromArguments(2, missingID.data())
+            && !windowApplicationIDFromArguments(2, invalidID.data()),
+        "empty, missing and malformed application IDs are rejected");
+    g_object_unref(parser);
+    const auto settle = [] {
+        const gint64 deadline = g_get_monotonic_time() + 600000;
+        do {
+            g_main_context_iteration(nullptr, FALSE);
+            g_usleep(1000);
+        } while (g_get_monotonic_time() < deadline);
+    };
+    GtkApplication* application = gtk_application_new("org.ubiquitty.launch-forwarding-test", G_APPLICATION_NON_UNIQUE);
+    if (!g_application_register(G_APPLICATION(application), nullptr, nullptr)) {
+        g_object_unref(application);
+        return 1;
+    }
+    const auto newestOwner = [&]() -> std::shared_ptr<App> {
+        const auto& windows = windowApps().windows;
+        for (auto entry = windows.rbegin(); entry != windows.rend(); ++entry) {
+            if ((*entry)->application == application && !(*entry)->isClosing)
+                return *entry;
+        }
+        return nullptr;
+    };
+    const auto hasMarker = [](const std::shared_ptr<App>& owner, std::string_view marker) {
+        if (!owner || owner->panes.empty())
+            return false;
+        AppScope scope(*owner);
+        LinuxPane& pane = *owner->panes.front();
+        const auto hold = holdPaneModel(pane);
+        const auto* term = pane.session->terminal();
+        return term && visibleRowText(*term, 0, 0, term->columns).find(marker) != std::string::npos;
+    };
+    // Child options and spaces stay individual arguments, and each invocation
+    // starts in its caller's directory rather than the primary process's cwd.
+    const char* initial[] { "ubiquitty", "-e", "/bin/sh", "-c",
+        "printf '\\033[H\\033[2JFIRST:%s:%s' \"$PWD\" \"$1\"; exec cat", "sh", "first argument" };
+    check(openWindowFromArguments(application, static_cast<int>(std::size(initial)), initial, "/tmp") == 0,
+        "initial command accepted");
+    settle();
+    auto first = newestOwner();
+    check(hasMarker(first, "FIRST:/tmp:first argument"), "initial -e preserves argv and caller cwd");
+    const char* secondary[] { "ubiquitty", "--", "/bin/sh", "-c",
+        "printf '\\033[H\\033[2JSECOND:%s:%s' \"$PWD\" \"$1\"; exec cat", "sh", "--child-option" };
+    check(openWindowFromArguments(application, static_cast<int>(std::size(secondary)), secondary, "/") == 0,
+        "secondary command accepted");
+    settle();
+    auto second = newestOwner();
+    check(second != first && hasMarker(second, "SECOND:/:--child-option") && hasMarker(first, "FIRST:/tmp:first argument"),
+        "secondary invocation opens its own command without replacing the first");
+    const char* bare[] { "ubiquitty" };
+    check(openWindowFromArguments(application, static_cast<int>(std::size(bare)), bare, "/tmp") == 0,
+        "bare secondary invocation accepted");
+    settle();
+    auto activated = newestOwner();
+    check(activated && activated != first && activated != second && activated->launchRequest.has_value()
+            && activated->launchRequest->status == Ubiquitty::Runtime::LaunchRequest::Status::None
+            && !activated->panes.empty() && activated->panes.front()->session->isShareableLocalSession(),
+        "bare secondary invocation opens a login shell without rerunning either command");
+    while (GList* windows = gtk_application_get_windows(application))
+        gtk_window_destroy(GTK_WINDOW(windows->data));
+    settle();
+    g_object_unref(application);
+    g_print("smoke-launch-forwarding: %s\n", didPass ? "PASS" : "FAIL");
+    return didPass ? 0 : 1;
+}
+
+int smokeMultiwindow()
+{
+    if (!gtk_init_check()) {
+        g_printerr("smoke-multiwindow: GTK needs a display\n");
+        return 1;
+    }
+    bool didPass = true;
+    const auto check = [&](bool isMet, const char* label) {
+        g_print("smoke-multiwindow: %s -- %s\n", label, isMet ? "PASS" : "FAIL");
+        didPass = didPass && isMet;
+    };
+    const auto settle = [] {
+        const gint64 deadline = g_get_monotonic_time() + 600000;
+        do {
+            g_main_context_iteration(nullptr, FALSE);
+            g_usleep(1000);
+        } while (g_get_monotonic_time() < deadline);
+    };
+    GtkApplication* application = gtk_application_new("org.ubiquitty.multiwindow-test", G_APPLICATION_NON_UNIQUE);
+    if (!g_application_register(G_APPLICATION(application), nullptr, nullptr)) {
+        g_object_unref(application);
+        return 1;
+    }
+    onActivate(application, nullptr);
+    settle();
+    GList* windows = gtk_application_get_windows(application);
+    GtkWindow* firstWindow = windows ? GTK_WINDOW(windows->data) : nullptr;
+    std::shared_ptr<App> first = firstWindow && appForWindow(firstWindow) ? appForWindow(firstWindow)->shared_from_this() : nullptr;
+    if (!first || first->panes.empty()) {
+        check(false, "first activation owns a window and pane");
+        g_object_unref(application);
+        return 1;
+    }
+    LinuxPane* firstPane = first->panes.front().get();
+    auto* firstSession = firstPane->session;
+    const int firstDescriptor = firstSession ? firstSession->fileDescriptor() : -1;
+    onActivate(application, nullptr);
+    settle();
+    GtkWindow* secondWindow = nullptr;
+    for (GList* item = gtk_application_get_windows(application); item; item = item->next) {
+        if (item->data != firstWindow)
+            secondWindow = GTK_WINDOW(item->data);
+    }
+    std::shared_ptr<App> second = secondWindow && appForWindow(secondWindow) ? appForWindow(secondWindow)->shared_from_this() : nullptr;
+    check(second && second != first && g_list_length(gtk_application_get_windows(application)) == 2,
+        "two activations own two windows in one application");
+    if (!second || second->panes.empty()) {
+        gtk_window_destroy(firstWindow);
+        g_object_unref(application);
+        return 1;
+    }
+    LinuxPane* secondPane = second->panes.front().get();
+    check(firstSession && firstPane->session == firstSession && firstSession->fileDescriptor() == firstDescriptor
+            && firstSession->isShareableLocalSession() && secondPane->session
+            && secondPane->session != firstSession && secondPane->session->fileDescriptor() != firstDescriptor
+            && first->model.get() != second->model.get() && &first->vulkan != &second->vulkan,
+        "second activation preserves the first session and owns its own renderer");
+
+    int signalCount = 0;
+    GtkWidget* button = GTK_WIDGET(g_object_ref_sink(gtk_button_new()));
+    using SignalProbe = std::pair<App*, int*>;
+    SignalProbe signalData { first.get(), &signalCount };
+    {
+        AppScope scope(*first);
+        windowSignalConnect(button, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+            auto& state = *static_cast<SignalProbe*>(data);
+            if (&app() == state.first)
+                ++*state.second;
+        }),
+            &signalData);
+    }
+    {
+        AppScope scope(*second);
+        g_signal_emit_by_name(button, "clicked");
+        check(signalCount == 1 && &app() == second.get(), "signals retain their owner and restore the caller context");
+    }
+    g_object_unref(button);
+
+    const auto sendMarker = [&](App& owner, LinuxPane& pane, const char* marker) {
+        AppScope scope(owner);
+        const std::string command = std::string("printf '\\033[H\\033[2J") + marker + "\\n'\n";
+        pane.session->sendInput(command);
+        armPTYWriteDrain(&pane);
+    };
+    const auto hasMarker = [](App& owner, LinuxPane& pane, std::string_view marker) {
+        AppScope scope(owner);
+        const auto hold = holdPaneModel(pane);
+        const auto* term = pane.session ? pane.session->terminal() : nullptr;
+        return term && visibleRowText(*term, 0, 0, term->columns).find(marker) != std::string::npos;
+    };
+    sendMarker(*first, *firstPane, "FIRST-WINDOW");
+    sendMarker(*second, *secondPane, "SECOND-WINDOW");
+    settle();
+    check(hasMarker(*first, *firstPane, "FIRST-WINDOW") && hasMarker(*second, *secondPane, "SECOND-WINDOW"),
+        "both windows consume their own PTY output");
+    check(firstPane->picture && secondPane->picture
+            && gtk_picture_get_paintable(GTK_PICTURE(firstPane->picture))
+            && gtk_picture_get_paintable(GTK_PICTURE(secondPane->picture)),
+        "both windows publish a rendered frame");
+    gtk_window_destroy(secondWindow);
+    settle();
+    check(second->isClosing && !first->isClosing && firstPane->session == firstSession
+            && firstSession->isShareableLocalSession(),
+        "closing the second window preserves the first child");
+    sendMarker(*first, *firstPane, "AFTER-CLOSE");
+    settle();
+    check(hasMarker(*first, *firstPane, "AFTER-CLOSE"), "the surviving window keeps processing output");
+    gtk_window_destroy(firstWindow);
+    settle();
+    g_object_unref(application);
+    g_print("smoke-multiwindow: %s\n", didPass ? "PASS" : "FAIL");
+    return didPass ? 0 : 1;
+}
+
+int smokeSharedGlyphCache()
+{
+    if (!gtk_init_check()) {
+        g_printerr("smoke-shared-glyph-cache: GTK needs a display\n");
+        return 1;
+    }
+    bool didPass = true;
+    const auto check = [&](bool isMet, const char* label) {
+        g_print("smoke-shared-glyph-cache: %s -- %s\n", label, isMet ? "PASS" : "FAIL");
+        didPass = didPass && isMet;
+    };
+    const auto settle = [] {
+        const gint64 deadline = g_get_monotonic_time() + 300000;
+        do {
+            g_main_context_iteration(nullptr, FALSE);
+            g_usleep(1000);
+        } while (g_get_monotonic_time() < deadline);
+    };
+    GtkApplication* application = gtk_application_new("org.ubiquitty.shared-glyph-test", G_APPLICATION_NON_UNIQUE);
+    if (!g_application_register(G_APPLICATION(application), nullptr, nullptr)) {
+        g_object_unref(application);
+        return 1;
+    }
+    const auto newestOwner = [&]() -> std::shared_ptr<App> {
+        for (auto entry = windowApps().windows.rbegin(); entry != windowApps().windows.rend(); ++entry) {
+            if ((*entry)->application == application && !(*entry)->isClosing)
+                return *entry;
+        }
+        return nullptr;
+    };
+    const auto closeRemaining = [&] {
+        while (GList* windows = gtk_application_get_windows(application))
+            gtk_window_destroy(GTK_WINDOW(windows->data));
+        settle();
+        g_object_unref(application);
+    };
+    const std::array<const char*, 3> command { "ubiquitty", "-e", "/bin/cat" };
+    check(openWindowFromArguments(application, command.size(), command.data(), "/tmp") == 0, "first silent window opens");
+    settle();
+    auto first = newestOwner();
+    check(openWindowFromArguments(application, command.size(), command.data(), "/tmp") == 0, "second silent window opens");
+    settle();
+    auto second = newestOwner();
+    if (!first || !second || first == second || first->panes.empty() || second->panes.empty()) {
+        check(false, "both window owners exist");
+        closeRemaining();
+        return 1;
+    }
+    auto* firstPane = first->panes.front().get();
+    auto* secondPane = second->panes.front().get();
+    Ubiquitty::Linux::SharedFontRequest baseRequest;
+    {
+        AppScope scope(*first);
+        baseRequest = sharedFontRequest();
+    }
+    // The shared minimum budget covers these 80x24 windows and keeps the
+    // eviction regression bounded independently of the connected monitor.
+    for (const auto& owner : { first, second }) {
+        AppScope scope(*owner);
+        owner->vulkan.setSharedGlyphRasterizer(owner->sharedFonts->rasterizer(owner->fontRasterizerKind),
+            owner->sharedFonts->configuration(owner->fontRasterizerKind), 0);
+    }
+    const auto feed = [](App& owner, LinuxPane& pane, std::string_view bytes) {
+        AppScope scope(owner);
+        const auto hold = holdPaneModel(pane);
+        Ubiquitty::processBytes(pane.session->terminal(), bytes);
+    };
+    const auto render = [](App& owner, LinuxPane& pane, std::vector<std::uint8_t>& pixels) {
+        AppScope scope(owner);
+        const auto hold = holdPaneModel(pane);
+        auto* terminal = pane.session->terminal();
+        // Closing a tiled window lets the compositor grow its neighbour.
+        // Compare glyph lifetime at the same fixture size across that resize.
+        Ubiquitty::resize(*terminal, startupRows, startupColumns);
+        int width = 0, height = 0;
+        const bool didRender = owner.vulkan.renderGrid(owner.rasterContext, terminal, pixels, width, height);
+        const bool hasFixtureSize = width == startupColumns * owner.rasterContext.cellWidth()
+            && height == startupRows * owner.rasterContext.cellHeight();
+        if (didRender && !hasFixtureSize)
+            g_printerr("smoke-shared-glyph-cache: frame escaped the fixed %dx%d grid: %dx%d pixels\n", startupColumns, startupRows, width, height);
+        return didRender && hasFixtureSize;
+    };
+    constexpr std::string_view sample = "\033[?25l\033[0m\033[H\033[2Jcache ffi -> \033[1mbold\033[0m \033[3mitalic\033[0m";
+    feed(*first, *firstPane, sample);
+    feed(*second, *secondPane, sample);
+    std::vector<std::uint8_t> firstPixels, secondPixels;
+    check(render(*first, *firstPane, firstPixels), "first window warms the atlas");
+    const auto warmed = first->vulkan.sharedAtlasStatistics();
+    check(render(*second, *secondPane, secondPixels), "second window draws the warm glyphs");
+    const auto reused = second->vulkan.sharedAtlasStatistics();
+    const auto device = first->vulkan.sharedDeviceIdentity();
+    const auto atlas = first->vulkan.sharedFontAtlasIdentity();
+    const std::string key(first->vulkan.sharedFontAtlasKey());
+    const auto atlasLifetime = first->vulkan.sharedFontAtlasWeak();
+    const std::weak_ptr<Ubiquitty::Linux::SharedFontResources> fontLifetime = first->sharedFonts;
+    check(device && device == second->vulkan.sharedDeviceIdentity() && atlas && atlas == second->vulkan.sharedFontAtlasIdentity()
+            && !key.empty() && key == second->vulkan.sharedFontAtlasKey(),
+        "matching windows share the device and font atlas");
+    check(first->vulkan.privateTargetIdentity() && second->vulkan.privateTargetIdentity()
+            && first->vulkan.privateTargetIdentity() != second->vulkan.privateTargetIdentity() && firstPixels == secondPixels,
+        "private frame targets render identical pixels");
+    check(reused.rasterizedSlots == warmed.rasterizedSlots && reused.uploadBatches == warmed.uploadBatches,
+        "the second window adds no masks or atlas uploads");
+    check(reused.activeLeases >= 2 && reused.pinnedSlots > 0, "both views hold live glyph leases");
+
+    for (const std::string_view variant : { "family", "dpi", "features" }) {
+        auto request = baseRequest;
+        if (variant == "family") {
+            request.family = baseRequest.family == "Noto Sans" ? "JetBrains Mono" : "Noto Sans";
+            request.primaryPath = bundledFontPathForFamily(request.family);
+        } else if (variant == "dpi") {
+            request.pixelSize += 2;
+            request.pixelsPerPoint *= static_cast<double>(request.pixelSize) / baseRequest.pixelSize;
+        } else {
+            request.features = baseRequest.features == "liga=0" ? "liga=1" : "liga=0";
+        }
+        auto fonts = Ubiquitty::Linux::SharedFontResources::acquire(std::move(request));
+        auto face = fonts->rasterizer(Ubiquitty::Rendering::FontRasterizerKind::Native);
+        Ubiquitty::Linux::RasterContext context;
+        context.setRenderConfiguration(first->rasterContext.renderConfiguration());
+        context.setDeviceScale(baseRequest.deviceScale);
+        context.setGlyphRasterizer(*face);
+        Ubiquitty::Linux::VulkanRenderer renderer;
+        renderer.setSharedGlyphRasterizer(face, fonts->configuration(Ubiquitty::Rendering::FontRasterizerKind::Native), 0);
+        auto terminal = std::make_unique<Ubiquitty::Terminal>();
+        Ubiquitty::resize(*terminal, 3, 32);
+        Ubiquitty::processBytes(terminal.get(), sample);
+        int width = 0, height = 0;
+        std::vector<std::uint8_t> pixels;
+        const bool didRender = renderer.init() && renderer.renderGrid(context, terminal.get(), pixels, width, height);
+        check(didRender && renderer.sharedDeviceIdentity() == device && renderer.sharedFontAtlasIdentity() != atlas
+                && !renderer.sharedFontAtlasKey().empty() && renderer.sharedFontAtlasKey() != key,
+            variant == "family"    ? "a different font has its own atlas"
+                : variant == "dpi" ? "a different raster DPI has its own atlas"
+                                   : "different shaping features have their own atlas");
+        renderer.shutdown();
+    }
+
+    const int capacity = reused.slotCapacity;
+    const auto* secondTerm = secondPane->session->terminal();
+    const int batchSize = std::max(1, std::min(capacity / 16, secondTerm->rows * (secondTerm->columns / 2)));
+    const int wanted = capacity + capacity / 4;
+    bool didRenderPressure = capacity > 0;
+    constexpr int cjkCount = 0x9FFF - 0x4E00 + 1;
+    constexpr int hangulCount = 0xD7A3 - 0xAC00 + 1;
+    constexpr int coveredCount = cjkCount + hangulCount;
+    const int columnsPerLine = std::max(1, secondTerm->columns / 2);
+    int inserted = 0;
+    while (didRenderPressure && inserted < wanted) {
+        std::string bytes = "\033[?25l\033[H\033[2J";
+        const int count = std::min(batchSize, wanted - inserted);
+        int currentStyle = -1;
+        for (int index = 0; index < count; ++index) {
+            const int ordinal = inserted + index;
+            const int style = ordinal / coveredCount;
+            if (style != currentStyle) {
+                bytes += style == 0 ? "\033[0m" : style == 1 ? "\033[1m"
+                    : style == 2                             ? "\033[3m"
+                                                             : "\033[1;3m";
+                currentStyle = style;
+            }
+            const int scalar = ordinal % coveredCount;
+            const auto codePoint = static_cast<std::uint32_t>(scalar < cjkCount ? 0x4E00 + scalar : 0xAC00 + scalar - cjkCount);
+            Ubiquitty::Unicode::appendUTF8(bytes, codePoint);
+            if ((index + 1) % columnsPerLine == 0 && index + 1 < count)
+                bytes += "\r\n";
+        }
+        feed(*second, *secondPane, bytes);
+        didRenderPressure = render(*second, *secondPane, secondPixels);
+        inserted += count;
+    }
+    const auto afterPressure = second->vulkan.sharedAtlasStatistics();
+    check(didRenderPressure && afterPressure.rasterizedSlots - reused.rasterizedSlots > static_cast<std::uint64_t>(capacity),
+        "the busy window churns more glyphs than the atlas can hold");
+    {
+        AppScope scope(*first);
+        const auto hold = holdPaneModel(*firstPane);
+        // Force a whole-frame rebuild without changing the palette's pixels.
+        ++firstPane->session->terminal()->paletteEpoch;
+    }
+    std::vector<std::uint8_t> afterPressurePixels;
+    check(render(*first, *firstPane, afterPressurePixels) && afterPressurePixels == firstPixels
+            && first->vulkan.sharedAtlasStatistics().rasterizedSlots == afterPressure.rasterizedSlots,
+        "the idle window keeps its visible glyphs and exact pixels under pressure");
+
+    gtk_window_destroy(GTK_WINDOW(first->window));
+    first.reset();
+    check(!atlasLifetime.expired(), "closing one window keeps the other view's shared atlas lease");
+    // Dispatching the compositor's new allocation can legitimately grow the
+    // survivor's atlas beyond this fixture's minimal capacity.
+    settle();
+    check(secondPane->session && secondPane->session->isShareableLocalSession(),
+        "the remaining window keeps its local child alive");
+    feed(*second, *secondPane, sample);
+    check(render(*second, *secondPane, secondPixels) && secondPixels == firstPixels,
+        "the remaining window still renders the original glyphs");
+    const auto survivingAtlasLifetime = second->vulkan.sharedFontAtlasWeak();
+    gtk_window_destroy(GTK_WINDOW(second->window));
+    second.reset();
+    const gint64 expiryDeadline = g_get_monotonic_time() + 3000000;
+    while ((!atlasLifetime.expired() || !survivingAtlasLifetime.expired()) && g_get_monotonic_time() < expiryDeadline) {
+        g_main_context_iteration(nullptr, FALSE);
+        g_usleep(1000);
+    }
+    check(atlasLifetime.expired() && survivingAtlasLifetime.expired(), "the weak atlas registry expires after the last view closes");
+    check(fontLifetime.expired(), "closed frame owners release the last native font provider");
+    closeRemaining();
+    g_print("smoke-shared-glyph-cache: %s\n", didPass ? "PASS" : "FAIL");
+    return didPass ? 0 : 1;
+}
+
 // Exercises the real application actions and captures the GTK window content.
 int smokeWindowChrome(const char* outputDirectory)
 {
@@ -14964,8 +17028,8 @@ int smokeWindowChrome(const char* outputDirectory)
         return 1;
     }
     bool didPass = true;
-    const auto check = [&](bool condition, const char* message) {
-        if (!condition) {
+    const auto check = [&](bool isMet, const char* message) {
+        if (!isMet) {
             g_printerr("smoke-window-chrome: FAIL: %s\n", message);
             didPass = false;
         }
@@ -15026,17 +17090,39 @@ int smokeWindowChrome(const char* outputDirectory)
         return 1;
     }
     onActivate(application, nullptr);
+    GList* createdWindows = gtk_application_get_windows(application);
+    App* created = createdWindows ? appForWindow(GTK_WINDOW(createdWindows->data)) : nullptr;
+    if (!created) {
+        g_object_unref(application);
+        return 1;
+    }
+    auto retainedOwner = created->shared_from_this();
+    AppScope scope(*retainedOwner);
     settle();
-    check(app().tabStrip && gtk_widget_get_mapped(app().tabStrip), "a single tab has visible navigation");
-    check(app().menuButton && gtk_widget_get_mapped(app().menuButton), "the application menu is visible");
-    gtk_menu_button_popup(GTK_MENU_BUTTON(app().menuButton));
-    settle();
-    check(onKeyPressed(nullptr, GDK_KEY_Down, 0, static_cast<GdkModifierType>(0), nullptr) == GDK_EVENT_PROPAGATE,
-        "menu navigation reaches GTK instead of the terminal");
-    gtk_menu_button_popdown(GTK_MENU_BUTTON(app().menuButton));
+    int minWidth = 0, minHeight = 0;
+    gtk_widget_get_size_request(activePane()->picture, &minWidth, &minHeight);
+    check(minWidth == -1 && minHeight == -1, "the launch grid imposes no permanent minimum size");
+    if (GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(app().window)); surface && GDK_IS_TOPLEVEL(surface)) {
+        const auto state = gdk_toplevel_get_state(GDK_TOPLEVEL(surface));
+        const auto isCompositorSized = state & (GDK_TOPLEVEL_STATE_TILED | GDK_TOPLEVEL_STATE_FULLSCREEN | GDK_TOPLEVEL_STATE_MAXIMIZED);
+        if (!isCompositorSized) {
+            check(gtk_widget_get_width(activePane()->picture) + 1 >= startupColumns * logicalCellWidth(), "a floating window keeps the launch grid width after its minimum is relaxed");
+            check(gtk_widget_get_height(activePane()->picture) + 1 >= startupRows * logicalCellHeight(), "a floating window keeps the launch grid height after its minimum is relaxed");
+        }
+    }
+    check(app().tabStrip && gtk_widget_get_mapped(app().tabStrip) == !UBIQUITTY_LINUX_CHROMELESS, "tab visibility matches the desktop build");
+    check(app().menuButton && gtk_widget_get_mapped(app().menuButton) == !UBIQUITTY_LINUX_CHROMELESS, "menu visibility matches the desktop build");
+    check(gtk_window_get_decorated(GTK_WINDOW(app().window)) == !UBIQUITTY_LINUX_CHROMELESS, "window decorations match the desktop build");
+    if (!UBIQUITTY_LINUX_CHROMELESS) {
+        gtk_menu_button_popup(GTK_MENU_BUTTON(app().menuButton));
+        settle();
+        check(onKeyPressed(nullptr, GDK_KEY_Down, 0, static_cast<GdkModifierType>(0), nullptr) == GDK_EVENT_PROPAGATE,
+            "menu navigation reaches GTK instead of the terminal");
+        gtk_menu_button_popdown(GTK_MENU_BUTTON(app().menuButton));
+    }
     const SurfaceID surface = app().model->activeSurface();
     const TabID firstTab = app().model->activeTab(surface);
-    g_action_group_activate_action(G_ACTION_GROUP(application), "new-tab", nullptr);
+    g_action_group_activate_action(G_ACTION_GROUP(app().window), "new-tab", nullptr);
     settle();
     check(app().model->tabCount(surface) == 2, "the menu opens a second tab");
     GtkWidget* firstButton = gtk_widget_get_first_child(app().tabStrip);
@@ -15048,8 +17134,66 @@ int smokeWindowChrome(const char* outputDirectory)
         check(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(firstButton)), "the selected tab follows the model");
     } else
         check(false, "the strip contains a tab button");
+    const std::string savedDocument = Ubiquitty::Preferences::liveDocument();
+    const std::string savedThemeName = app().liveThemeName;
+    const auto configureTheme = [&](const char* background) {
+        const std::string document = std::string("[appearance]\ntheme = \"Omarchy\"\nbackground_opacity = 1\npadding = 14\n")
+            + "[[themes]]\nname = \"Omarchy\"\nfg = \"#ffffff\"\nbg = \"" + background + "\"\n";
+        check(Ubiquitty::Preferences::configure(document, Ubiquitty::Preferences::ParseMode::Strict).isApplied,
+            "a live Omarchy theme document applies");
+    };
+    configureTheme("#112233");
+    settle();
+    checkFrame(app().window, "palette-a", "the initial live palette produces a frame");
+    const int fixtureIndex = app().liveThemeIndex;
+    configureTheme("#a1b2c3");
+    settle();
+    checkFrame(app().window, "palette-b", "the replacement live palette produces a frame");
+    check(app().liveThemeIndex == fixtureIndex, "a palette reload retains the configured theme index");
+    for (const auto& pane : app().panes) {
+        const auto hold = holdPaneModel(*pane);
+        const auto background = Ubiquitty::Rendering::resolvePaletteColor(pane->session->terminal()->palette,
+            Ubiquitty::colorDefault, false);
+        check(background.red == 161 && background.green == 178 && background.blue == 195,
+            "a same-index palette replacement reaches every pane");
+        check(!pane->pendingCapture, "a palette replacement discards stale captured pixels");
+    }
+    check(gtk_widget_has_css_class(app().window, "ubiquitty-themed-bg")
+            && gtk_widget_has_css_class(app().paneContainer, "ubiquitty-themed-bg"),
+        "the window padding and pane remainder use the refreshed themed background");
+    const int manualTheme = 0;
+    const std::string manualName = Ubiquitty::Themes::get(manualTheme)->name;
+    applyThemeToAllPanes(manualTheme);
+    configureTheme("#a1b2c3");
+    check(app().liveThemeName == manualName, "an unrelated reload preserves the manual theme choice by name");
+    applyThemeToAllPanes(fixtureIndex);
+    auto chromeConfig = loadPreferences();
+    chromeConfig.backgroundOpacity = 1.0;
+    applyWindowGlobalRenderSettings(chromeConfig);
+    applyChromeTheme(fixtureIndex);
+    gchar* themeCSS = app().chromeProvider ? gtk_css_provider_to_string(app().chromeProvider) : nullptr;
+    std::string compactCSS = themeCSS ? themeCSS : "";
+    g_free(themeCSS);
+    std::erase_if(compactCSS, [](unsigned char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; });
+    check(compactCSS.find("rgb(161,178,195)") != std::string::npos || compactCSS.find("#a1b2c3") != std::string::npos,
+        "the scoped padding CSS contains the replacement background");
+    GtkCssProvider* const retainedProvider = app().chromeProvider;
+    chromeConfig.backgroundOpacity = 0.5;
+    applyWindowGlobalRenderSettings(chromeConfig);
+    applyChromeTheme(fixtureIndex);
+    check(gtk_widget_has_css_class(app().window, "ubiquitty-translucent"), "live translucency reaches the padding");
+    chromeConfig.backgroundOpacity = 1.0;
+    applyWindowGlobalRenderSettings(chromeConfig);
+    applyChromeTheme(fixtureIndex);
+    check(!gtk_widget_has_css_class(app().window, "ubiquitty-translucent") && app().chromeProvider == retainedProvider,
+        "returning to opaque replaces the same scoped provider without stale transparency");
+    check(Ubiquitty::Preferences::configure(savedDocument, Ubiquitty::Preferences::ParseMode::Strict).isApplied,
+        "the original configuration is restored after the theme probe");
+    const int restoredTheme = Ubiquitty::Themes::indexForName(savedThemeName.c_str());
+    if (restoredTheme >= 0)
+        applyThemeToAllPanes(restoredTheme);
     checkFrame(app().window, "tabs", "the window produces a rendered frame");
-    g_action_group_activate_action(G_ACTION_GROUP(application), "about", nullptr);
+    g_action_group_activate_action(G_ACTION_GROUP(app().window), "about", nullptr);
     settle();
     GListModel* windows = gtk_window_get_toplevels();
     GtkWidget* about = nullptr;
@@ -15077,8 +17221,6 @@ int smokeWindowChrome(const char* outputDirectory)
     app().configurationWatcher.stop();
     gtk_window_destroy(GTK_WINDOW(app().window));
     app().window = nullptr;
-    if (app().isVulkanReady)
-        app().vulkan.shutdown();
     g_object_unref(application);
     g_print("smoke-window-chrome: %s\n", didPass ? "PASS" : "FAIL");
     return didPass ? 0 : 1;
@@ -15257,7 +17399,7 @@ int smokePacing()
         }
     };
 
-    const auto nowSeconds = [] { return static_cast<double>(Ubiquitty::PAL::monotonicMicros()) / 1e6; };
+    const auto nowSeconds = [] { return static_cast<double>(g_get_monotonic_time()) / 1e6; };
     const double idleTimeout = app().frameDriver.idleTimeoutSeconds();
     check(idleTimeout > 0.0, "the driver has no idle timeout, so the clock would never pause");
 
@@ -15331,6 +17473,16 @@ int smokeSplits()
     // its own live descriptor + drain source, and the first pane's address STABLE.
     splitFocusedPaneUX(Panes::Orientation::Vertical);
     const PaneID pane2 = app().model->focusedPane(surface);
+    const auto deliverBackgroundOutput = [&] {
+        LinuxPane* background = paneForID(firstPane);
+        PaneDelivery delivery;
+        delivery.didOutputArrive = true;
+        delivery.history = background->session->readSnapshot().history;
+        app().isRepaintPending = false;
+        applyPaneDelivery(*background, delivery);
+    };
+    deliverBackgroundOutput();
+    check(app().isRepaintPending, "output in a visible unfocused split requests a frame");
     check(paneCount() == 2, "two panes after split");
     check(app().panes.size() == 2 && app().paneByID.size() == 2, "two live panes tracked");
     check(pane2 != invalidPane && pane2 != firstPane && pane2 > firstPane, "new PaneID distinct + monotonic");
@@ -15350,6 +17502,8 @@ int smokeSplits()
     const TabID splitTab = app().model->activeTab(surface);
     newTab();
     const TabID extraTab = app().model->activeTab(surface);
+    deliverBackgroundOutput();
+    check(!app().isRepaintPending, "output in a hidden tab does not restart the frame clock");
     check(extraTab != splitTab, "newTab left the split tab");
     switchToTab(splitTab);
     check(activePane() == firstPaneAddress, "the split tab restored ITS focused pane");
@@ -15432,7 +17586,125 @@ int smokeFontZoom()
     const bool grew = width1 > width0 && height1 > height0;
     applyFontZoom(app().defaultFontPixelSize);
     const bool restored = app().rasterContext.cellWidth() == width0 && app().rasterContext.cellHeight() == height0;
-    const bool didPass = grew && restored;
+    bool didPass = grew && restored;
+    const auto check = [&](bool condition, const char* message) {
+        if (!condition) {
+            g_printerr("smoke-font-zoom: FAIL: %s\n", message);
+            didPass = false;
+        }
+    };
+    const std::optional<std::string> savedFamilyOverride = std::getenv("UBIQUITTY_FONT")
+        ? std::optional<std::string>(std::getenv("UBIQUITTY_FONT"))
+        : std::nullopt;
+    const std::optional<std::string> savedSizeOverride = std::getenv("UBIQUITTY_FONT_SIZE")
+        ? std::optional<std::string>(std::getenv("UBIQUITTY_FONT_SIZE"))
+        : std::nullopt;
+    unsetenv("UBIQUITTY_FONT");
+    unsetenv("UBIQUITTY_FONT_SIZE");
+    const auto configureLive = [&](const char* document) {
+        check(Ubiquitty::Preferences::configure(std::string(document), Ubiquitty::Preferences::ParseMode::Strict).isApplied,
+            "the live font document was refused");
+        applyLiveConfiguration();
+    };
+    configureLive("[font]\nfamily = \"Ubiquitty Missing Font Fixture\"\nsize = 12\n");
+    check(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::Native && app().glyphRasterizer->ready(),
+        "an unavailable family keeps Fontconfig’s working native fallback");
+    configureLive("[font]\nfamily = \"GNU Unifont\"\nsize = 12\n");
+    check(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::EmbeddedBitmap, "an explicit bitmap selection takes effect");
+    configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 13.5\nsymbol_fallback = \"Monaspace Neon\"\n");
+    check(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::Native && app().glyphRasterizer->ready(),
+        "a corrected family recovers from the bitmap fallback");
+    check(app().fontFamily == "JetBrains Mono" && app().fallbackFontName == "Monaspace Neon", "the primary and symbol families reload");
+    check(app().fontSizePoints == 13.5 && app().defaultFontPixelSize == 14, "a configured fractional size updates the reset target");
+    applyFontZoom(20);
+    configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 13.5\nline_spacing = 2\n");
+    check(app().fontSizePoints == 20 && app().defaultFontPixelSize == 14, "a spacing edit preserves the live zoom");
+    configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 15.5\n");
+    check(app().fontSizePoints == 15.5 && app().defaultFontPixelSize == 16, "an actual size edit replaces the live zoom");
+    configureLive("[font]\nfamily = \"GNU Unifont\"\nsize = 15.5\n");
+    check(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::EmbeddedBitmap, "a configured bitmap family takes effect");
+    configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 15.5\n");
+    check(app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::Native, "a native family replaces a configured bitmap face");
+    setenv("UBIQUITTY_FONT", "JetBrains Mono", 1);
+    setenv("UBIQUITTY_FONT_SIZE", "18.5", 1);
+    app().areFontsSetUp = false;
+    setupFonts();
+    app().appliedRenderConfiguration = Ubiquitty::Preferences::Effective::renderConfiguration(loadPreferences());
+    applyFontZoom(22);
+    configureLive("[font]\nfamily = \"GNU Unifont\"\nsize = 24\n");
+    check(app().fontFamily == "JetBrains Mono" && app().fontRasterizerKind == Ubiquitty::Rendering::FontRasterizerKind::Native,
+        "the environment family keeps priority over a live edit");
+    check(app().fontSizePoints == 22 && app().defaultFontPixelSize == 19, "an overridden size edit preserves the live zoom and reset target");
+    unsetenv("UBIQUITTY_FONT");
+    unsetenv("UBIQUITTY_FONT_SIZE");
+    if (gtk_init_check()) {
+        configureLive("[font]\nfamily = \"JetBrains Mono\"\nsize = 11\nline_spacing = 0\n");
+        LinuxPane& pane = *activePane();
+        pane.session->start(startupRows, startupColumns);
+        // A mounted, allocated picture exercises the same font-size path as a
+        // live pane without mapping a window or taking the user's focus.
+        GtkWidget* parent = GTK_WIDGET(g_object_ref_sink(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0)));
+        GtkWidget* picture = GTK_WIDGET(g_object_ref_sink(gtk_picture_new()));
+        GtkWidget* previousPicture = std::exchange(pane.picture, picture);
+        gtk_box_append(GTK_BOX(parent), picture);
+        constexpr int viewportWidth = 800;
+        constexpr int viewportHeight = 480;
+        gtk_widget_allocate(picture, viewportWidth, viewportHeight, -1, nullptr);
+        if (pane.session->launchShellCommand("while IFS= read -r line; do :; done")) {
+            const int previousScale = app().scale;
+            for (const int scale : { 1, 2 }) {
+                app().scale = scale;
+                app().rasterContext.setDeviceScale(scale);
+                rebuildFontsFromPreferences();
+                updatePaneGridFromAllocation(pane);
+                publishPanePixelGeometry(pane);
+                for (const int direction : { 1, -1, 1, -1 }) {
+                    // Let the pixel-only coalescing interval expire. An old-grid
+                    // report would now be delivered, rather than hidden by it.
+                    g_usleep(50000);
+                    const auto before = pane.session->windowSizeDeliveryCount();
+                    applyFontZoom(app().fontPixelSize + direction);
+                    const int cellWidth = app().rasterContext.cellWidth();
+                    const int cellHeight = app().rasterContext.cellHeight();
+                    const int columns = viewportWidth * scale / cellWidth;
+                    const int rows = viewportHeight * scale / cellHeight;
+                    struct winsize windowSize {};
+                    check(::ioctl(pane.session->fileDescriptor(), TIOCGWINSZ, &windowSize) == 0
+                            && windowSize.ws_col == columns && windowSize.ws_row == rows
+                            && windowSize.ws_xpixel == columns * cellWidth && windowSize.ws_ypixel == rows * cellHeight,
+                        "font zoom did not publish the final grid and pixels together");
+                    check(pane.columns == columns && pane.rows == rows,
+                        "font zoom left the pane on its previous grid until the next frame");
+                    check(pane.session->windowSizeDeliveryCount() == before + 1,
+                        "font zoom did not deliver exactly one complete window size");
+                    // The next frame performs these same two operations. It
+                    // must not send the program a second resize for this zoom.
+                    check(!updatePaneGridFromAllocation(pane) && !publishPanePixelGeometry(pane),
+                        "the frame after font zoom publishes an additional resize");
+                    check(pane.session->windowSizeDeliveryCount() == before + 1,
+                        "the frame after font zoom delivered a duplicate window size");
+                }
+            }
+            g_print("smoke-font-zoom: exercised eight allocated-pane resize steps at 1x and 2x\n");
+            app().scale = previousScale;
+            app().rasterContext.setDeviceScale(previousScale);
+            pane.session->close();
+        } else
+            check(false, "could not open the font-zoom resize test PTY");
+        pane.picture = previousPicture;
+        gtk_box_remove(GTK_BOX(parent), picture);
+        g_object_unref(picture);
+        g_object_unref(parent);
+    } else
+        g_print("smoke-font-zoom: allocated-pane resize checks skipped (no GTK display)\n");
+    if (savedFamilyOverride)
+        setenv("UBIQUITTY_FONT", savedFamilyOverride->c_str(), 1);
+    else
+        unsetenv("UBIQUITTY_FONT");
+    if (savedSizeOverride)
+        setenv("UBIQUITTY_FONT_SIZE", savedSizeOverride->c_str(), 1);
+    else
+        unsetenv("UBIQUITTY_FONT_SIZE");
     g_print("smoke-font-zoom: %dx%d -> %dx%d (grew=%d), reset restored=%d -- %s\n", width0, height0, width1, height1, static_cast<int>(grew), static_cast<int>(restored), didPass ? "PASS" : "FAIL");
     return didPass ? 0 : 1;
 }
@@ -15976,7 +18248,7 @@ int smokePixelGeometry()
     gtk_picture_set_content_fit(GTK_PICTURE(pane.picture), GTK_CONTENT_FIT_FILL);
     gtk_box_append(GTK_BOX(app().paneContainer), pane.picture);
     gtk_window_set_child(GTK_WINDOW(app().window), app().paneContainer);
-    g_signal_connect(app().window, "realize", G_CALLBACK(onWindowRealized), nullptr);
+    windowSignalConnect(app().window, "realize", G_CALLBACK(onWindowRealized), nullptr);
     gtk_window_set_default_size(GTK_WINDOW(app().window), 160, 120);
     const auto waitUntil = [](const auto& predicate) {
         const gint64 deadline = g_get_monotonic_time() + 5000000;
@@ -16139,6 +18411,25 @@ int smokeConfigurationError()
     return failures == 0 ? 0 : 1;
 }
 
+void applyConfigurationToWindows()
+{
+    // Custom indices can move when a document adds or removes palettes. Each
+    // window retains names, so rebuilding once cannot change its chosen theme.
+    Ubiquitty::Themes::registerThemesFromValues(Ubiquitty::Preferences::values());
+    if (windowApps().windows.empty()) {
+        AppScope scope(defaultApp());
+        applyLiveConfiguration();
+        return;
+    }
+    const auto windows = windowApps().windows;
+    for (const auto& owner : windows) {
+        if (owner->isClosing)
+            continue;
+        AppScope scope(*owner);
+        applyLiveConfiguration();
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -16161,14 +18452,19 @@ int main(int argc, char** argv)
         return 2;
     }
     const int terminalArgc = launchRequest.terminalArgumentCount;
-    app().launchRequest = &launchRequest;
+    const auto windowApplicationID = windowApplicationIDFromArguments(terminalArgc, argv);
+    if (!windowApplicationID) {
+        g_printerr("ubiquitty: %s\n", windowApplicationID.error().c_str());
+        return 2;
+    }
+    app().launchRequest = launchRequest;
 
     std::string_view mode = (terminalArgc > 1) ? std::string_view(argv[1]) : std::string_view {};
     const char* arg2 = (terminalArgc > 2) ? argv[2] : nullptr;
 
     // Every configure reaches the window, or the headless pane a mode drives,
     // through this one subscription.
-    app().configurationSubscription.emplace(Ubiquitty::Preferences::ConfigurationSubscription::notifying(applyLiveConfiguration));
+    app().configurationSubscription.emplace(Ubiquitty::Preferences::ConfigurationSubscription::notifying(applyConfigurationToWindows));
 
     // `--config <path> <mode> [arg]` names the configuration the mode runs
     // under, so a headless render is reproducible without writing to the user's
@@ -16354,6 +18650,12 @@ int main(int argc, char** argv)
         return smokeBeam();
     if (mode == "--smoke-tabs")
         return smokeTabs();
+    if (mode == "--smoke-launch-forwarding")
+        return smokeLaunchForwarding();
+    if (mode == "--smoke-shared-glyph-cache")
+        return smokeSharedGlyphCache();
+    if (mode == "--smoke-multiwindow")
+        return smokeMultiwindow();
     if (mode == "--smoke-window-chrome")
         return smokeWindowChrome(arg2);
     if (mode == "--smoke-splits")
@@ -16392,16 +18694,34 @@ int main(int argc, char** argv)
         return smokePixelGeometry();
     }
 
-    GtkApplication* gtkApplication = gtk_application_new("org.ubiquitty.linux", G_APPLICATION_DEFAULT_FLAGS);
-    g_signal_connect(gtkApplication, "activate", G_CALLBACK(onActivate), nullptr);
-    // GTK is handed terminalArgc, not argc: GApplication parses the command line
-    // itself and rejects anything it does not recognise, so the child's own
-    // options reach it as unknown ones and `-e sh -c …` exits before a pane is
-    // ever created. What follows the marker was never this terminal's to parse.
-    const int status = g_application_run(G_APPLICATION(gtkApplication), terminalArgc, argv);
-    app().configurationWatcher.stop();
-    if (app().isVulkanReady)
-        app().vulkan.shutdown();
+    GtkApplication* gtkApplication = gtk_application_new("org.ubiquitty.linux", G_APPLICATION_HANDLES_COMMAND_LINE);
+    registerLaunchOptions(G_APPLICATION(gtkApplication));
+    windowSignalConnect(gtkApplication, "activate", G_CALLBACK(onActivate), nullptr);
+    g_signal_connect(gtkApplication, "command-line", G_CALLBACK(onApplicationCommandLine), nullptr);
+    // GApplication forwards the typed child-argument array and this caller's
+    // working directory to the primary. Equals keeps even an option-looking
+    // child argument inside its value, independently of GTK option parsing.
+    std::vector<std::string> forwardedArguments { argv[0] };
+    if (!windowApplicationID->empty())
+        forwardedArguments.push_back("--app-id=" + *windowApplicationID);
+    if (launchRequest.status == Ubiquitty::Runtime::LaunchRequest::Status::Command) {
+        for (const auto& argument : launchRequest.command)
+            forwardedArguments.push_back("--ubiquitty-exec=" + argument);
+    }
+    std::vector<char*> forwardedArgv;
+    for (auto& argument : forwardedArguments)
+        forwardedArgv.push_back(argument.data());
+    forwardedArgv.push_back(nullptr);
+    const int status = g_application_run(G_APPLICATION(gtkApplication), static_cast<int>(forwardedArguments.size()), forwardedArgv.data());
+    defaultApp().configurationWatcher.stop();
+    const auto windows = windowApps().windows;
+    for (const auto& owner : windows) {
+        GtkWidget* window = owner->window;
+        closeWindowApp(*owner);
+        if (window)
+            gtk_window_destroy(GTK_WINDOW(window));
+    }
+    windowApps().windows.clear();
     g_object_unref(gtkApplication);
     return status;
 }

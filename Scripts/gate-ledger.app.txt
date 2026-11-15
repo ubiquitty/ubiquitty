@@ -13,5 +13,5 @@ canary check-unwired-flags.py
 budget gate-self-tests-uncovered 10
 budget census-undated 2
 budget vocabulary-span 3
-budget vocabulary-array 10
+budget vocabulary-array 9
 tool check-merged-main.sh builds the tree a merge produced, so it needs the merge to exist first

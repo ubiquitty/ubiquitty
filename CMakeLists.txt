@@ -139,6 +139,13 @@ set(UBIQUITTY_FRONTEND "${UBIQUITTY_FRONTEND}" CACHE STRING
     "Frontend to build (macOS, iOS, Host, Agent, Linux, Wscons, Core)")
 message(STATUS "Ubiquitty frontend: ${UBIQUITTY_FRONTEND}")
 
+# A direct Linux configure should produce the same optimized build as the script.
+# Keep explicit Debug selections and multi-configuration generators intact.
+if(UBIQUITTY_FRONTEND STREQUAL "Linux" AND NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build configuration" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
 # Core's toolchain, optimisation, sources and libraries, which every arm below
 # builds on.
 include("${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyToolchain.cmake")
@@ -1572,6 +1579,8 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Agent")
 # ----------------------------------------------------------------------
 elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
 
+    option(UBIQUITTY_LINUX_CHROMELESS "Hide tabs and window decorations for tiling desktops" OFF)
+
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.16)
     pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo pangoft2)
@@ -1721,6 +1730,8 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
             COMPILE_FLAGS "-Wno-error=deprecated-declarations")
     endif()
     target_include_directories(ubiquitty-linux PRIVATE ${UBIQUITTY_SOURCE_INCLUDE_DIRECTORIES})
+    target_compile_definitions(ubiquitty-linux PRIVATE
+        UBIQUITTY_LINUX_CHROMELESS=$<BOOL:${UBIQUITTY_LINUX_CHROMELESS}>)
     target_include_directories(ubiquitty-linux SYSTEM PRIVATE "${UBIQUITTY_RE2_DIR}" "${UBIQUITTY_SIMDUTF_DIR}")
     if(NOT APPLE)
         # Portable <MacTypes.h> stand-in for this non-Apple build (Selection.h and

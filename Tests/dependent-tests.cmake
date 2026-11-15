@@ -25,6 +25,14 @@ if(APPLE)
     set(test_ios_control_client_EXTRA_LIBS ubiquitty-kit "-framework CoreFoundation")
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(UBIQUITTY_TEST_GIO REQUIRED IMPORTED_TARGET gio-2.0)
+    list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_configuration_watcher.cpp)
+    set(test_linux_configuration_watcher_EXTRA_SOURCES ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/ConfigurationWatcher.cpp)
+    set(test_linux_configuration_watcher_EXTRA_LIBS PkgConfig::UBIQUITTY_TEST_GIO)
+endif()
+
 # The app's tests include its own headers beside Core's and the Kit's, which the
 # include directories Core hands every test do not reach.
 foreach(_ubq_dependent_test IN LISTS UBQ_DEPENDENT_TESTS)

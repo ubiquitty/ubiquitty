@@ -1,3 +1,6 @@
 [submodule "Libraries/ubiquitty-kit"]
 	path = Libraries/ubiquitty-kit
 	url = https://github.com/ubiquitty/kit.git
+[submodule "Integrations/omarchy"]
+	path = Integrations/omarchy
+	url = https://github.com/ubiquitty/omarchy.git

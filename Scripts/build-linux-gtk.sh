@@ -17,7 +17,7 @@ BUILD_JOBS="${UBQ_BUILD_JOBS:-$( (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/
 # QUIET by default — prints only warnings/errors + the result (per-file compile
 # lines go to the log, not the terminal). Full log: $UBQ_BUILD_ROOT/linux/build.log.
 #
-#   ./Scripts/build-linux-gtk.sh            # Debug, quiet
+#   ./Scripts/build-linux-gtk.sh            # Release, quiet
 #   ./Scripts/build-linux-gtk.sh Release
 #   VERBOSE=1 ./Scripts/build-linux-gtk.sh  # stream full output
 #
@@ -34,8 +34,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$CORE_ROOT/Scripts/build-root.sh"
 # shellcheck source=Scripts/gate-report-lib.sh
 source "$CORE_ROOT/Scripts/gate-report-lib.sh"
-BUILD="$UBQ_BUILD_ROOT/linux"
-BUILD_TYPE="${1:-Debug}"
+BUILD="${UBIQUITTY_LINUX_BUILD_DIR:-$UBQ_BUILD_ROOT/linux}"
+BUILD_TYPE="${1:-Release}"
 LOG="$BUILD/build.log"
 VERBOSE="${VERBOSE:-0}"
 
@@ -72,6 +72,7 @@ if ! run cmake -B "$BUILD" -S "$ROOT" -G "$GEN" \
     "-DUBIQUITTY_CORE_SOURCE_DIR=$CORE_ROOT" "-DUBIQUITTY_KIT_SOURCE_DIR=$KIT_ROOT" \
     -DUBIQUITTY_QUIC="${UBIQUITTY_QUIC:-OFF}" \
     -DUBIQUITTY_LINUX_GPU_SHADERS="${UBIQUITTY_LINUX_GPU_SHADERS:-ON}" \
+    -DUBIQUITTY_LINUX_CHROMELESS="${UBIQUITTY_LINUX_CHROMELESS:-OFF}" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     ${PGO_ARGUMENTS[@]+"${PGO_ARGUMENTS[@]}"}; then
     # gate_failed_count returns 1, and under `set -e` that would exit before the

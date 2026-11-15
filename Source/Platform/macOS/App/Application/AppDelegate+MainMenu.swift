@@ -332,7 +332,7 @@ extension UBAppDelegate {
         menu.addItem(submenuItem("Cursor Shape", cursorMenu))
 
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Zoom In", action: NSSelectorFromString("growFontSize:"), keyEquivalent: "+")
+        menu.addItem(withTitle: "Zoom In", action: NSSelectorFromString("growFontSize:"), keyEquivalent: "=")
         menu.addItem(withTitle: "Zoom Out", action: NSSelectorFromString("shrinkFontSize:"), keyEquivalent: "-")
         menu.addItem(withTitle: "Actual Size", action: NSSelectorFromString("resetFontSize:"), keyEquivalent: "0")
 
