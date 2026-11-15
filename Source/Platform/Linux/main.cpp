@@ -14799,7 +14799,7 @@ int smokeLink()
         app().heldPointerButton = Ubiquitty::Input::PointerButton::Left;
         g_signal_emit_by_name(cancelledGesture, "cancel", nullptr);
         expect(!app().isLinkPressClaimed && app().heldPointerButton == Ubiquitty::Input::PointerButton::Other,
-            "cancelling a locally claimed link gesture releases its native pointer state");
+            "canceling a locally claimed link gesture releases its native pointer state");
         onKeyPressed(nullptr, GDK_KEY_Control_L, 0, plain, nullptr);
         expect(activePane()->hoveredLink.isActive, "a cancelled link gesture permits modifier hover without another click");
         onKeyReleased(nullptr, GDK_KEY_Control_L, 0, GDK_CONTROL_MASK, nullptr);
