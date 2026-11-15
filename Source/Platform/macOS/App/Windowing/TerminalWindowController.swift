@@ -6720,6 +6720,38 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         stepFontZoom(by: -Ubiquitty.Preferences.Zoom.fontZoomStep)
     }
 
+    /// Increases line spacing by one backing pixel.
+    ///
+    /// - Parameter sender: The control that sent the command.
+    @objc
+    public func growLineSpacing(_ sender: Any?) {
+        stepLineSpacing(direction: 1)
+    }
+
+    /// Decreases line spacing by one backing pixel.
+    ///
+    /// - Parameter sender: The control that sent the command.
+    @objc
+    public func shrinkLineSpacing(_ sender: Any?) {
+        stepLineSpacing(direction: -1)
+    }
+
+    /// Writes a pixel step through the shared spacing policy and live settings.
+    ///
+    /// - Parameter direction: Positive grows the spacing; negative shrinks it.
+    private func stepLineSpacing(direction: Int32) {
+        let scale = window?.backingScaleFactor ?? 1
+        let points = Ubiquitty.Preferences.Zoom.lineSpacingAfterPixelStep(
+            windowRenderConfiguration.lineSpacingPoints * scale,
+            scale,
+            direction
+        )
+        _ = Ubiquitty.Preferences.configureOwnKey(
+            .FontLineSpacing,
+            Ubiquitty.Preferences.Value.ofNumber(.Double, points)
+        )
+    }
+
     /// View > Actual Size: clears this window's zoom, so it renders the
     /// configured size. Nothing is written.
     ///

@@ -4995,6 +4995,16 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
         applyFontZoom(app().defaultFontPixelSize);
         break;
 
+    case ActionKind::IncreaseLineSpacing:
+    case ActionKind::DecreaseLineSpacing: {
+        namespace Prefs = Ubiquitty::Preferences;
+        const double points = Prefs::Zoom::lineSpacingAfterPixelStep(app().lineSpacingPixels,
+            deviceFontPixelsPerPoint(), action.kind == ActionKind::IncreaseLineSpacing ? 1 : -1);
+        (void)Prefs::configureOwnKey(Prefs::Key::FontLineSpacing,
+            Prefs::Value::ofNumber(Prefs::SerializeKind::Double, points));
+        break;
+    }
+
     case ActionKind::ToggleFullscreen:
         toggleFullscreen();
         break;

@@ -1574,7 +1574,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
 
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.16)
-    pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo)
+    pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo pangoft2)
     # Real-font glyph raster: fontconfig matches the monospace family, FreeType
     # rasterizes AA coverage. HarfBuzz is linked with the font stack so shaping support can
     # use the same target without a build-system change.
@@ -1669,6 +1669,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Accessibility.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/AccessibleTerminal.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanRenderer.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanFontAtlas.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanColorGlyphAtlas.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanGlyphAtlas.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanImageTextures.cpp
@@ -1678,6 +1679,8 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/PangoRichText.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/ColorGlyphPainter.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/FreeTypeRasterizer.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/NativeClusterRasterizer.cpp
+        ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/SharedFontResources.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Raster.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/PAL.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Clipboard.cpp
