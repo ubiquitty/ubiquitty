@@ -1638,10 +1638,37 @@ void onWindowRealized(GtkWidget* window, gpointer)
     }
 }
 
-// On first map: relax the launch-time grid size pin (see onActivate) so the user
-// can resize below 80x24, and apply the now-resolved display scale — the map is
-// the first point the window's scale_factor reflects its monitor.
-void onWindowMappedRelaxSize(GtkWidget* window, gpointer picture)
+void preserveLaunchSize(GtkWindow* window, GtkWidget* picture)
+{
+    int minWidth = -1;
+    int minHeight = -1;
+    gtk_widget_get_size_request(picture, &minWidth, &minHeight);
+    if (minWidth < 0 && minHeight < 0)
+        return; // A remap keeps the size the user chose after launch.
+
+    // Mapping can precede the first allocation. Measure while the grid pin
+    // still contributes to the window's natural size, including its chrome and
+    // margins, then preserve that size before the empty picture loses its pin.
+    int width = 0;
+    int height = 0;
+    GtkWidget* widget = GTK_WIDGET(window);
+    if (gtk_widget_get_request_mode(widget) == GTK_SIZE_REQUEST_WIDTH_FOR_HEIGHT) {
+        gtk_widget_measure(widget, GTK_ORIENTATION_VERTICAL, -1, nullptr, &height, nullptr, nullptr);
+        gtk_widget_measure(widget, GTK_ORIENTATION_HORIZONTAL, height, nullptr, &width, nullptr, nullptr);
+    } else {
+        gtk_widget_measure(widget, GTK_ORIENTATION_HORIZONTAL, -1, nullptr, &width, nullptr, nullptr);
+        gtk_widget_measure(widget, GTK_ORIENTATION_VERTICAL, width, nullptr, &height, nullptr, nullptr);
+    }
+    if (width <= 0 || height <= 0)
+        return;
+    gtk_window_set_default_size(window, width, height);
+    gtk_widget_set_size_request(picture, -1, -1);
+}
+
+// On first map: preserve the launch grid before relaxing its temporary minimum,
+// and apply the now-resolved display scale — the map is the first point the
+// window's scale_factor reflects its monitor.
+void onWindowMappedRelaxSize(GtkWidget* window, gpointer)
 {
 #ifdef GDK_WINDOWING_WAYLAND
     // GDK creates the Wayland toplevel during its map handler. Its application
@@ -1651,15 +1678,8 @@ void onWindowMappedRelaxSize(GtkWidget* window, gpointer picture)
         && !app().windowApplicationID.empty())
         gdk_wayland_toplevel_set_application_id(GDK_TOPLEVEL(surface), app().windowApplicationID.c_str());
 #endif
-    // Once the compositor has allocated the launch size, keep it as the
-    // floating window's default before dropping the temporary minimum. A
-    // picture with no frame yet has no natural size to preserve it itself.
-    const int width = gtk_widget_get_width(window);
-    const int height = gtk_widget_get_height(window);
-    if (width > 0 && height > 0)
-        gtk_window_set_default_size(GTK_WINDOW(window), width, height);
-    if (picture)
-        gtk_widget_set_size_request(GTK_WIDGET(picture), -1, -1);
+    if (LinuxPane* pane = activePane(); pane && pane->picture)
+        preserveLaunchSize(GTK_WINDOW(window), pane->picture);
     onScaleFactorChanged(G_OBJECT(window), nullptr, nullptr);
     requestRepaint();
 }
@@ -9318,7 +9338,7 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
         paneInsets(*activePane(), static_cast<float>(app().scale)), 0);
     gtk_widget_set_size_request(activePane()->picture,
         static_cast<int>(std::ceil(launchExtent.width / app().scale)), static_cast<int>(std::ceil(launchExtent.height / app().scale)));
-    windowSignalConnect(app().window, "map", G_CALLBACK(onWindowMappedRelaxSize), activePane()->picture);
+    windowSignalConnect(app().window, "map", G_CALLBACK(onWindowMappedRelaxSize), nullptr);
     windowSignalConnect(app().window, "unmap", G_CALLBACK(onWindowUnmapped), nullptr);
     windowSignalConnect(app().window, "realize", G_CALLBACK(onWindowRealized), nullptr);
     // HiDPI: re-rasterize at the device cell when the window lands on (or moves to)
@@ -17155,6 +17175,51 @@ int smokeWindowChrome(const char* outputDirectory)
     }
     auto retainedOwner = created->shared_from_this();
     AppScope scope(*retainedOwner);
+    // A silent child supplies no paintable to give the picture a natural size.
+    // Exercise that startup independently of the shell and its first output.
+    GtkWidget* silentWindow = gtk_window_new();
+    GtkWidget* silentPicture = gtk_picture_new();
+    gtk_widget_set_hexpand(silentPicture, TRUE);
+    gtk_widget_set_vexpand(silentPicture, TRUE);
+    gtk_widget_set_margin_start(silentPicture, 7);
+    gtk_widget_set_margin_end(silentPicture, 11);
+    gtk_widget_set_margin_top(silentPicture, 13);
+    gtk_widget_set_margin_bottom(silentPicture, 17);
+    gtk_widget_set_size_request(silentPicture, 640, 384);
+    gtk_window_set_child(GTK_WINDOW(silentWindow), silentPicture);
+    windowSignalConnect(silentWindow, "map", G_CALLBACK(+[](GtkWidget* window, gpointer picture) {
+        preserveLaunchSize(GTK_WINDOW(window), GTK_WIDGET(picture));
+    }),
+        silentPicture);
+    gtk_window_present(GTK_WINDOW(silentWindow));
+    int launchWidth = 0;
+    int launchHeight = 0;
+    gtk_window_get_default_size(GTK_WINDOW(silentWindow), &launchWidth, &launchHeight);
+    check(launchWidth >= 658 && launchHeight >= 414, "an empty startup picture preserves the grid and padding in the default size before allocation");
+    settle();
+    check(gtk_picture_get_paintable(GTK_PICTURE(silentPicture)) == nullptr, "the silent startup check needs no rendered frame");
+    if (GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(silentWindow)); surface && GDK_IS_TOPLEVEL(surface)) {
+        const auto state = gdk_toplevel_get_state(GDK_TOPLEVEL(surface));
+        if (!(state & (GDK_TOPLEVEL_STATE_TILED | GDK_TOPLEVEL_STATE_FULLSCREEN | GDK_TOPLEVEL_STATE_MAXIMIZED))) {
+            check(gtk_widget_get_width(silentPicture) >= 640 && gtk_widget_get_height(silentPicture) >= 384,
+                "an empty floating picture keeps its launch allocation");
+            gtk_window_set_default_size(GTK_WINDOW(silentWindow), launchWidth / 2, launchHeight / 2);
+            settle();
+            check(gtk_widget_get_width(silentPicture) < 640 && gtk_widget_get_height(silentPicture) < 384,
+                "the launch minimum does not prevent a later smaller window");
+            int resizedWidth = 0;
+            int resizedHeight = 0;
+            gtk_window_get_default_size(GTK_WINDOW(silentWindow), &resizedWidth, &resizedHeight);
+            gtk_widget_set_visible(silentWindow, FALSE);
+            gtk_window_present(GTK_WINDOW(silentWindow));
+            settle();
+            int remappedWidth = 0;
+            int remappedHeight = 0;
+            gtk_window_get_default_size(GTK_WINDOW(silentWindow), &remappedWidth, &remappedHeight);
+            check(remappedWidth == resizedWidth && remappedHeight == resizedHeight, "remapping retains the user's smaller default size");
+        }
+    }
+    gtk_window_destroy(GTK_WINDOW(silentWindow));
     settle();
     int minWidth = 0, minHeight = 0;
     gtk_widget_get_size_request(activePane()->picture, &minWidth, &minHeight);
