@@ -158,6 +158,10 @@ enum SessionLayoutScenarios {
             guard let t = context else { return }
             MainActor.assumeIsolated { checkUpdateChoiceReturnsTheShell(t, acceptedRisk: true) }
         }
+        UBUITestRegister("swift_update_restart_anyway_restores_the_recaptured_shell", isInDefaultSuite: false) { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated { checkUpdateChoiceReturnsTheShell(t, acceptedRisk: true, shouldRestoreAfterRestart: true) }
+        }
         UBUITestRegister("swift_update_adopts_a_plain_tmux_tab", isInDefaultSuite: false) { context in
             guard let t = context else { return }
             MainActor.assumeIsolated { checkUpdateAdoptsPlainTmux(t) }
@@ -1552,7 +1556,9 @@ enum SessionLayoutScenarios {
     /// A failed pre-install transfer returns the app's original local shell
     /// before a deferred installation or a cancelled explicit restart.
     @MainActor
-    private static func checkUpdateChoiceReturnsTheShell(_ t: UBUITestContext, acceptedRisk: Bool) {
+    private static func checkUpdateChoiceReturnsTheShell(
+        _ t: UBUITestContext, acceptedRisk: Bool, shouldRestoreAfterRestart: Bool = false
+    ) {
         t.closeAllWindows()
         guard let updater = (NSApp.delegate as? UBAppDelegate)?.updater else {
             t.refuse("This build has no updater.")
@@ -1595,7 +1601,7 @@ enum SessionLayoutScenarios {
             return
         }
         let marker = "update-choice-" + String(UUID().uuidString.prefix(8))
-        pane.send("printf '\(marker)\\n'\n")
+        pane.send("export UBQ_UPDATE_CHOICE_MARK=\(marker); printf '\(marker)\\n'\n")
         t.expect(t.wait(until: { bufferHolds(marker, in: pane) }, timeout: 10), desc: "the local shell runs before the update")
 
         var questionCount = 0
@@ -1620,6 +1626,30 @@ enum SessionLayoutScenarios {
         t.expect(questionCount == 1, desc: "the update asks once before a risky restart (\(questionCount))")
         if acceptedRisk {
             t.expect(updater.mayTerminateAfterUpdatePreparation, desc: "Restart Anyway authorizes only the prepared quit")
+            if shouldRestoreAfterRestart {
+                updater.commitPreparedUpdateAtQuit()
+                guard let saved = SessionLayout.allSessions().first(where: { $0.identifier == SessionLayout.currentIdentifier }) else {
+                    t.expect(false, desc: "the risky restart saves its recaptured session")
+                    return
+                }
+                t.closeAllWindows()
+                var didRestore: Bool?
+                Task { @MainActor in didRestore = await TerminalWindows.restoreArrangementGroups(saved.groups) }
+                t.expect(
+                    t.wait(until: { didRestore != nil }, timeout: 30) && didRestore == true,
+                    desc: "the failed transfer's rollback and recapture restore the original shell"
+                )
+                guard let restoredPane = TerminalWindowController.spawnedControllers.compactMap(\.remoteSurface).first else {
+                    t.expect(false, desc: "the recaptured session has a restored window")
+                    return
+                }
+                restoredPane.send("printf 'retained-%s\\n' \"$UBQ_UPDATE_CHOICE_MARK\"\n")
+                t.expect(
+                    t.wait(until: { bufferHolds("retained-\(marker)", in: restoredPane) }, timeout: 10),
+                    desc: "Restart Anyway preserves the same shell environment"
+                )
+                return
+            }
             var didAbort = false
             Task { @MainActor in
                 await updater.cancelPreparedUpdateForTesting()
