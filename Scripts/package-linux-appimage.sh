@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 #
-# package-linux-appimage.sh — build ubiquitty-linux and package it as an AppImage
+# package-linux-appimage.sh — build ubiquitty and package it as an AppImage
 # with zsync update information pointing at the website's release downloads.
 # See Docs/auto-update.md.
 #
@@ -13,7 +13,7 @@
 # UBIQUITTY_PACKAGE_SOURCE selects a clean tagged source tree when running newer
 # packaging tools against an existing release; --no-build reuses its build.
 #
-# This builds a thin AppImage: it bundles the ubiquitty-linux binary with the
+# This builds a thin AppImage: it bundles the ubiquitty binary with the
 # shaders and fonts it opens from its own directory, and the AppImage updater,
 # and relies on the host's GTK 4.16 or newer, Vulkan loader, glibc and
 # libstdc++, whose floors are checked below. It does not bundle the GTK stack:
@@ -104,7 +104,7 @@ fetch "$APPIMAGETOOL_URL"   "$TOOLS/appimagetool.AppImage"       "$APPIMAGETOOL_
 if [ "$BUILD" = 1 ]; then
     "$ROOT/Scripts/build-linux-gtk.sh" Release
 fi
-BIN="$UBQ_BUILD_ROOT/linux/ubiquitty-linux"
+BIN="$UBQ_BUILD_ROOT/linux/ubiquitty"
 [ -x "$BIN" ] || { echo "ERROR: no binary at $BIN" >&2; exit 1; }
 python3 "$CORE_ROOT/Scripts/check-pgo-applies.py" --recorded-budget --max-discarded 0
 
@@ -159,7 +159,7 @@ if [ "$(git -C "$ROOT" rev-parse "v$VERSION^{commit}")" != "$SOURCE_REVISION" ] 
     echo "ERROR: packaging requires a clean source tree at v$VERSION." >&2
     exit 1
 fi
-if [ "$("$BIN" --version)" != "ubiquitty-linux $VERSION (${SOURCE_REVISION:0:8})" ]; then
+if [ "$("$BIN" --version)" != "ubiquitty $VERSION (${SOURCE_REVISION:0:8})" ]; then
     echo "ERROR: the binary's build identity does not match the tagged source." >&2
     exit 1
 fi
@@ -226,7 +226,7 @@ cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/bin/bash
 HERE="$(dirname "$(readlink -f "$0")")"
 export PATH="$HERE/usr/bin:$PATH"
-exec "$HERE/usr/bin/ubiquitty-linux" "$@"
+exec "$HERE/usr/bin/ubiquitty" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 

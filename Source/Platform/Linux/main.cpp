@@ -16207,7 +16207,7 @@ int main(int argc, char** argv)
     if (mode == "--snapshot")
         return runSnapshot(argc, argv);
     if (mode == "--version") {
-        g_print("ubiquitty-linux %s\n", Ubiquitty::Protocol::Sync::appVersionWithIdentity().c_str());
+        g_print("ubiquitty %s\n", Ubiquitty::Protocol::Sync::appVersionWithIdentity().c_str());
         return 0;
     }
     if (mode == "--check-update") {

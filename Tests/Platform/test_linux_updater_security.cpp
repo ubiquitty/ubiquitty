@@ -11,7 +11,7 @@
 // trust an attacker-planted "updater" binary — the AppDir root is verified
 // against the kernel-reported running executable (/proc/self/exe), which a
 // process cannot spoof the way it can setenv(). This test binary is not
-// laid out as <AppDir>/usr/bin/ubiquitty-linux, so isAppImage() must read
+// laid out as <AppDir>/usr/bin/ubiquitty, so isAppImage() must read
 // false regardless of what the forged env vars claim.
 
 #include "Platform/Linux/Updater.h"
@@ -94,7 +94,7 @@ int main()
     std::string forgedPath = fakePathDirectory + ":" + (::getenv("PATH") ? ::getenv("PATH") : "");
     ::setenv("PATH", forgedPath.c_str(), 1);
 
-    // This test binary is not <AppDir>/usr/bin/ubiquitty-linux, so the
+    // This test binary is not <AppDir>/usr/bin/ubiquitty, so the
     // verified-AppDir check must reject every forged signal above.
     CHECK(!Ubiquitty::Linux::Updater::isAppImage());
     CHECK(Ubiquitty::Linux::Updater::check() == Ubiquitty::Linux::Updater::Status::NotAnAppImage);
@@ -198,9 +198,10 @@ int main()
         // The anchor takes only the packaged layout, and only with something
         // above it to be the root.
         CHECK(ForTest::appDirFromExePath("").empty());
-        CHECK(ForTest::appDirFromExePath("/usr/bin/ubiquitty-linux").empty());
+        CHECK(ForTest::appDirFromExePath("/usr/bin/ubiquitty").empty());
         CHECK(ForTest::appDirFromExePath("/opt/thing/usr/bin/other").empty());
-        CHECK(ForTest::appDirFromExePath("/opt/pkg/usr/bin/ubiquitty-linux") == "/opt/pkg");
+        CHECK(ForTest::appDirFromExePath("/opt/pkg/usr/bin/ubiquitty-linux").empty());
+        CHECK(ForTest::appDirFromExePath("/opt/pkg/usr/bin/ubiquitty") == "/opt/pkg");
 
         // Trust: a regular executable file, reached without following links.
         const std::string trusted = std::string(directory) + "/trusted-tool";

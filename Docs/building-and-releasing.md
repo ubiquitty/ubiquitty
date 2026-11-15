@@ -94,7 +94,7 @@ python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-lane.py r
 | Component | Target | Build script | Output |
 |---|---|---|---|
 | macOS app | `Ubiquitty` (`.app`) | `Scripts/build-macos.sh` | `$UBQ_BUILD_ROOT/macos/Source/Platform/macOS/Ubiquitty.app` |
-| Linux frontend | `ubiquitty-linux` | `Scripts/build-linux-gtk.sh` | `$UBQ_BUILD_ROOT/linux/ubiquitty-linux` |
+| Linux frontend | `ubiquitty-linux` | `Scripts/build-linux-gtk.sh` | `$UBQ_BUILD_ROOT/linux/ubiquitty` |
 | Host daemon | `ubiquitty-host` | `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-host.sh` | `$UBQ_BUILD_ROOT/host/ubiquitty-host` |
 | Agent (MCP) | `ubq` | `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-agent.sh` | `$UBQ_BUILD_ROOT/agent/ubq` |
 | iOS app | `UbiquittyIOSApp` (`.app`) | `Scripts/build-ios.sh` | `$UBQ_BUILD_ROOT/ios-{iphonesimulator,iphoneos}/Ubiquitty.app` (plus Core archives) |
@@ -750,7 +750,7 @@ the goldens by font files and is not a substitute for the host's verdict.
 ./Scripts/build-linux-gtk.sh            # Debug, quiet
 ./Scripts/build-linux-gtk.sh Release
 VERBOSE=1 ./Scripts/build-linux-gtk.sh  # stream full output (log: $UBQ_BUILD_ROOT/linux/build.log)
-"$UBQ_BUILD_ROOT/linux/ubiquitty-linux"             # run (headless self-tests: --smoke, --dump-png, …)
+"$UBQ_BUILD_ROOT/linux/ubiquitty"             # run (headless self-tests: --smoke, --dump-png, …)
 ```
 
 ### Package / distribute (AppImage)

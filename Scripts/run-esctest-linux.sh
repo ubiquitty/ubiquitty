@@ -71,10 +71,10 @@ unset UBIQUITTY_UNATTENDED
 # container calls /src/build/linux/… is this, read from the host. A native run
 # reads build-linux-gtk.sh's own tree.
 if [[ "$isNative" = 1 ]]; then
-    binary="$UBQ_BUILD_ROOT/linux/ubiquitty-linux"
+    binary="$UBQ_BUILD_ROOT/linux/ubiquitty"
     buildHint="./Scripts/build-linux-gtk.sh Release"
 else
-    binary="$UBQ_BUILD_ROOT/linux-container/linux/ubiquitty-linux"
+    binary="$UBQ_BUILD_ROOT/linux-container/linux/ubiquitty"
     buildHint="./Scripts/run-linux.sh"
 fi
 if [ ! -x "$binary" ]; then
@@ -109,7 +109,7 @@ cat > "$runner" <<'INNER'
 set -eu
 # The binary, the suite and where the result goes, as the container mounts
 # them unless the caller names its own.
-binary="${ESC_BINARY:-/src/build/linux/ubiquitty-linux}"
+binary="${ESC_BINARY:-/src/build/linux/ubiquitty}"
 suite="${ESC_SUITE:-/esctest2}"
 result="${ESC_RESULT:-/src/build/esctest-linux.log}"
 work="$(mktemp -d "${TMPDIR:-/tmp}/esctest-linux.XXXXXX")"

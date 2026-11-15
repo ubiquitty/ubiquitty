@@ -110,7 +110,7 @@ respective pointer-lock backends.
 ./Libraries/ubiquitty-kit/Scripts/check-linux-build-prerequisites.sh
 ./Scripts/build-linux-gtk.sh
 ./Scripts/build-linux-gtk.sh Release
-"$UBQ_BUILD_ROOT/linux/ubiquitty-linux"
+"$UBQ_BUILD_ROOT/linux/ubiquitty"
 ```
 
 The default build is Debug. Keep the generated shaders and bundled fonts beside

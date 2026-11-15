@@ -43,12 +43,12 @@ bool isTrustedExecutable(const std::string& path)
 }
 
 // Derive the AppDir root from a resolved executable path, or empty when it
-// doesn't match the packaged layout (<AppDir>/usr/bin/ubiquitty-linux). Anchoring
+// doesn't match the packaged layout (<AppDir>/usr/bin/ubiquitty). Anchoring
 // on that literal suffix ties the root to what the kernel says is running — not
 // the spoofable $APPDIR. Pure (no I/O) so it's independently testable.
 std::string appDirFromExePath(const std::string& exePath)
 {
-    static const char suffix[] = "/usr/bin/ubiquitty-linux";
+    static const char suffix[] = "/usr/bin/ubiquitty";
     const std::size_t suffixLength = sizeof(suffix) - 1;
     if (exePath.size() <= suffixLength)
         return std::string();

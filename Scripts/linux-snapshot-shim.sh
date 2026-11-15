@@ -22,11 +22,11 @@ ROOT=$(unset CDPATH; cd -- "$(dirname -- "$0")/.." && pwd)
 # two below name one artefact. Spelled once, the shim checks a file the host can
 # see and runs one the container built somewhere else, and the render succeeds
 # against a binary no check ever looked at.
-CONTAINER_BINARY=build/linux/ubiquitty-linux
+CONTAINER_BINARY=build/linux/ubiquitty
 # The host side lives in the external build root, outside the checkout, which
 # is where run-linux.sh mounts the container's /src/build from.
 BUILD_ROOT=$(python3 "$CORE_ROOT/Scripts/build_root.py" "$ROOT")
-HOST_BINARY=$BUILD_ROOT/linux-container/linux/ubiquitty-linux
+HOST_BINARY=$BUILD_ROOT/linux-container/linux/ubiquitty
 
 # The driver asks which binary this stands for, so its freshness and provenance
 # guards measure the ELF rather than this script. Answered before the build

@@ -113,7 +113,7 @@ if ! docker info >/dev/null 2>&1; then
     reportSkip "the container runtime is not running, so the GTK build cannot run."
 fi
 
-binary="$UBQ_BUILD_ROOT/linux-container/linux/ubiquitty-linux"
+binary="$UBQ_BUILD_ROOT/linux-container/linux/ubiquitty"
 if [ ! -x "$binary" ]; then
     reportSkip "no GTK build in this checkout (run ./Scripts/run-linux.sh)."
 fi
@@ -260,7 +260,7 @@ fi
 # runs and one they do not.
 report="$(UBIQUITTY_LINUX_ROOT="$ROOT" "$CORE_ROOT/Scripts/run-linux.sh" xvfb-run -a sh -c '
     for mode in '"$(echo "$modes" | tr "\n" " ")"'; do
-        output=$(./build/linux/ubiquitty-linux --smoke-"$mode" 2>&1)
+        output=$(./build/linux/ubiquitty --smoke-"$mode" 2>&1)
         code=$?
         output=$(printf "%s\n" "$output" | grep -vE "glyph font")
         verdict=none

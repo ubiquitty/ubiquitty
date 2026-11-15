@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 #
-# run-linux-smokes.sh — run the ubiquitty-linux headless --smoke-* self-test
+# run-linux-smokes.sh — run the ubiquitty headless --smoke-* self-test
 # battery. UBQ_TEST_FAIL_FAST=1 stops after the first non-passing test;
 # otherwise every smoke runs so local diagnostics can be collected together.
 #
@@ -26,7 +26,7 @@
 # from any unlisted mode, still fails, so a mode renamed away from the list
 # fails rather than skips.
 #
-#   ./Scripts/run-linux-smokes.sh [BINARY]   default: build/linux/ubiquitty-linux
+#   ./Scripts/run-linux-smokes.sh [BINARY]   default: build/linux/ubiquitty
 #   SMOKE_TIMEOUT=90 ./Scripts/run-linux-smokes.sh
 #
 set -uo pipefail
@@ -38,7 +38,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Build output lives outside the checkout; see Scripts/build-root.sh.
 # shellcheck source=Scripts/build-root.sh
 . "$CORE_ROOT/Scripts/build-root.sh"
-BIN="${1:-$UBQ_BUILD_ROOT/linux/ubiquitty-linux}"
+BIN="${1:-$UBQ_BUILD_ROOT/linux/ubiquitty}"
 SRC="$ROOT/Source/Platform/Linux/main.cpp"
 TIMEOUT="${SMOKE_TIMEOUT:-60}"
 

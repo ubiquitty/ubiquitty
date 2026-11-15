@@ -1731,6 +1731,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     target_compile_definitions(ubiquitty-linux PRIVATE ${UBIQUITTY_LINUX_POINTER_LOCK_DEFS})
     target_compile_features(ubiquitty-linux PRIVATE cxx_std_23)
     set_target_properties(ubiquitty-linux PROPERTIES
+        OUTPUT_NAME "ubiquitty"
         CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
     target_compile_options(ubiquitty-linux PRIVATE
         -fno-exceptions -fno-rtti -Wall -Wextra
@@ -1867,7 +1868,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
                     "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts/${font}"
                     "${CMAKE_CURRENT_BINARY_DIR}/${font}"
             DEPENDS "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/fonts/${font}"
-            COMMENT "Bundle ${font} next to ubiquitty-linux" VERBATIM)
+            COMMENT "Bundle ${font} next to ubiquitty" VERBATIM)
         list(APPEND UBIQUITTY_LINUX_BUNDLED_FONT_OUTPUTS "${CMAKE_CURRENT_BINARY_DIR}/${font}")
     endforeach()
     add_custom_target(ubiquitty-linux-font ALL DEPENDS ${UBIQUITTY_LINUX_BUNDLED_FONT_OUTPUTS})

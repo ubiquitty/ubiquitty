@@ -78,7 +78,7 @@ if os.environ.get("ESC_FIXTURE_STAYS_RESIDENT"):
 ''')
         self.build = self.root / "build"
         self.container = self.build / "linux-container"
-        linux_binary = self.container / "linux" / "ubiquitty-linux"
+        linux_binary = self.container / "linux" / "ubiquitty"
         linux_binary.parent.mkdir(parents=True)
         self.executable(linux_binary, "#!/bin/sh\nexit 99\n")
         (self.scripts / "build-root.sh").write_text(f"UBQ_BUILD_ROOT={shlex.quote(str(self.build))}\n")
@@ -169,7 +169,7 @@ pathlib.Path(os.environ["ESC_FIXTURE_REPORT"]).write_text(json.dumps({
         report = self.successful_report("linux", "--include", "DECRQM")
         self.assertEqual(report["configuration"], "")
         self.assertEqual(report["assignments"]["ESC_EXTRA"], "--include DECRQM")
-        self.assertIn('binary="${ESC_BINARY:-/src/build/linux/ubiquitty-linux}"', report["runner"])
+        self.assertIn('binary="${ESC_BINARY:-/src/build/linux/ubiquitty}"', report["runner"])
         self.assertIn('"$binary" "$@" -e', report["runner"])
         self.assertIn('if [ -n "$ESC_TEST_CONFIG" ]; then', report["runner"])
         self.assertNotIn("UBIQUITTY_UNATTENDED=1", report["runner"])

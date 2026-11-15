@@ -9,7 +9,7 @@
 BUILD_JOBS="${UBQ_BUILD_JOBS:-$( (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4) )}"
 
 #
-# build-linux-gtk.sh — build the Linux GTK4 + Vulkan frontend (ubiquitty-linux).
+# build-linux-gtk.sh — build the Linux GTK4 + Vulkan frontend (ubiquitty).
 #
 # A native Linux build (gcc on a Linux machine); cannot build on macOS. Requires GTK4
 # (-dev) + the Vulkan loader/headers; lavapipe (Mesa) covers headless rendering.
@@ -21,7 +21,7 @@ BUILD_JOBS="${UBQ_BUILD_JOBS:-$( (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/
 #   ./Scripts/build-linux-gtk.sh Release
 #   VERBOSE=1 ./Scripts/build-linux-gtk.sh  # stream full output
 #
-# Output: $UBQ_BUILD_ROOT/linux/ubiquitty-linux
+# Output: $UBQ_BUILD_ROOT/linux/ubiquitty
 #
 set -euo pipefail
 
@@ -116,8 +116,8 @@ if run cmake --build "$BUILD" -j"$BUILD_JOBS"; then
     # hands ninja identical objects and the link is skipped. A successful pass
     # proves the binary matches the sources whether or not it relinked, so the
     # stamp makes the mtime mean "verified current by this run".
-    touch "$BUILD/ubiquitty-linux"
-    echo "Built: $BUILD/ubiquitty-linux"
+    touch "$BUILD/ubiquitty"
+    echo "Built: $BUILD/ubiquitty"
 else
     gate_failed_count "build-linux-gtk" 1 "step(s) failed: ninja build" || true
     if [ "$VERBOSE" != "1" ]; then
