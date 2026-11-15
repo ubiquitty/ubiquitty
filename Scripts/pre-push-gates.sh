@@ -247,7 +247,7 @@ ubq_arm_rebuild() {
         # build costs buy a verdict that describes the tree.
         macos|swift) echo "./Scripts/build-macos.sh --clean" ;;
         web) echo "./Scripts/build-web.sh" ;;
-        linux) echo "./Scripts/run-linux.sh" ;;
+        linux) echo "$UBQ_CORE_ROOT/Scripts/run-linux.sh" ;;
         *) echo "a rebuild of the $1 arm" ;;
     esac
 }

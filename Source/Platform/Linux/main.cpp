@@ -1570,6 +1570,7 @@ LinuxPane& ensureDefaultPane()
     if (!activePane()) {
         app().panes.push_back(std::make_unique<LinuxPane>());
         LinuxPane* pane = app().panes.front().get();
+        pane->ownerApp = &app();
         pane->headlessSession.reset(Ubiquitty::Runtime::TerminalSession::make());
         pane->session = pane->headlessSession.get();
         app().paneByID[app().model->focusedPane(app().model->activeSurface())] = pane;
