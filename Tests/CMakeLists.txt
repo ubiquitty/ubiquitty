@@ -4,8 +4,11 @@
 include(${UBIQUITTY_CORE_SOURCE_DIR}/Scripts/cmake/UbiquittyTests.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/dependent-tests.cmake)
 
+# GIO's -pthread changes system-header macros; its watcher test needs its own
+# headers instead of the shared, unthreaded precompiled header.
 ubiquitty_add_host_tests(
     ROOT ${CMAKE_SOURCE_DIR} SOURCES ${UBQ_DEPENDENT_TESTS}
+    NO_PCH test_linux_configuration_watcher
     INCLUDE_DIRECTORIES ${UBIQUITTY_CORE_SOURCE_DIR}/Source ${UBIQUITTY_CORE_SOURCE_DIR}/Tests)
 
 # Each Web shard renders complete frames. Keep the hosted Mac's fixed
