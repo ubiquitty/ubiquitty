@@ -1678,6 +1678,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         Source/Platform/Linux/Diagnostics/Rendering/PaddingSmoke.cpp
         Source/Platform/Linux/Diagnostics/Rendering/SkipInkSmoke.cpp
         Source/Platform/Linux/Input/LinkInteraction.cpp
+        Source/Platform/Linux/Input/LinkTarget.cpp
         Source/Platform/Linux/Presentation/PaneGeometry.cpp
         Source/Platform/Linux/Presentation/WindowAppearance.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Accessibility.cpp

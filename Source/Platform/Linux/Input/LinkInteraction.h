@@ -19,7 +19,7 @@ struct LinkTargetFacts {
     bool isHyperlink = false;
     /// The resolver inferred a filesystem path rather than a URL.
     bool isFilePath = false;
-    /// The target URI borrowed for this interaction.
+    /// The target URI or literal path borrowed for this interaction.
     std::string_view uri;
 };
 

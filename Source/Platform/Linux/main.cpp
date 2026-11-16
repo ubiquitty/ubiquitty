@@ -184,6 +184,7 @@
 #include "Platform/Linux/FontSizing.h"
 #include "Platform/Linux/FreeTypeRasterizer.h"
 #include "Platform/Linux/Input/LinkInteraction.h"
+#include "Platform/Linux/Input/LinkTarget.h"
 #include "Platform/Linux/OmarchyAccent.h"
 #include "Platform/Linux/PTYWatch.h"
 #include "Platform/Linux/PaneViewport.h"
@@ -301,6 +302,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <limits>
@@ -7588,7 +7590,19 @@ LinkDispatch linkDispatchAtCell(int row, int column, GdkModifierType state, int 
     const LinkSource source = linkURIAtCell(row, column, uri.data(), static_cast<int>(uri.size()));
     if (!linkClickOpens(source, uri.data(), state))
         return {};
-    return linkDispatchForURI(uri.data());
+    LinuxPane& pane = *activePane();
+    const bool isFilePath = pane.session->resolvedLinkIsFilePath();
+    std::string directory;
+    if (isFilePath) {
+        const auto hold = holdPaneModel(pane);
+        directory = pane.session->currentDirectory();
+    }
+    const char* home = g_get_home_dir();
+    const std::string target = Ubiquitty::Linux::linkTargetURI(
+        { source == LinkSource::Declared, isFilePath, uri.data() },
+        pane.session->isFilesystemLocal() ? Ubiquitty::Runtime::FilesystemLocation::ThisMachine : Ubiquitty::Runtime::FilesystemLocation::Unknown,
+        directory, home ? home : "");
+    return linkDispatchForURI(target);
 }
 
 // Open the link under (row, column) through the desktop URL handler, start the
@@ -14943,6 +14957,44 @@ int smokeLink()
         && symlink(launcher.c_str(), disguise.c_str()) == 0 && mkfifo(pipe.c_str(), 0644) == 0;
     expect(isScratchReady, "the scratch files are in place");
 
+    // Exercise the scanner and click adapter together: a detected path is
+    // literal text, whereas an OSC 8 target is already a URI. The file policy
+    // below must receive a native file URI for either source.
+    const auto dispatchPrinted = [&](const std::string& printed) {
+        Ubiquitty::processBytes(term, "\033[2J\033[H" + printed);
+        return linkDispatchAtCell(0, 0, GDK_CONTROL_MASK, 1);
+    };
+    const auto declaredFile = [&](const std::string& path) {
+        return "\033]8;;" + uriFor(path) + "\033\\file\033]8;;\033\\";
+    };
+    expect(!activePane()->session->isFilesystemLocal(), "a passive session has no local-filesystem provenance");
+    expect(dispatchPrinted(notes).action == LocalLinkAction::Refuse,
+        "unknown filesystem provenance refuses a detected client-local path");
+    expect(dispatchPrinted(declaredFile(notes)).action == LocalLinkAction::Refuse,
+        "unknown filesystem provenance refuses a declared client-local file URI");
+    expect(dispatchPrinted("https://example.com").target == "https://example.com",
+        "unknown filesystem provenance leaves an external URL openable");
+    const bool didLaunchLocalPTY = activePane()->session->launchShellCommand("while IFS= read -r line; do :; done");
+    expect(didLaunchLocalPTY && activePane()->session->isFilesystemLocal(), "a launched local PTY establishes filesystem provenance");
+    const auto reportDirectory = [&](const std::string& path) {
+        Ubiquitty::processBytes(term, "\033]7;" + uriFor(path) + "\007");
+    };
+    reportDirectory(directory);
+    expect(dispatchPrinted(notes).target == uriFor(notes), "Ctrl-click opens a detected absolute path");
+    expect(dispatchPrinted("./notes.txt").target == uriFor(notes), "Ctrl-click resolves a detected path in the pane's directory");
+    expect(dispatchPrinted("./notes.txt:12:5").target == uriFor(notes),
+        "the shared scanner leaves a colon line suffix outside its literal path");
+    const std::string nestedNotes = writeFile("folder/notes.txt", "nested notes\n", 0644);
+    reportDirectory(folder);
+    expect(dispatchPrinted("./notes.txt").target == uriFor(nestedNotes), "a changed pane directory changes a relative click target");
+    const char* home = g_get_home_dir();
+    const std::string homeRelative = home ? std::filesystem::path(notes).lexically_relative(home).generic_string() : std::string {};
+    expect(!homeRelative.empty() && dispatchPrinted("~/" + homeRelative).target == uriFor(notes),
+        "Ctrl-click expands a detected tilde path through the shared resolver");
+    expect(dispatchPrinted("./missing.txt").action == LocalLinkAction::Refuse, "a missing detected file remains refused");
+    const std::string spacedNotes = writeFile("my notes.txt", "spaced notes\n", 0644);
+    expect(dispatchPrinted(declaredFile(spacedNotes)).target == uriFor(spacedNotes), "a declared file URI preserves native space encoding");
+
     const LinkDispatch document = linkDispatchForURI(uriFor(notes));
     expect(document.action == LocalLinkAction::Open && document.target == uriFor(notes), "a document opens");
     expect(linkDispatchForURI(uriFor(folder)).action == LocalLinkAction::Open, "a directory opens");
@@ -15029,7 +15081,7 @@ int smokeLink()
     expect(std::string(received.data()) == script + ":12:5", "the line handler received the checked path and the line as one argument");
     (void)Ubiquitty::Preferences::configure("", Ubiquitty::Preferences::ParseMode::Strict);
 
-    for (const std::string& path : { notes, runnable, launcher, entry, disguise, pipe, joined, script, scriptLink, recorded, page, feed })
+    for (const std::string& path : { notes, runnable, launcher, entry, disguise, pipe, joined, script, scriptLink, recorded, page, feed, nestedNotes, spacedNotes })
         unlink(path.c_str());
     for (const std::string& path : ordinary)
         unlink(path.c_str());
@@ -15046,6 +15098,8 @@ int smokeLink()
     expect(linkDispatchAtCell(1, 1, GDK_CONTROL_MASK, 1).target == wrappedURL,
         "Ctrl-click resolves the same wrapped URL through Core");
 
+    if (didLaunchLocalPTY)
+        activePane()->session->close();
     g_print("smoke-link: %s\n", didPass ? "PASS" : "FAIL");
     return didPass ? 0 : 1;
 }
