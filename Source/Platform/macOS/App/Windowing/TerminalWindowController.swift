@@ -617,6 +617,9 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
     /// synchronous draw and a fresh drawable allocation for every step.
     internal var programFrameTarget: NSRect?
 
+    /// Whether the held frame includes a grid-sizing request, rather than only a move.
+    internal var isProgramGridFitPending = false
+
     /// When a program's frame was last applied, for the once-per-display-frame bound.
     internal var programFrameAppliedAt: TimeInterval = 0
 

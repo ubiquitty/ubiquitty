@@ -41,13 +41,8 @@ extension SurfaceSmoke {
         controller.remoteSurface = surface
         guard let window = controller.window else { return failed("window geometry: no window") }
         defer { window.close() }
-        feed(surface.drive, "\u{1b}[8;25;80t")
+        feed(surface.drive, "\u{1b}[8;25;80t\u{1b}[1t")
         controller.performPendingWindowRequests(from: surface)
-        let initialDeadline = Date(timeIntervalSinceNow: 0.1)
-        while Date() < initialDeadline {
-            _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
-        }
-        let originalFrame = window.frame
         let originalGrid = surface.publishedGrid
         guard originalGrid == (25, 80) else {
             return failed("window geometry: fixture did not fit 80x25")
@@ -56,12 +51,15 @@ extension SurfaceSmoke {
         guard surface.drive.readSnapshot().rows == 27 else {
             return failed("window geometry: DECSLPP did not change the model")
         }
-        feed(surface.drive, "\u{1b}[8;25;80t")
+        let screenHeight = (window.screen ?? NSScreen.main)?.frame.height ?? 0
+        feed(surface.drive, "\u{1b}[3;\(Int(window.frame.minX));\(Int(screenHeight - window.frame.maxY))t\u{1b}[1t")
         controller.performPendingWindowRequests(from: surface)
-        let deadline = Date(timeIntervalSinceNow: 0.1)
-        while surface.drive.readSnapshot().rows != 25, Date() < deadline {
-            _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
+        guard surface.drive.readSnapshot().rows == 27 else {
+            return failed("window geometry: a move changed the program's page size")
         }
+        let originalFrame = window.frame
+        feed(surface.drive, "\u{1b}[8;25;80t\u{1b}[1t")
+        controller.performPendingWindowRequests(from: surface)
         let snapshot = surface.drive.readSnapshot()
         guard snapshot.rows == 25, snapshot.columns == 80, window.frame == originalFrame else {
             return failed("window geometry: requested 80x25 in \(originalFrame), got \(snapshot.columns)x\(snapshot.rows) in \(window.frame)")

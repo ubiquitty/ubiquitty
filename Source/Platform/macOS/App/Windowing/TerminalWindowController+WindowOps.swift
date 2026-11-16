@@ -94,6 +94,8 @@ extension TerminalWindowController {
     private func applyProgramFrameNow() {
         guard let target = programFrameTarget else { return }
         programFrameTarget = nil
+        let shouldFitGrid = isProgramGridFitPending
+        isProgramGridFitPending = false
         guard let window, !isInFullScreenTransition else { return }
         if target != window.frame {
             programFrameAppliedAt = ProcessInfo.processInfo.systemUptime
@@ -102,6 +104,7 @@ extension TerminalWindowController {
         // DECSLPP can change Core's grid without moving this frame. AppKit
         // also rounds a requested frame, so a numerically different target
         // can leave the native size unchanged and send no resize callback.
+        guard shouldFitGrid else { return }
         for surface in projectedSurfaces {
             let snapshot = surface.drive.readSnapshot()
             if (Int(snapshot.rows), Int(snapshot.columns)) != surface.publishedGrid {
@@ -180,6 +183,7 @@ extension TerminalWindowController {
         case 4:
             if let frame = programFrame {
                 programFrameTarget = textAreaFrame(heightInPixels: first, widthInPixels: second, from: frame, on: surface)
+                isProgramGridFitPending = programFrameTarget != nil
             }
         case 5:
             // A program raising its window is a reveal: the window system
@@ -207,10 +211,12 @@ extension TerminalWindowController {
             )
             if let frame = programFrame, let sized = self.frame(forColumns: columns, rows: rows, from: frame) {
                 programFrameTarget = sized
+                isProgramGridFitPending = true
             }
         case 9:
             if let frame = programFrame, let maximized = maximizedFrame(mode: first, from: frame) {
                 programFrameTarget = maximized
+                isProgramGridFitPending = true
             }
         case 10:
             setProgramFullScreen(mode: first)
@@ -376,6 +382,7 @@ extension TerminalWindowController {
         let columns = isColumns132 ? 132 : 80
         if let frame = programFrame, let sized = self.frame(forColumns: columns, rows: Int(snapshot.rows), from: frame) {
             programFrameTarget = sized
+            isProgramGridFitPending = true
         }
     }
 
