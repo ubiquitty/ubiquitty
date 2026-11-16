@@ -30,6 +30,13 @@ if (!cjk || !fs.existsSync(cjk) || !/CJK/i.test(cjk))
 const emoji = process.env.UBQ_EMOJI_FONT || spawnSync('fc-match', ['-f', '%{file}', 'Noto Color Emoji'], { encoding: 'utf8' }).stdout;
 if (!emoji || !fs.existsSync(emoji) || !/emoji/i.test(emoji))
   throw new Error('Set UBQ_EMOJI_FONT to an emoji font fixture');
+const additionalFonts = new Map(['Arabic', 'Hebrew', 'Thai'].map(script => {
+  const file = process.env[`UBQ_${script.toUpperCase()}_FONT`]
+    || spawnSync('fc-match', ['-f', '%{file}', `Noto Sans ${script}`], { encoding: 'utf8' }).stdout;
+  if (!file || !fs.existsSync(file) || !file.toLowerCase().includes(script.toLowerCase()))
+    throw new Error(`Set UBQ_${script.toUpperCase()}_FONT to a ${script} font fixture`);
+  return [script.toLowerCase(), file];
+}));
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'ubq-cluster-cell-fit-'));
 const sourcePath = path.join(root, 'Source/Platform/Web/WebFontRasterizer.cpp');
 const source = fs.readFileSync(sourcePath, 'utf8');
@@ -54,22 +61,27 @@ EMSCRIPTEN_KEEPALIVE int clusterRawProbe(const char* family, const uint32_t* poi
 { return webFontDrawCluster(family, points, count, size, weight, italic, baseline, width, height, pictograph, coverage); }
 EMSCRIPTEN_KEEPALIVE void clusterFitProbe(double left, double right, double targetLeft, double width, double* result)
 { const auto fit = Rendering::fitClusterHorizontal(left, right, { targetLeft, width }); result[0] = fit.scaleX; result[1] = fit.translationX; }
+EMSCRIPTEN_KEEPALIVE int clusterEligibleProbe(const uint32_t* points, int count)
+{ return Rendering::clusterHorizontalFitEligible(points, count); }
 }
 }
 `;
 fs.writeFileSync(path.join(temporary, 'probe.cpp'), probe);
-const exports = ['_malloc', '_free', '_clusterInitializeProbe', '_clusterMeasureProbe', '_clusterDrawProbe', '_clusterRawProbe', '_clusterFitProbe'];
+const exports = ['_malloc', '_free', '_clusterInitializeProbe', '_clusterMeasureProbe', '_clusterDrawProbe', '_clusterRawProbe', '_clusterFitProbe', '_clusterEligibleProbe'];
 const compile = spawnSync(process.env.EMXX || 'em++', ['-std=c++23', '-O1', '-fno-exceptions', '-fno-rtti', '-Wall', '-Wextra', '-Werror',
   `-I${path.join(root, 'Source')}`, `-I${path.join(core, 'Source')}`, path.join(temporary, 'probe.cpp'), '--no-entry',
+  path.join(core, 'Source/Core/Unicode/Width.cpp'), path.join(core, 'Source/Core/Unicode/GraphemeBreak.cpp'),
   '-sMODULARIZE=1', '-sEXPORT_ES6=1', `-sEXPORTED_FUNCTIONS=${JSON.stringify(exports)}`,
-  '-sEXPORTED_RUNTIME_METHODS=["HEAPU8","HEAPU32","HEAPF64","UTF8ToString"]', '-o', path.join(temporary, 'probe.mjs')], { encoding: 'utf8' });
+  '-sEXPORTED_RUNTIME_METHODS=["HEAPU8","HEAPU32","HEAPF64","UTF8ToString"]', '-o', path.join(temporary, 'probe.mjs')],
+{ encoding: 'utf8', env: { ...process.env, EMCC_CORES: '2' } });
 fs.writeFileSync(path.join(temporary, 'compile.log'), `${compile.stdout || ''}${compile.stderr || ''}`);
 if (compile.status !== 0) throw new Error(`Wasm bridge compile failed: ${temporary}/compile.log\n${compile.stderr || compile.error}`);
 
 async function exercise(createModule, bridgeBodies) {
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
   const fontFiles = [['Fit Primary', '/primary.ttf'], ['Fit Marks', '/marks.ttf'], ['Fit Indic', '/indic.ttf'],
-    ['Fit CJK', '/cjk.ttf'], ['Fit Emoji', '/emoji.ttf']];
+    ['Fit CJK', '/cjk.ttf'], ['Fit Emoji', '/emoji.ttf'], ['Fit Arabic', '/arabic.ttf'],
+    ['Fit Hebrew', '/hebrew.ttf'], ['Fit Thai', '/thai.ttf']];
   for (const [family, url] of fontFiles) {
     const font = new FontFace(family, `url(${url})`);
     document.fonts.add(await font.load());
@@ -82,7 +94,7 @@ async function exercise(createModule, bridgeBodies) {
   const metricsPointer = memory + 1024;
   const fitPointer = memory + 1152;
   const coveragePointer = memory + 4096;
-  const family = '"Fit Primary", "Fit Marks", "Fit Indic", "Fit CJK", "Fit Emoji"';
+  const family = '"Fit Primary", "Fit Marks", "Fit Indic", "Fit CJK", "Fit Emoji", "Fit Arabic", "Fit Hebrew", "Fit Thai"';
   module.HEAPU8.set(new TextEncoder().encode(`${family}\0`), familyPointer);
   module.ubiquittyFontFamilyCSS = family;
   module.ubiquittyFontCanvas = document.createElement('canvas');
@@ -100,7 +112,8 @@ async function exercise(createModule, bridgeBodies) {
   reference.height = 160;
   const painter = reference.getContext('2d', { willReadFrequently: true });
   const naturalExamples = ['漢́', '語⃝', '👩‍👩‍👧‍👧', 'Z̵̡̠̫͌̎͝'];
-  const texts = ['क्षि', 'का', 'कि', 'ά', '❤️́', '\u0600❤️́', ...naturalExamples];
+  const excludedScripts = ['á', 'ά', 'ж́', 'بَّ', 'אֲ'];
+  const texts = ['क्षि', 'का', 'कि', 'กิ', '❤️́', '\u0600❤️́', ...excludedScripts, ...naturalExamples];
   assert(texts[0].codePointAt(0) === 0x915 && naturalExamples[0].codePointAt(0) === 0x6f22
     && naturalExamples[2].codePointAt(0) === 0x1f469 && naturalExamples[3].codePointAt(1) === 0x335,
   'test document preserves the intended Unicode scalars');
@@ -113,15 +126,19 @@ async function exercise(createModule, bridgeBodies) {
   let comparisons = 0;
   let inkOverflowCases = 0;
   let advanceOverflowCases = 0;
+  let relatedScriptOverflowCases = 0;
+  let preservedOverflowCases = 0;
   let opticalCases = 0;
   let naturalCases = 0;
   const preservedExamples = new Set();
+  const preservedOverflowExamples = new Set();
   const measured = [];
   for (const text of texts) {
     const points = Array.from(text, character => character.codePointAt(0));
     module.HEAPU32.set(points, pointsPointer >> 2);
     const pictograph = text.includes('❤') || text.includes('👩') ? 1 : 0;
-    const isWide = pictograph || text.startsWith('漢') || text.startsWith('語');
+    const isEligible = Boolean(module._clusterEligibleProbe(pointsPointer, points.length));
+    if (excludedScripts.includes(text)) assert(!isEligible, `${text}: shared policy preserves this script`);
     for (const italic of [0, 1]) {
       const size = pictograph ? 256 : 32;
       const baseline = 96;
@@ -143,7 +160,7 @@ async function exercise(createModule, bridgeBodies) {
       for (const width of [8, 16, 24, metrics[0]]) {
         for (const phase of [0, 0.25, 0.75]) {
           const left = 8 + phase;
-          const shouldFit = !isWide && metrics[0] > width;
+          const shouldFit = isEligible && metrics[0] > width;
           let across = 1, down = 1, pen = 0, y = baseline;
           if (pictograph) {
             const inkWidth = metrics[2] - metrics[1];
@@ -161,10 +178,15 @@ async function exercise(createModule, bridgeBodies) {
             across = module.HEAPF64[fitPointer >> 3];
             pen = phase * across + module.HEAPF64[(fitPointer >> 3) + 1];
             if (['क्षि', 'का', 'कि'].includes(text)) ++advanceOverflowCases;
+            if (text === 'กิ') ++relatedScriptOverflowCases;
           } else {
             ++naturalCases;
             if (naturalExamples.includes(text)) preservedExamples.add(text);
             if (metrics[0] <= width && metrics[2] - Math.min(0, metrics[1]) > width) ++inkOverflowCases;
+            if (excludedScripts.includes(text) && metrics[0] > width) {
+              ++preservedOverflowCases;
+              preservedOverflowExamples.add(text);
+            }
           }
           const args = [familyPointer, pointsPointer, points.length, size, 400, italic, phase, left, width, across, down, pen, y, 96, 160, pictograph, coveragePointer];
           const rawArgs = [familyPointer, pointsPointer, points.length, size, 400, italic, baseline, 96, 160, pictograph, coveragePointer];
@@ -211,12 +233,15 @@ async function exercise(createModule, bridgeBodies) {
   }
   assert(inkOverflowCases > 0, `native overhang survives a fitting advance: ${JSON.stringify(measured)}`);
   assert(advanceOverflowCases > 0, 'real Indic advance overflow exercises whole-cluster fitting');
+  assert(relatedScriptOverflowCases > 0, 'real related-script advance overflow exercises whole-cluster fitting');
+  assert(preservedOverflowExamples.size === excludedScripts.length, 'excluded scripts keep native coverage even when their advance overflows');
   assert(preservedExamples.size === naturalExamples.length, 'all reported examples preserve native coverage');
   assert(opticalCases > 0, 'text pictographs retain their existing optical scale');
   const finalItalic = rawItalic();
   assert(initialItalic.every((value, index) => value === finalItalic[index]), 'bounded drawing leaves raw italic coverage unchanged');
   module._free(memory);
-  return { comparisons, naturalCases, inkOverflowCases, advanceOverflowCases, opticalCases,
+  return { comparisons, naturalCases, inkOverflowCases, advanceOverflowCases, relatedScriptOverflowCases, preservedOverflowCases, opticalCases,
+    preservedOverflowExamples: [...preservedOverflowExamples],
     preservedExamples: [...preservedExamples], indicFixture: true, cjkFixture: true, emojiFixture: true, wasmBridge: true, extractedBridge: true };
 }
 
@@ -226,6 +251,7 @@ const fonts = new Map([
   ['/indic.ttf', indic],
   ['/cjk.ttf', cjk],
   ['/emoji.ttf', emoji],
+  ...[...additionalFonts].map(([script, file]) => [`/${script}.ttf`, file]),
 ]);
 const html = `<!doctype html><meta charset="utf-8"><pre id="result">pending</pre><script type="module">
 import createModule from '/probe.mjs';

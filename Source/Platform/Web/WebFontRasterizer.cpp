@@ -1207,11 +1207,7 @@ bool WebFontRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints, 
         || bounds.left < 0 || bounds.left >= slotWidth || bounds.width <= 0 || bounds.width > slotWidth)
         return false;
     const auto cluster = std::span(codePoints, static_cast<std::size_t>(count));
-    const int visibleCount = static_cast<int>(std::ranges::count_if(cluster, [](auto point) { return !Unicode::Width::isInvisibleFormat(point); }));
-    if (visibleCount < 2)
-        return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
-    const auto base = cluster[Unicode::clusterBaseIndex(cluster)];
-    if (Unicode::Width::forCodePoint(base, Unicode::Width::AmbiguousWidth::Narrow) == 2 || Unicode::isExtendedPictographic(base))
+    if (!Rendering::clusterHorizontalFitEligible(cluster))
         return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
     const auto fallback = [&] {
         return m_fallback.rasterizeClusterInCell(codePoints, count, face, weight, phaseInPixels, bounds, slotWidth, slotHeight, coverageOut);

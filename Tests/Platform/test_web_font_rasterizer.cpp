@@ -1301,6 +1301,7 @@ TEST(testClustersWithFittingAdvanceKeepNativeCoverage)
         { 0x8a9e, 0x20dd },
         { 0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f467 },
         { 'Z', 0x335, 0x34c, 0x35d, 0x30e, 0x321, 0x320, 0x32b },
+        { 0x915, 0x93f },
     };
     for (const auto& cluster : clusters) {
         installFakeEngine();
@@ -1315,7 +1316,33 @@ TEST(testClustersWithFittingAdvanceKeepNativeCoverage)
         CHECK(actual == natural);
         CHECK_EQ(engineLog.clusterCalls, 2);
         CHECK_EQ(engineLog.boundedClusterCalls, 0);
-        CHECK_EQ(engineLog.clusterMeasureCalls, cluster[0] == 'Z' ? 1 : 0);
+        CHECK_EQ(engineLog.clusterMeasureCalls, cluster[0] == 0x915 ? 1 : 0);
+    }
+}
+
+TEST(testUnrelatedScriptsKeepNativeCoverageWhenTheirAdvanceOverflows)
+{
+    const std::vector<std::uint32_t> clusters[] {
+        { 'a', 0x301 },
+        { 0x3b1, 0x301 },
+        { 0x436, 0x301 },
+        { 0x628, 0x64e, 0x651 },
+        { 0x5d0, 0x5b2 },
+    };
+    for (const auto& cluster : clusters) {
+        installFakeEngine();
+        engineLog.clusterMetrics = { 40, -4, 44, -16, 8 };
+        Rendering::UnifontRasterizer fallback;
+        WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+        std::array<std::uint8_t, 48 * 32> natural, actual;
+        CHECK(rasterizer.rasterizeCluster(cluster.data(), cluster.size(), Rendering::FontFace::Italic, 0,
+            48, 32, natural.data()));
+        CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Italic, 0,
+            0.25, { 3.25, 8 }, 48, 32, actual.data()));
+        CHECK(actual == natural);
+        CHECK_EQ(engineLog.clusterCalls, 2);
+        CHECK_EQ(engineLog.clusterMeasureCalls, 0);
+        CHECK_EQ(engineLog.boundedClusterCalls, 0);
     }
 }
 
@@ -1359,7 +1386,7 @@ TEST(testUnavailableClusterMetricsUseTheBoundedFallback)
     engineLog.doesMeasureCluster = false;
     Rendering::UnifontRasterizer fallback;
     WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
-    constexpr std::array<std::uint32_t, 2> cluster { 'a', 0x301 };
+    constexpr std::array<std::uint32_t, 2> cluster { 0x915, 0x93f };
     std::array<std::uint8_t, 16 * 16> expected, actual;
     CHECK(fallback.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
         0, { 0, 8 }, 16, 16, expected.data()));
