@@ -263,20 +263,28 @@ class EsctestObserverTests(unittest.TestCase):
         commands.RIS = lambda: events.append("RIS")
         commands.Allow80To132 = 40
         commands.DECSET = lambda mode: events.append(("set", mode))
+        commands.WINOP_RESIZE_CHARS = 8
+        commands.WINOP_DEICONIFY = 1
+        commands.XTERM_WINOPS = lambda *args: events.append(("window", args))
         commands.ChangeSpecialColor = lambda *args: events.append(("4", args))
         commands.ChangeSpecialColor2 = lambda *args: events.append(("5", args))
         commands.ResetSpecialColor = lambda *args: events.append(("105", args))
         replies = iter(responses)
         utility = SimpleNamespace(GetIndexedColors=lambda: 256, AssertEQ=self.assertEqual)
+        utility.GetScreenSize = lambda: SimpleNamespace(width=lambda: 80, height=lambda: 25)
+        def reset():
+            events.append("reset")
+            commands.XTERM_WINOPS(8, 25, 80)
         namespace = {"tests": SimpleNamespace(tests=[Modes, Colors]),
-                     "reset": lambda: events.append("reset"),
+                     "reset": reset, "escutil": utility,
+                     "escargs": SimpleNamespace(args=SimpleNamespace(timeout=1)),
                      "escio": SimpleNamespace(ReadOSC=lambda alias: next(replies))}
         self.adapter.install_target(namespace, commands, utility)
         return namespace, commands, Modes, Colors, events
 
     def geometry_fixture(self, sizes):
         events = []
-        commands = SimpleNamespace(WINOP_RESIZE_CHARS=8)
+        commands = SimpleNamespace(WINOP_RESIZE_CHARS=8, WINOP_DEICONIFY=1)
         def perform(*arguments):
             events.append(arguments)
             return "forwarded"
@@ -360,7 +368,21 @@ class EsctestObserverTests(unittest.TestCase):
     def test_target_fixture_clears_prior_case_before_upstream_reset(self):
         namespace, commands, modes, colors, events = self.target_fixture()
         namespace["reset"]()
-        self.assertEqual(events, ["RIS", "reset", ("set", 40)])
+        self.assertEqual(events, ["RIS", "reset", ("window", (8, 25, 80)),
+                                 ("window", (1, None, None)), ("set", 40)])
+
+    def test_target_reset_waits_for_the_asynchronous_fixture_resize(self):
+        namespace, commands, modes, colors, events = self.target_fixture()
+        original = commands.XTERM_WINOPS
+        heights = iter((24, 25))
+        def observe():
+            height = next(heights)
+            events.append(("height", height))
+            return SimpleNamespace(width=lambda: 80, height=lambda: height)
+        namespace["escutil"].GetScreenSize = observe
+        namespace["reset"]()
+        self.assertEqual(events[-3:], [("height", 24), ("height", 25), ("set", 40)])
+        self.assertIs(commands.XTERM_WINOPS, original)
 
     def test_special_reset_checks_every_alias_and_index(self):
         for alias, suffix in (("4", ""), ("5", "2")):

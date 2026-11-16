@@ -49,6 +49,9 @@ def settled_reset_geometry(commands, utility, timeout):
         if operation != commands.WINOP_RESIZE_CHARS:
             return result
         requested = True
+        # The upstream reset deiconifies at its end. Do so before waiting as
+        # well: that window-state operation flushes the pending native frame.
+        original(commands.WINOP_DEICONIFY, None, None)
         deadline = time.monotonic() + timeout
         actual = None
         while time.monotonic() < deadline:
@@ -133,7 +136,11 @@ def install_target(namespace, commands, utility):
         # must not inherit those from the preceding case; its own reset tests
         # still exercise DECSTR after arranging their state.
         commands.RIS()
-        original_reset()
+        # Window geometry lands asynchronously. Finish that fixture resize
+        # before reset erases cells and installs tabs, then restore the command
+        # so the case itself exercises the unmodified window operations.
+        with settled_reset_geometry(commands, utility, namespace["escargs"].args.timeout):
+            original_reset()
         commands.DECSET(commands.Allow80To132)
 
     namespace["reset"] = reset_case
