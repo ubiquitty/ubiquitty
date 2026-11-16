@@ -12,6 +12,7 @@ import runpy
 from contextlib import contextmanager
 from pathlib import Path
 import sys
+import time
 
 
 def install_single_page_observer(utility, commands):
@@ -35,6 +36,36 @@ def install_single_page_observer(utility, commands):
             commands.DECRQCRA = original_command
 
     utility.GetChecksumOfRect = observe_rectangle
+
+
+@contextmanager
+def settled_reset_geometry(commands, utility, timeout):
+    original = commands.XTERM_WINOPS
+    requested = False
+
+    def perform(operation=None, rows=None, columns=None):
+        nonlocal requested
+        result = original(operation, rows, columns)
+        if operation != commands.WINOP_RESIZE_CHARS:
+            return result
+        requested = True
+        deadline = time.monotonic() + timeout
+        actual = None
+        while time.monotonic() < deadline:
+            size = utility.GetScreenSize()
+            actual = (size.width(), size.height())
+            if actual == (columns, rows):
+                return result
+            time.sleep(min(0.005, max(0, deadline - time.monotonic())))
+        raise RuntimeError(f"esctest reset requested {columns}x{rows}; reports {actual}")
+
+    commands.XTERM_WINOPS = perform
+    try:
+        yield
+        if not requested:
+            raise RuntimeError("esctest reset did not request its fixture geometry")
+    finally:
+        commands.XTERM_WINOPS = original
 
 
 @contextmanager
