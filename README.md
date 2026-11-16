@@ -16,7 +16,9 @@ with permissions and consent enforced by the host.
 
 [Download](https://ubiquitty.org/#downloads) · [Features](https://ubiquitty.org/features/) · [Embed a terminal view](https://github.com/ubiquitty/kit) · [Build with Core](https://github.com/ubiquitty/core)
 
-**100% conformance: 4,532 / 4,532 applicable cases passed, versus about 66% for the next-best tested engine in our recorded comparison.**
+[![Recorded terminal compatibility](https://ubiquitty.org/reports/compatibility.svg)](https://ubiquitty.org/performance/#conformance)
+
+Recorded tests cover terminal controls and Unicode. [Current results and scope](https://ubiquitty.org/performance/#conformance).
 
 **The fastest parser in our comparative benchmarks, as of 7 November 2026.** [Conformance scope](https://github.com/ubiquitty/ubiquitty#conformance) · [Benchmark methods](https://github.com/ubiquitty/ubiquitty#benchmarks)
 
@@ -35,9 +37,9 @@ Linux host, open in the browser and native Mac app at the same time. The host ow
 process and terminal state; each client draws its own view.
 [Browser setup and limitations](https://ubiquitty.org/platforms/web/).*
 
-> **The multiplexer and remote sessions are experimental** and still taking shape, while
-> the terminal itself is full-featured: it has the highest score in our conformance
-> comparison, passing all 4,532 applicable cases. Don't run `ubiquitty-host` on production
+> **The multiplexer and remote sessions are experimental** and still taking shape.
+> Terminal behavior is covered by the recorded control-sequence and Unicode tests.
+> Don't run `ubiquitty-host` on production
 > servers or other important infrastructure yet.
 
 [Install](#install) · [Rendering examples](#screenshots) ·
@@ -46,7 +48,7 @@ process and terminal state; each client draws its own view.
 
 | Advantage | What you get |
 |---|---|
-| **Terminal compatibility** | ECMA-48, DEC and VT behavior, plus modern extensions; every applicable case in our full-suite comparison passes. [Scope](#conformance). |
+| **Terminal compatibility** | ECMA-48, DEC and VT behavior, modern extensions and Unicode. [Recorded results and scope](https://ubiquitty.org/performance/#conformance). |
 | **Native rendering** | CoreText shaping, ligatures and color emoji on macOS. The Apple Metal renderer retains unchanged content and repaints changed regions. [Renderer](https://github.com/ubiquitty/kit/blob/main/Docs/swift-renderer.md). |
 | **Everyday macOS workflow** | Draggable tabs and split panes, the Beam command palette, prompt navigation, styled copy and clipboard history. |
 | **Accessibility** | VoiceOver access to terminal screen text on macOS and a GTK accessible-text interface on Linux. [Guide](Docs/guides/accessibility.md). |
@@ -294,11 +296,9 @@ pasting.
 
 ## Conformance
 
-**Full-suite result: 4,532 / 4,532 applicable cases passed (100%).**
-
-The next-best tested engine in our [recorded comparison](https://github.com/ubiquitty/core#correctness-and-performance),
-Ghostty's `libghostty-vt` main (`cf3a8a659`), passed **3,004 / 4,532 cases (66.3%)** in our tests on
-**12 November 2026**.
+The [current recorded comparison](https://ubiquitty.org/performance/#conformance)
+covers terminal controls and Unicode. The badge above follows its latest
+published [summary data](https://ubiquitty.org/reports/compatibility.json).
 
 The comparison checks terminal behavior against ECMA-48, DEC STD 070, the VT
 manuals, and the originating specifications for extensions. Documented xterm
@@ -308,18 +308,17 @@ is accepted; and where two specifications define one sequence, as kitty's color
 protocol and the VT520's DECSWT both define OSC 21, each one's behavior is
 accepted.
 
-We publish aggregate results and the scoring policy here. The complete
-comparison corpus and the per-terminal failure matrix will be published later.
+The report identifies the tested builds and separates complete passes, partial
+observations, failures and missing recordings.
 
 Conformance tests check screens, cursor state, attributes and replies. Every
-engine in the full-suite comparison runs the same cases; a full pass requires
+engine is compared against the same case inventory; a full pass requires
 every check to pass against an accepted expectation. Partial checks and errors
 do not count as full passes. Host-dependent cases leave every engine's total.
 
-A pass meets the standard's expectation or an accepted alternative. The result
-describes the applicable cases in this suite. A DECRQM capability-query case
-can pass by correctly reporting an unsupported mode; that query pass does not
-claim implementation of the mode itself.
+A pass meets the standard's expectation or an accepted alternative. A
+capability-query case can pass by correctly reporting an unsupported mode;
+that query pass does not claim implementation of the mode itself.
 
 Greek and secondary keyboard selection, page-to-screen auto-sizing, CRT overscan,
 modem control, connection-triggered answerback and serial half-duplex are
