@@ -12,6 +12,7 @@
 #include "Core/Rendering/SizedMaster.h"
 
 #include "Core/Rendering/Font/ScriptClassifier.h"
+#include "Core/Unicode/GraphemeBreak.h"
 #include "Core/Unicode/UTF8Decoder.h"
 #include "Core/Unicode/Width.h"
 
@@ -294,6 +295,75 @@ EM_JS(int, webFontDrawCluster, (const char* familyPtr, const std::uint32_t* code
         context.fillText(text, 0, baseline);
         context.setTransform(1, 0, 0, 1, 0, 0);
     }
+    const pixels = context.getImageData(0, 0, slotWidth, slotHeight).data;
+    for (let index = 0; index < slotWidth * slotHeight; ++index)
+        HEAPU8[coverageOut + index] = pixels[index * 4 + 3];
+    return 1;
+});
+// clang-format on
+
+// Measuring and drawing use the same complete string; Core fits the union of
+// its advance and ink before the browser rasterizes any part of it.
+// clang-format off
+EM_JS(int, webFontMeasureCluster, (const char* familyPtr, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int isTextPictograph, double* metricsOut), {
+    const family = UTF8ToString(familyPtr);
+    const context = Module.ubiquittyFontContext;
+    if (!family || !context || count <= 0)
+        return 0;
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.font = `${isItalic ? "italic " : ""}${cssWeight} ${pixelSize}px ${family}`;
+    context.fontKerning = "auto";
+    context.textBaseline = "alphabetic";
+    context.textAlign = "left";
+    let text = "";
+    for (let index = 0; index < count; ++index)
+        text += String.fromCodePoint(HEAPU32[(codePoints >> 2) + index]);
+    if (isTextPictograph) {
+        text = text.replace(/\uFE0F/g, "\uFE0E");
+        if (Array.from(text).length === 1) text += "\uFE0E";
+    }
+    const ink = context.measureText(text);
+    const values = [ink.width, -ink.actualBoundingBoxLeft, ink.actualBoundingBoxRight,
+        -ink.actualBoundingBoxAscent, ink.actualBoundingBoxDescent];
+    if (!values.every(Number.isFinite))
+        return 0;
+    HEAPF64.set(values, metricsOut >> 3);
+    return 1;
+});
+
+EM_JS(int, webFontDrawClusterInCell, (const char* familyPtr, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, double phaseInPixels, double cellLeft, double cellWidth, double horizontalScale, double verticalScale, double penX, double baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut), {
+    const family = UTF8ToString(familyPtr);
+    const canvas = Module.ubiquittyFontCanvas;
+    const context = Module.ubiquittyFontContext;
+    if (!family || !context || count <= 0 || slotWidth <= 0 || slotHeight <= 0
+        || ![phaseInPixels, cellLeft, cellWidth, horizontalScale, verticalScale, penX, baseline].every(Number.isFinite)
+        || cellWidth <= 0 || horizontalScale <= 0 || verticalScale <= 0)
+        return 0;
+    if (canvas.width < slotWidth || canvas.height < slotHeight) {
+        canvas.width = Math.max(canvas.width, slotWidth);
+        canvas.height = Math.max(canvas.height, slotHeight);
+    }
+    let text = "";
+    for (let index = 0; index < count; ++index)
+        text += String.fromCodePoint(HEAPU32[(codePoints >> 2) + index]);
+    if (isTextPictograph) {
+        text = text.replace(/\uFE0F/g, "\uFE0E");
+        if (Array.from(text).length === 1) text += "\uFE0E";
+    }
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.font = `${isItalic ? "italic " : ""}${cssWeight} ${pixelSize}px ${family}`;
+    context.fontKerning = "auto";
+    context.textBaseline = "alphabetic";
+    context.textAlign = "left";
+    context.clearRect(0, 0, slotWidth, slotHeight);
+    context.fillStyle = "#fff";
+    context.save();
+    context.beginPath();
+    context.rect(cellLeft, 0, cellWidth, slotHeight);
+    context.clip();
+    context.setTransform(horizontalScale, 0, 0, verticalScale, penX, baseline);
+    context.fillText(text, 0, 0);
+    context.restore();
     const pixels = context.getImageData(0, 0, slotWidth, slotHeight).data;
     for (let index = 0; index < slotWidth * slotHeight; ++index)
         HEAPU8[coverageOut + index] = pixels[index * 4 + 3];
@@ -623,6 +693,19 @@ int webFontDrawCluster(const char* family, const std::uint32_t* codePoints, int 
 {
     return s_webFontHost.drawCluster ? s_webFontHost.drawCluster(family, codePoints, count, pixelSize, cssWeight, isItalic, baseline, slotWidth, slotHeight, isTextPictograph, coverageOut) : 0;
 }
+int webFontMeasureCluster(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int isTextPictograph, double* metricsOut)
+{
+    return s_webFontHost.measureCluster ? s_webFontHost.measureCluster(family, codePoints, count, pixelSize, cssWeight, isItalic, isTextPictograph, metricsOut) : 0;
+}
+int webFontDrawClusterInCell(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic,
+    double phaseInPixels, double cellLeft, double cellWidth, double horizontalScale, double verticalScale, double penX, double baseline,
+    int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut)
+{
+    return s_webFontHost.drawClusterInCell
+        ? s_webFontHost.drawClusterInCell(family, codePoints, count, pixelSize, cssWeight, isItalic, phaseInPixels, cellLeft, cellWidth,
+              horizontalScale, verticalScale, penX, baseline, slotWidth, slotHeight, isTextPictograph, coverageOut)
+        : 0;
+}
 int webFontDrawColorCluster(const char* family, const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut)
 {
     return s_webFontHost.drawColorCluster ? s_webFontHost.drawColorCluster(family, codePoints, count, slotInPixels, pixelsOut) : 0;
@@ -655,6 +738,8 @@ int webFontMeasureGlyph(const char*, int, double, int, int, double*) { return 0;
 int webFontMeasure(int, int, int, double*, int*, int*, int*) { return 0; }
 int webFontDrawGlyph(const char*, int, double, double, double, int, int, double, double, int, int, int, std::uint8_t*) { return 0; }
 int webFontDrawCluster(const char*, const std::uint32_t*, int, int, int, int, int, int, int, int, std::uint8_t*) { return 0; }
+int webFontMeasureCluster(const char*, const std::uint32_t*, int, int, int, int, int, double*) { return 0; }
+int webFontDrawClusterInCell(const char*, const std::uint32_t*, int, int, int, int, double, double, double, double, double, double, double, int, int, int, std::uint8_t*) { return 0; }
 int webFontDrawColorCluster(const char*, const std::uint32_t*, int, int, std::uint8_t*) { return 0; }
 int webFontMeasureProportional(const char*, const std::uint32_t*, int, int, int, int, double*) { return 0; }
 int webFontDrawProportional(const char*, const std::uint32_t*, const double*, const double*, int, int, double, int, int, int, int, int, std::uint8_t*) { return 0; }
@@ -1029,13 +1114,16 @@ std::string WebFontRasterizer::familyForCluster(const std::uint32_t* codePoints,
 {
     using namespace Rendering::Font;
 
+    if (!codePoints || count <= 0)
+        return {};
+    const auto base = codePoints[Unicode::clusterBaseIndex(std::span(codePoints, static_cast<std::size_t>(count)))];
     FontFallbackPolicy policy(m_inventory, { m_caches.han, m_caches.script, m_caches.generic, m_caches.emoji, m_caches.symbol, m_caches.rangeMap, m_caches.negative });
     FontRequest request;
     request.codePoints = std::span<const std::uint32_t>(codePoints, static_cast<std::size_t>(count));
     // The browser must probe the same text form that the coverage draw uses.
     // SGR can override an explicit emoji selector in the stored cluster.
     std::array<std::uint32_t, clusterPoolMaximumCodePoints + 1> presented;
-    if (presentation == Presentation::Text && Unicode::isExtendedPictographic(codePoints[0])) {
+    if (presentation == Presentation::Text && Unicode::isExtendedPictographic(base)) {
         if (count > clusterPoolMaximumCodePoints)
             return {};
         std::copy_n(codePoints, count, presented.begin());
@@ -1044,13 +1132,13 @@ std::string WebFontRasterizer::familyForCluster(const std::uint32_t* codePoints,
             presented[count++] = Unicode::Width::variationSelector15;
         request.codePoints = std::span<const std::uint32_t>(presented.data(), static_cast<std::size_t>(count));
     }
-    request.script = classifyScript(codePoints[0]);
+    request.script = classifyScript(base);
     request.presentation = presentation;
     request.style = styleForFace(face);
     request.variableWeight = static_cast<std::uint8_t>(weight > 255 ? 255 : weight);
     // Routing asks which face suits the glyph, not how a terminal places it,
     // so an ambiguous code point routes as the narrow glyph it is by default.
-    request.width = Unicode::Width::forCodePoint(codePoints[0], Unicode::Width::AmbiguousWidth::Narrow) == 2 ? CellWidthClass::Wide : CellWidthClass::Narrow;
+    request.width = Unicode::Width::forCodePoint(base, Unicode::Width::AmbiguousWidth::Narrow) == 2 ? CellWidthClass::Wide : CellWidthClass::Narrow;
 
     const GlyphRoute route = policy.route(request, m_preferences);
     if (isMissing(route))
@@ -1104,10 +1192,64 @@ bool WebFontRasterizer::rasterizeCluster(const std::uint32_t* codePoints, int co
     if (!m_isAvailable || !codePoints || count <= 0 || slotWidth <= 0 || slotHeight <= 0 || !coverageOut)
         return m_fallback.rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
     const std::string family = familyForCluster(codePoints, count, face, weight, Rendering::Font::Presentation::Text);
+    const auto base = codePoints[Unicode::clusterBaseIndex(std::span(codePoints, static_cast<std::size_t>(count)))];
     const int baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), slotHeight);
-    if (!family.empty() && webFontDrawCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeightFor(face, weight, m_userAxes, m_weights), Rendering::isItalic(face) ? 1 : 0, baseline, slotWidth, slotHeight, Unicode::isExtendedPictographic(codePoints[0]), coverageOut))
+    if (!family.empty() && webFontDrawCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeightFor(face, weight, m_userAxes, m_weights), Rendering::isItalic(face) ? 1 : 0, baseline, slotWidth, slotHeight, Unicode::isExtendedPictographic(base), coverageOut))
         return true;
     return m_fallback.rasterizeCluster(codePoints, count, face, weight, slotWidth, slotHeight, coverageOut);
+}
+
+bool WebFontRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight,
+    double phaseInPixels, Rendering::ClusterRasterBounds bounds, int slotWidth, int slotHeight, std::uint8_t* coverageOut)
+{
+    if (!codePoints || count <= 0 || count > clusterPoolMaximumCodePoints || slotWidth <= 0 || slotHeight <= 0 || !coverageOut
+        || !std::isfinite(phaseInPixels) || !std::isfinite(bounds.left) || !std::isfinite(bounds.width)
+        || bounds.left < 0 || bounds.left >= slotWidth || bounds.width <= 0 || bounds.width > slotWidth)
+        return false;
+    const auto cluster = std::span(codePoints, static_cast<std::size_t>(count));
+    const int visibleCount = static_cast<int>(std::ranges::count_if(cluster, [](auto point) { return !Unicode::Width::isInvisibleFormat(point); }));
+    if (visibleCount < 2)
+        return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
+    const auto fallback = [&] {
+        return m_fallback.rasterizeClusterInCell(codePoints, count, face, weight, phaseInPixels, bounds, slotWidth, slotHeight, coverageOut);
+    };
+    if (!m_isAvailable)
+        return fallback();
+    const std::string family = familyForCluster(codePoints, count, face, weight, Rendering::Font::Presentation::Text);
+    if (family.empty())
+        return fallback();
+    const auto base = cluster[Unicode::clusterBaseIndex(cluster)];
+    const bool isTextPictograph = Unicode::isExtendedPictographic(base);
+    const int cssWeight = cssWeightFor(face, weight, m_userAxes, m_weights);
+    std::array<double, 5> metrics {};
+    if (!webFontMeasureCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face), isTextPictograph, metrics.data())
+        || !std::ranges::all_of(metrics, [](double value) { return std::isfinite(value); })
+        || metrics[0] < 0 || metrics[2] < metrics[1] || metrics[4] < metrics[3])
+        return fallback();
+    double horizontalScale = 1;
+    double verticalScale = 1;
+    double penX = phaseInPixels;
+    double baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), slotHeight);
+    if (isTextPictograph) {
+        const double inkWidth = metrics[2] - metrics[1];
+        const double inkHeight = metrics[4] - metrics[3];
+        double opticalScale = inkWidth > 0 ? std::min(1.0, slotWidth / inkWidth) : 1;
+        if (inkHeight > 0)
+            opticalScale = std::min(opticalScale, slotHeight / inkHeight);
+        horizontalScale = verticalScale = opticalScale;
+        penX += (slotWidth - inkWidth * opticalScale) / 2 - metrics[1] * opticalScale;
+        baseline = std::max(-metrics[3] * opticalScale, std::min(baseline, slotHeight - metrics[4] * opticalScale));
+    } else if (((base >= 0xFB50 && base <= 0xFDFF) || (base >= 0xFE70 && base <= 0xFEFC)) && metrics[0] > 0)
+        horizontalScale = slotWidth / metrics[0];
+    const double sourceLeft = penX + std::min(0.0, metrics[1] * horizontalScale);
+    const double sourceRight = penX + std::max(metrics[0], metrics[2]) * horizontalScale;
+    const auto fit = Rendering::fitClusterHorizontal(sourceLeft, sourceRight, bounds);
+    penX = penX * fit.scaleX + fit.translationX;
+    horizontalScale *= fit.scaleX;
+    if (webFontDrawClusterInCell(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face), phaseInPixels,
+            bounds.left, bounds.width, horizontalScale, verticalScale, penX, baseline, slotWidth, slotHeight, isTextPictograph, coverageOut))
+        return true;
+    return fallback();
 }
 
 bool WebFontRasterizer::rasterizeColorCluster(const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut)

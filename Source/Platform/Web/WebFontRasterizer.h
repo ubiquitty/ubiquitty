@@ -145,6 +145,10 @@ public:
     /// - Returns: Whether the complete cluster was rasterized.
     bool rasterizeCluster(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
 
+    /// Fits one complete marked cluster into its allocated terminal columns.
+    bool rasterizeClusterInCell(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight,
+        double phaseInPixels, Rendering::ClusterRasterBounds, int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
+
     /// True whenever the host's text engine is usable.
     ///
     /// A browser's emoji face is the system's rather than the page's, so the
@@ -424,6 +428,11 @@ struct WebFontHost {
     int (*measure)(int pixelSize, int firstCharacter, int characterCount, double* advances, int* ascent, int* descent, int* xHeight) = nullptr;
     int (*drawGlyph)(const char* family, int codePoint, double pixelSize, double horizontalScale, double verticalScale, int cssWeight, int isItalic, double penX, double baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut) = nullptr;
     int (*drawCluster)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int baseline, int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut) = nullptr;
+    /// Reports advance and signed ink left/right/top/bottom in device pixels.
+    int (*measureCluster)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int isTextPictograph, double* metricsOut) = nullptr;
+    int (*drawClusterInCell)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic,
+        double phaseInPixels, double cellLeft, double cellWidth, double horizontalScale, double verticalScale, double penX, double baseline,
+        int slotWidth, int slotHeight, int isTextPictograph, std::uint8_t* coverageOut) = nullptr;
     int (*drawColorCluster)(const char* family, const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut) = nullptr;
     int (*measureProportional)(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, double* advancesOut) = nullptr;
     int (*drawProportional)(const char* family, const std::uint32_t* codePoints, const double* offsetsX, const double* offsetsY, int count, int pixelSize, double horizontalScale, int cssWeight, int isItalic, int baseline, int stripWidth, int stripHeight, std::uint8_t* coverageOut) = nullptr;

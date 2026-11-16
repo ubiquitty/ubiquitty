@@ -53,6 +53,15 @@ struct EngineLog {
     int lastIsTextPictograph = 0;
     int colorCalls = 0;
     int clusterCalls = 0;
+    int clusterMeasureCalls = 0;
+    int boundedClusterCalls = 0;
+    std::array<double, 5> clusterMetrics { 8, 0, 8, -12, 4 };
+    bool doesMeasureCluster = true;
+    double lastClusterPhase = 0;
+    double lastClusterLeft = 0;
+    double lastClusterWidth = 0;
+    double lastVerticalScale = 0;
+    std::vector<std::uint32_t> lastMeasuredCluster;
     std::vector<std::uint32_t> lastDrawnCluster;
     int proportionalMeasureCalls = 0;
     int proportionalDrawCalls = 0;
@@ -131,6 +140,37 @@ int fakeDrawCluster(const char*, const std::uint32_t* codePoints, int count, int
     ++engineLog.clusterCalls;
     engineLog.lastDrawnCluster.assign(codePoints, codePoints + count);
     std::memset(coverageOut, engineCoverageByte, static_cast<std::size_t>(slotWidth) * static_cast<std::size_t>(slotHeight));
+    return 1;
+}
+
+int fakeMeasureCluster(const char* family, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic,
+    int isTextPictograph, double* metricsOut)
+{
+    ++engineLog.clusterMeasureCalls;
+    engineLog.lastFamily = family;
+    engineLog.lastPixelSize = pixelSize;
+    engineLog.lastCSSWeight = cssWeight;
+    engineLog.lastIsItalic = isItalic;
+    engineLog.lastIsTextPictograph = isTextPictograph;
+    engineLog.lastMeasuredCluster.assign(codePoints, codePoints + count);
+    std::ranges::copy(engineLog.clusterMetrics, metricsOut);
+    return engineLog.doesMeasureCluster ? 1 : 0;
+}
+
+int fakeDrawClusterInCell(const char*, const std::uint32_t* codePoints, int count, int, int, int, double phaseInPixels,
+    double cellLeft, double cellWidth, double horizontalScale, double verticalScale, double penX, double baseline,
+    int slotWidth, int slotHeight, int, std::uint8_t* coverageOut)
+{
+    ++engineLog.boundedClusterCalls;
+    engineLog.lastDrawnCluster.assign(codePoints, codePoints + count);
+    engineLog.lastClusterPhase = phaseInPixels;
+    engineLog.lastClusterLeft = cellLeft;
+    engineLog.lastClusterWidth = cellWidth;
+    engineLog.lastHorizontalScale = horizontalScale;
+    engineLog.lastVerticalScale = verticalScale;
+    engineLog.lastPenX = penX;
+    engineLog.lastBaseline = baseline;
+    std::fill_n(coverageOut, static_cast<std::size_t>(slotWidth) * slotHeight, engineCoverageByte);
     return 1;
 }
 
@@ -251,6 +291,8 @@ void installFakeEngine()
     host.measure = fakeMeasure;
     host.drawGlyph = fakeDrawGlyph;
     host.drawCluster = fakeDrawCluster;
+    host.measureCluster = fakeMeasureCluster;
+    host.drawClusterInCell = fakeDrawClusterInCell;
     host.drawColorCluster = fakeDrawColorCluster;
     host.measureProportional = fakeMeasureProportional;
     host.drawProportional = fakeDrawProportional;
@@ -1192,6 +1234,115 @@ TEST(testCursivePresentationFormsReachBothCellEdges)
     std::vector<std::uint8_t> coverage(enginePixelSize * enginePixelSize);
     CHECK(rasterizer.rasterizeGlyph(0xFE91, Rendering::FontFace::Regular, 0, enginePixelSize, enginePixelSize, coverage.data()));
     CHECK_EQ(engineLog.lastHorizontalScale, 2.0);
+}
+
+TEST(testBoundedClustersFitAdvanceAndInkAsOneShape)
+{
+    constexpr std::array<std::uint32_t, 3> cluster { 0x915, 0x94d, 0x937 };
+    struct Case {
+        std::array<double, 5> metrics;
+        double expectedScale;
+        double expectedPenOffset;
+    };
+    const Case cases[] {
+        { { 8, -4, 20, -12, 4 }, 1.0 / 3, 4.0 / 3 },
+        { { 20, 0, 8, -12, 4 }, 0.4, 0 },
+        { { 6, 0, 6, -12, 4 }, 1, 0 },
+    };
+    for (const auto& scenario : cases) {
+        installFakeEngine();
+        engineLog.clusterMetrics = scenario.metrics;
+        Rendering::UnifontRasterizer fallback;
+        WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+        std::array<std::uint8_t, 32 * 24> coverage;
+        constexpr double phase = 0.25;
+        constexpr Rendering::ClusterRasterBounds bounds { 3.25, 8 };
+        CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::BoldItalic, 0,
+            phase, bounds, 32, 24, coverage.data()));
+        CHECK_EQ(engineLog.clusterMeasureCalls, 1);
+        CHECK_EQ(engineLog.boundedClusterCalls, 1);
+        CHECK(std::ranges::equal(engineLog.lastMeasuredCluster, cluster));
+        CHECK(std::ranges::equal(engineLog.lastDrawnCluster, cluster));
+        CHECK_EQ(engineLog.lastClusterPhase, phase);
+        CHECK_EQ(engineLog.lastClusterLeft, bounds.left);
+        CHECK_EQ(engineLog.lastClusterWidth, bounds.width);
+        CHECK(std::abs(engineLog.lastHorizontalScale - scenario.expectedScale) < 1e-12);
+        CHECK(std::abs(engineLog.lastPenX - bounds.left - scenario.expectedPenOffset) < 1e-12);
+        CHECK_EQ(engineLog.lastVerticalScale, 1);
+        CHECK_EQ(engineLog.lastBaseline, rasterizer.cellMetrics().baselineFromTop);
+        CHECK_EQ(engineLog.lastCSSWeight, 700);
+        CHECK_EQ(engineLog.lastIsItalic, 1);
+    }
+}
+
+TEST(testBoundedTextPictographsKeepTheirOpticalVerticalPlacement)
+{
+    installFakeEngine();
+    engineLog.clusterMetrics = { 40, -2, 38, -30, 10 };
+    Rendering::UnifontRasterizer fallback;
+    WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+    constexpr std::array<std::uint32_t, 2> cluster { 0x2764, 0x301 };
+    std::array<std::uint8_t, 48 * 20> coverage;
+    constexpr Rendering::ClusterRasterBounds bounds { 3.25, 8 };
+    CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
+        0.25, bounds, 48, 20, coverage.data()));
+    CHECK_EQ(engineLog.lastIsTextPictograph, 1);
+    CHECK_EQ(engineLog.lastVerticalScale, 0.5);
+    CHECK_EQ(engineLog.lastBaseline, 15);
+    CHECK(std::abs(engineLog.lastHorizontalScale - 4.0 / 21) < 1e-12);
+    CHECK(std::abs(engineLog.lastPenX - bounds.left - 8.0 / 21) < 1e-12);
+}
+
+TEST(testPrependedTextPictographsProbeTheSamePresentationTheyDraw)
+{
+    installFakeEngine();
+    Rendering::UnifontRasterizer fallback;
+    WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+    constexpr std::array<std::uint32_t, 4> cluster { 0x600, 0x2764, 0xfe0f, 0x301 };
+    const std::vector<std::uint32_t> textForm { 0x600, 0x2764, 0xfe0e, 0x301 };
+    std::array<std::uint8_t, 32 * 32> coverage;
+    CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
+        0, { 0, 8 }, 32, 32, coverage.data()));
+    CHECK(engineLog.lastProbeCluster == textForm);
+    CHECK(std::ranges::equal(engineLog.lastMeasuredCluster, cluster));
+    CHECK(std::ranges::equal(engineLog.lastDrawnCluster, cluster));
+    CHECK_EQ(engineLog.lastIsTextPictograph, 1);
+    CHECK(rasterizer.rasterizeCluster(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0, 32, 32, coverage.data()));
+    CHECK_EQ(engineLog.lastIsTextPictograph, 1);
+}
+
+TEST(testInvisibleClusterSuffixesKeepTheBareItalicDraw)
+{
+    installFakeEngine();
+    Rendering::UnifontRasterizer fallback;
+    WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+    constexpr std::array<std::uint32_t, 3> cluster { 'f', 0xfe0e, 0x200d };
+    std::array<std::uint8_t, 16 * 16> natural, bounded;
+    CHECK(rasterizer.rasterizeCluster(cluster.data(), cluster.size(), Rendering::FontFace::Italic, 0, 16, 16, natural.data()));
+    CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Italic, 0,
+        0.25, { 0.25, 8 }, 16, 16, bounded.data()));
+    CHECK(natural == bounded);
+    CHECK_EQ(engineLog.clusterCalls, 2);
+    CHECK_EQ(engineLog.clusterMeasureCalls, 0);
+    CHECK_EQ(engineLog.boundedClusterCalls, 0);
+}
+
+TEST(testUnavailableClusterMetricsUseTheBoundedFallback)
+{
+    installFakeEngine();
+    engineLog.doesMeasureCluster = false;
+    Rendering::UnifontRasterizer fallback;
+    WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+    constexpr std::array<std::uint32_t, 2> cluster { 'a', 0x301 };
+    std::array<std::uint8_t, 16 * 16> expected, actual;
+    CHECK(fallback.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
+        0, { 0, 8 }, 16, 16, expected.data()));
+    CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
+        0, { 0, 8 }, 16, 16, actual.data()));
+    CHECK(actual == expected);
+    CHECK_EQ(engineLog.boundedClusterCalls, 0);
+    CHECK(!rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
+        0, { 0, 0 }, 16, 16, actual.data()));
 }
 
 UBIQUITTY_TEST_MAIN()
