@@ -302,8 +302,8 @@ EM_JS(int, webFontDrawCluster, (const char* familyPtr, const std::uint32_t* code
 });
 // clang-format on
 
-// Measuring and drawing use the same complete string; Core fits the union of
-// its advance and ink before the browser rasterizes any part of it.
+// Measuring and drawing use the same complete string. Advance overflow fits
+// the whole shape; a fitting advance retains native diacritic overhang.
 // clang-format off
 EM_JS(int, webFontMeasureCluster, (const char* familyPtr, const std::uint32_t* codePoints, int count, int pixelSize, int cssWeight, int isItalic, int isTextPictograph, double* metricsOut), {
     const family = UTF8ToString(familyPtr);
@@ -1210,6 +1210,9 @@ bool WebFontRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints, 
     const int visibleCount = static_cast<int>(std::ranges::count_if(cluster, [](auto point) { return !Unicode::Width::isInvisibleFormat(point); }));
     if (visibleCount < 2)
         return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
+    const auto base = cluster[Unicode::clusterBaseIndex(cluster)];
+    if (Unicode::Width::forCodePoint(base, Unicode::Width::AmbiguousWidth::Narrow) == 2 || Unicode::isExtendedPictographic(base))
+        return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
     const auto fallback = [&] {
         return m_fallback.rasterizeClusterInCell(codePoints, count, face, weight, phaseInPixels, bounds, slotWidth, slotHeight, coverageOut);
     };
@@ -1218,36 +1221,21 @@ bool WebFontRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints, 
     const std::string family = familyForCluster(codePoints, count, face, weight, Rendering::Font::Presentation::Text);
     if (family.empty())
         return fallback();
-    const auto base = cluster[Unicode::clusterBaseIndex(cluster)];
-    const bool isTextPictograph = Unicode::isExtendedPictographic(base);
     const int cssWeight = cssWeightFor(face, weight, m_userAxes, m_weights);
     std::array<double, 5> metrics {};
-    if (!webFontMeasureCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face), isTextPictograph, metrics.data())
+    if (!webFontMeasureCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face), false, metrics.data())
         || !std::ranges::all_of(metrics, [](double value) { return std::isfinite(value); })
         || metrics[0] < 0 || metrics[2] < metrics[1] || metrics[4] < metrics[3])
         return fallback();
-    double horizontalScale = 1;
-    double verticalScale = 1;
-    double penX = phaseInPixels;
-    double baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), slotHeight);
-    if (isTextPictograph) {
-        const double inkWidth = metrics[2] - metrics[1];
-        const double inkHeight = metrics[4] - metrics[3];
-        double opticalScale = inkWidth > 0 ? std::min(1.0, slotWidth / inkWidth) : 1;
-        if (inkHeight > 0)
-            opticalScale = std::min(opticalScale, slotHeight / inkHeight);
-        horizontalScale = verticalScale = opticalScale;
-        penX += (slotWidth - inkWidth * opticalScale) / 2 - metrics[1] * opticalScale;
-        baseline = std::max(-metrics[3] * opticalScale, std::min(baseline, slotHeight - metrics[4] * opticalScale));
-    } else if (((base >= 0xFB50 && base <= 0xFDFF) || (base >= 0xFE70 && base <= 0xFEFC)) && metrics[0] > 0)
-        horizontalScale = slotWidth / metrics[0];
-    const double sourceLeft = penX + std::min(0.0, metrics[1] * horizontalScale);
-    const double sourceRight = penX + std::max(metrics[0], metrics[2]) * horizontalScale;
+    if (metrics[0] <= bounds.width)
+        return rasterizeClusterAtPhase(codePoints, count, face, weight, phaseInPixels, slotWidth, slotHeight, coverageOut);
+    const double sourceLeft = phaseInPixels + std::min(0.0, metrics[1]);
+    const double sourceRight = phaseInPixels + std::max(metrics[0], metrics[2]);
     const auto fit = Rendering::fitClusterHorizontal(sourceLeft, sourceRight, bounds);
-    penX = penX * fit.scaleX + fit.translationX;
-    horizontalScale *= fit.scaleX;
+    const double penX = phaseInPixels * fit.scaleX + fit.translationX;
+    const int baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), slotHeight);
     if (webFontDrawClusterInCell(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face), phaseInPixels,
-            bounds.left, bounds.width, horizontalScale, verticalScale, penX, baseline, slotWidth, slotHeight, isTextPictograph, coverageOut))
+            bounds.left, bounds.width, fit.scaleX, 1, penX, baseline, slotWidth, slotHeight, false, coverageOut))
         return true;
     return fallback();
 }

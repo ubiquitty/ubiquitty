@@ -1245,9 +1245,8 @@ TEST(testBoundedClustersFitAdvanceAndInkAsOneShape)
         double expectedPenOffset;
     };
     const Case cases[] {
-        { { 8, -4, 20, -12, 4 }, 1.0 / 3, 4.0 / 3 },
+        { { 20, -4, 20, -12, 4 }, 1.0 / 3, 4.0 / 3 },
         { { 20, 0, 8, -12, 4 }, 0.4, 0 },
-        { { 6, 0, 6, -12, 4 }, 1, 0 },
     };
     for (const auto& scenario : cases) {
         installFakeEngine();
@@ -1282,15 +1281,42 @@ TEST(testBoundedTextPictographsKeepTheirOpticalVerticalPlacement)
     Rendering::UnifontRasterizer fallback;
     WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
     constexpr std::array<std::uint32_t, 2> cluster { 0x2764, 0x301 };
-    std::array<std::uint8_t, 48 * 20> coverage;
+    std::array<std::uint8_t, 48 * 20> coverage, natural;
     constexpr Rendering::ClusterRasterBounds bounds { 3.25, 8 };
+    CHECK(rasterizer.rasterizeCluster(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
+        48, 20, natural.data()));
     CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
         0.25, bounds, 48, 20, coverage.data()));
+    CHECK(coverage == natural);
     CHECK_EQ(engineLog.lastIsTextPictograph, 1);
-    CHECK_EQ(engineLog.lastVerticalScale, 0.5);
-    CHECK_EQ(engineLog.lastBaseline, 15);
-    CHECK(std::abs(engineLog.lastHorizontalScale - 4.0 / 21) < 1e-12);
-    CHECK(std::abs(engineLog.lastPenX - bounds.left - 8.0 / 21) < 1e-12);
+    CHECK_EQ(engineLog.clusterCalls, 2);
+    CHECK_EQ(engineLog.clusterMeasureCalls, 0);
+    CHECK_EQ(engineLog.boundedClusterCalls, 0);
+}
+
+TEST(testClustersWithFittingAdvanceKeepNativeCoverage)
+{
+    const std::vector<std::uint32_t> clusters[] {
+        { 0x6f22, 0x301 },
+        { 0x8a9e, 0x20dd },
+        { 0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f467 },
+        { 'Z', 0x335, 0x34c, 0x35d, 0x30e, 0x321, 0x320, 0x32b },
+    };
+    for (const auto& cluster : clusters) {
+        installFakeEngine();
+        engineLog.clusterMetrics = { 8, -4, 24, -16, 8 };
+        Rendering::UnifontRasterizer fallback;
+        WebFontRasterizer rasterizer(fallback, enginePixelSize, 0, 0, noPreferences, 1);
+        std::array<std::uint8_t, 48 * 32> natural, actual;
+        CHECK(rasterizer.rasterizeCluster(cluster.data(), cluster.size(), Rendering::FontFace::Italic, 0,
+            48, 32, natural.data()));
+        CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Italic, 0,
+            0.25, { 3.25, 8 }, 48, 32, actual.data()));
+        CHECK(actual == natural);
+        CHECK_EQ(engineLog.clusterCalls, 2);
+        CHECK_EQ(engineLog.boundedClusterCalls, 0);
+        CHECK_EQ(engineLog.clusterMeasureCalls, cluster[0] == 'Z' ? 1 : 0);
+    }
 }
 
 TEST(testPrependedTextPictographsProbeTheSamePresentationTheyDraw)
@@ -1304,7 +1330,7 @@ TEST(testPrependedTextPictographsProbeTheSamePresentationTheyDraw)
     CHECK(rasterizer.rasterizeClusterInCell(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0,
         0, { 0, 8 }, 32, 32, coverage.data()));
     CHECK(engineLog.lastProbeCluster == textForm);
-    CHECK(std::ranges::equal(engineLog.lastMeasuredCluster, cluster));
+    CHECK_EQ(engineLog.clusterMeasureCalls, 0);
     CHECK(std::ranges::equal(engineLog.lastDrawnCluster, cluster));
     CHECK_EQ(engineLog.lastIsTextPictograph, 1);
     CHECK(rasterizer.rasterizeCluster(cluster.data(), cluster.size(), Rendering::FontFace::Regular, 0, 32, 32, coverage.data()));

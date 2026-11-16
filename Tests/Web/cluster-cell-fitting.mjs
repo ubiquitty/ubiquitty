@@ -24,10 +24,16 @@ if (!browser) throw new Error('Set UBQ_CHROMIUM to a headless Chromium executabl
 const indic = process.env.UBQ_INDIC_FONT || spawnSync('fc-match', ['-f', '%{file}', 'Noto Sans Devanagari'], { encoding: 'utf8' }).stdout;
 if (!indic || !fs.existsSync(indic) || !/Devanagari/i.test(indic))
   throw new Error('Set UBQ_INDIC_FONT to a Devanagari font fixture');
+const cjk = process.env.UBQ_CJK_FONT || spawnSync('fc-match', ['-f', '%{file}', 'Noto Sans CJK JP'], { encoding: 'utf8' }).stdout;
+if (!cjk || !fs.existsSync(cjk) || !/CJK/i.test(cjk))
+  throw new Error('Set UBQ_CJK_FONT to a CJK font fixture');
+const emoji = process.env.UBQ_EMOJI_FONT || spawnSync('fc-match', ['-f', '%{file}', 'Noto Color Emoji'], { encoding: 'utf8' }).stdout;
+if (!emoji || !fs.existsSync(emoji) || !/emoji/i.test(emoji))
+  throw new Error('Set UBQ_EMOJI_FONT to an emoji font fixture');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'ubq-cluster-cell-fit-'));
 const sourcePath = path.join(root, 'Source/Platform/Web/WebFontRasterizer.cpp');
 const source = fs.readFileSync(sourcePath, 'utf8');
-const names = ['webFontMeasureCluster', 'webFontDrawClusterInCell'];
+const names = ['webFontMeasureCluster', 'webFontDrawClusterInCell', 'webFontDrawCluster'];
 const bodies = Object.fromEntries(names.map(name => {
   const start = source.indexOf(`EM_JS(int, ${name},`);
   const body = source.indexOf('), {', start) + 4;
@@ -62,7 +68,8 @@ if (compile.status !== 0) throw new Error(`Wasm bridge compile failed: ${tempora
 
 async function exercise(createModule, bridgeBodies) {
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
-  const fontFiles = [['Fit Primary', '/primary.ttf'], ['Fit Marks', '/marks.ttf'], ['Fit Indic', '/indic.ttf']];
+  const fontFiles = [['Fit Primary', '/primary.ttf'], ['Fit Marks', '/marks.ttf'], ['Fit Indic', '/indic.ttf'],
+    ['Fit CJK', '/cjk.ttf'], ['Fit Emoji', '/emoji.ttf']];
   for (const [family, url] of fontFiles) {
     const font = new FontFace(family, `url(${url})`);
     document.fonts.add(await font.load());
@@ -75,7 +82,7 @@ async function exercise(createModule, bridgeBodies) {
   const metricsPointer = memory + 1024;
   const fitPointer = memory + 1152;
   const coveragePointer = memory + 4096;
-  const family = '"Fit Primary", "Fit Marks", "Fit Indic"';
+  const family = '"Fit Primary", "Fit Marks", "Fit Indic", "Fit CJK", "Fit Emoji"';
   module.HEAPU8.set(new TextEncoder().encode(`${family}\0`), familyPointer);
   module.ubiquittyFontFamilyCSS = family;
   module.ubiquittyFontCanvas = document.createElement('canvas');
@@ -86,11 +93,17 @@ async function exercise(createModule, bridgeBodies) {
   const measure = new Function('familyPtr', 'codePoints', 'count', 'pixelSize', 'cssWeight', 'isItalic', 'isTextPictograph', 'metricsOut', bridgeBodies.webFontMeasureCluster);
   const draw = new Function('familyPtr', 'codePoints', 'count', 'pixelSize', 'cssWeight', 'isItalic', 'phaseInPixels', 'cellLeft', 'cellWidth',
     'horizontalScale', 'verticalScale', 'penX', 'baseline', 'slotWidth', 'slotHeight', 'isTextPictograph', 'coverageOut', bridgeBodies.webFontDrawClusterInCell);
+  const drawRaw = new Function('familyPtr', 'codePoints', 'count', 'pixelSize', 'cssWeight', 'isItalic', 'baseline',
+    'slotWidth', 'slotHeight', 'isTextPictograph', 'coverageOut', bridgeBodies.webFontDrawCluster);
   const reference = document.createElement('canvas');
   reference.width = 96;
   reference.height = 160;
   const painter = reference.getContext('2d', { willReadFrequently: true });
-  const texts = ['क्षि', 'का', 'कि', 'Z̵̡̠̫͌̎͝', 'ά', '❤️́', '\u0600❤️́'];
+  const naturalExamples = ['漢́', '語⃝', '👩‍👩‍👧‍👧', 'Z̵̡̠̫͌̎͝'];
+  const texts = ['क्षि', 'का', 'कि', 'ά', '❤️́', '\u0600❤️́', ...naturalExamples];
+  assert(texts[0].codePointAt(0) === 0x915 && naturalExamples[0].codePointAt(0) === 0x6f22
+    && naturalExamples[2].codePointAt(0) === 0x1f469 && naturalExamples[3].codePointAt(1) === 0x335,
+  'test document preserves the intended Unicode scalars');
   const rawItalic = () => {
     module.HEAPU32.set([0x66, 0xfe0e, 0x200d], pointsPointer >> 2);
     assert(module._clusterRawProbe(familyPointer, pointsPointer, 3, 32, 400, 1, 32, 48, 64, 0, coveragePointer), 'raw italic draw');
@@ -99,12 +112,16 @@ async function exercise(createModule, bridgeBodies) {
   const initialItalic = rawItalic();
   let comparisons = 0;
   let inkOverflowCases = 0;
+  let advanceOverflowCases = 0;
   let opticalCases = 0;
+  let naturalCases = 0;
+  const preservedExamples = new Set();
   const measured = [];
   for (const text of texts) {
     const points = Array.from(text, character => character.codePointAt(0));
     module.HEAPU32.set(points, pointsPointer >> 2);
-    const pictograph = text.includes('❤') ? 1 : 0;
+    const pictograph = text.includes('❤') || text.includes('👩') ? 1 : 0;
+    const isWide = pictograph || text.startsWith('漢') || text.startsWith('語');
     for (const italic of [0, 1]) {
       const size = pictograph ? 256 : 32;
       const baseline = 96;
@@ -126,36 +143,42 @@ async function exercise(createModule, bridgeBodies) {
       for (const width of [8, 16, 24, metrics[0]]) {
         for (const phase of [0, 0.25, 0.75]) {
           const left = 8 + phase;
-          let across = 1, down = 1, pen = phase, y = baseline;
+          const shouldFit = !isWide && metrics[0] > width;
+          let across = 1, down = 1, pen = 0, y = baseline;
           if (pictograph) {
             const inkWidth = metrics[2] - metrics[1];
             const inkHeight = metrics[4] - metrics[3];
             const optical = Math.min(1, inkWidth > 0 ? 96 / inkWidth : 1, inkHeight > 0 ? 160 / inkHeight : 1);
             across = down = optical;
             if (optical < 1) ++opticalCases;
-            pen += (96 - inkWidth * optical) / 2 - metrics[1] * optical;
+            pen = (96 - inkWidth * optical) / 2 - metrics[1] * optical;
             y = Math.max(-metrics[3] * optical, Math.min(baseline, 160 - metrics[4] * optical));
           }
-          const sourceLeft = pen + Math.min(0, metrics[1] * across);
-          const sourceRight = pen + Math.max(metrics[0], metrics[2]) * across;
-          module._clusterFitProbe(sourceLeft, sourceRight, left, width, fitPointer);
-          const scale = module.HEAPF64[fitPointer >> 3];
-          const translation = module.HEAPF64[(fitPointer >> 3) + 1];
-          if (metrics[0] <= width && metrics[2] - Math.min(0, metrics[1]) > width) ++inkOverflowCases;
-          pen = pen * scale + translation;
-          across *= scale;
+          if (shouldFit) {
+            const sourceLeft = phase + Math.min(0, metrics[1]);
+            const sourceRight = phase + Math.max(metrics[0], metrics[2]);
+            module._clusterFitProbe(sourceLeft, sourceRight, left, width, fitPointer);
+            across = module.HEAPF64[fitPointer >> 3];
+            pen = phase * across + module.HEAPF64[(fitPointer >> 3) + 1];
+            if (['क्षि', 'का', 'कि'].includes(text)) ++advanceOverflowCases;
+          } else {
+            ++naturalCases;
+            if (naturalExamples.includes(text)) preservedExamples.add(text);
+            if (metrics[0] <= width && metrics[2] - Math.min(0, metrics[1]) > width) ++inkOverflowCases;
+          }
           const args = [familyPointer, pointsPointer, points.length, size, 400, italic, phase, left, width, across, down, pen, y, 96, 160, pictograph, coveragePointer];
+          const rawArgs = [familyPointer, pointsPointer, points.length, size, 400, italic, baseline, 96, 160, pictograph, coveragePointer];
           if (comparisons === 0) {
             module.ubiquittyFontCanvas.width = 32;
             module.ubiquittyFontCanvas.height = 32;
           }
-          module.ubiquittyFontContext.fontKerning = 'none';
-          assert(module._clusterDrawProbe(...args), 'Wasm bounded draw');
-          assert(module.ubiquittyFontContext.fontKerning === 'auto', 'drawing sets the measured shaping state after canvas growth');
+          module.ubiquittyFontContext.fontKerning = shouldFit ? 'none' : 'auto';
+          assert(shouldFit ? module._clusterDrawProbe(...args) : module._clusterRawProbe(...rawArgs), 'Wasm cluster draw');
+          assert(module.ubiquittyFontContext.fontKerning === 'auto', 'drawing retains the measured shaping state after canvas growth');
           const actual = module.HEAPU8.slice(coveragePointer, coveragePointer + 96 * 160);
-          module.ubiquittyFontContext.fontKerning = 'none';
-          assert(draw(...args), 'extracted bounded draw');
-          assert(module.ubiquittyFontContext.fontKerning === 'auto', 'drawing resets inherited shaping state without canvas growth');
+          module.ubiquittyFontContext.fontKerning = shouldFit ? 'none' : 'auto';
+          assert(shouldFit ? draw(...args) : drawRaw(...rawArgs), 'extracted cluster draw');
+          assert(module.ubiquittyFontContext.fontKerning === 'auto', 'drawing retains the measured shaping state without canvas growth');
           assert(actual.every((value, index) => value === module.HEAPU8[coveragePointer + index]), 'extracted drawing matches actual Wasm bridge');
           painter.setTransform(1, 0, 0, 1, 0, 0);
           painter.clearRect(0, 0, 96, 160);
@@ -164,9 +187,11 @@ async function exercise(createModule, bridgeBodies) {
           painter.textAlign = 'left';
           painter.fillStyle = '#fff';
           painter.save();
-          painter.beginPath();
-          painter.rect(left, 0, width, 160);
-          painter.clip();
+          if (shouldFit) {
+            painter.beginPath();
+            painter.rect(left, 0, width, 160);
+            painter.clip();
+          }
           painter.setTransform(across, 0, 0, down, pen, y);
           painter.fillText(pictograph ? text.replace(/\uFE0F/g, '\uFE0E') : text, 0, 0);
           painter.restore();
@@ -175,7 +200,7 @@ async function exercise(createModule, bridgeBodies) {
           for (let index = 0; index < actual.length; ++index) {
             assert(actual[index] === expected[index * 4 + 3], `${text}: whole shaped affine coverage`);
             const x = index % 96;
-            if (x + 1 <= left || x >= left + width) assert(actual[index] === 0, `${text}: neighboring columns stay clear`);
+            if (shouldFit && (x + 1 <= left || x >= left + width)) assert(actual[index] === 0, `${text}: advance overflow stays contained`);
             hasInk ||= actual[index] !== 0;
           }
           assert(hasInk, `${text}: fitting retains ink`);
@@ -184,27 +209,32 @@ async function exercise(createModule, bridgeBodies) {
       }
     }
   }
-  assert(inkOverflowCases > 0, `zero-advance mark ink exceeds an otherwise fitting advance: ${JSON.stringify(measured)}`);
+  assert(inkOverflowCases > 0, `native overhang survives a fitting advance: ${JSON.stringify(measured)}`);
+  assert(advanceOverflowCases > 0, 'real Indic advance overflow exercises whole-cluster fitting');
+  assert(preservedExamples.size === naturalExamples.length, 'all reported examples preserve native coverage');
   assert(opticalCases > 0, 'text pictographs retain their existing optical scale');
   const finalItalic = rawItalic();
   assert(initialItalic.every((value, index) => value === finalItalic[index]), 'bounded drawing leaves raw italic coverage unchanged');
   module._free(memory);
-  return { comparisons, inkOverflowCases, opticalCases, indicFixture: true, wasmBridge: true, extractedBridge: true };
+  return { comparisons, naturalCases, inkOverflowCases, advanceOverflowCases, opticalCases,
+    preservedExamples: [...preservedExamples], indicFixture: true, cjkFixture: true, emojiFixture: true, wasmBridge: true, extractedBridge: true };
 }
 
 const fonts = new Map([
   ['/primary.ttf', path.join(core, 'Resources/fonts/JetBrainsMono[wght].ttf')],
   ['/marks.ttf', path.join(core, 'Resources/fonts/NotoSans-Regular.ttf')],
   ['/indic.ttf', indic],
+  ['/cjk.ttf', cjk],
+  ['/emoji.ttf', emoji],
 ]);
-const html = `<!doctype html><pre id="result">pending</pre><script type="module">
+const html = `<!doctype html><meta charset="utf-8"><pre id="result">pending</pre><script type="module">
 import createModule from '/probe.mjs';
 try { document.querySelector('#result').textContent = JSON.stringify(await (${exercise.toString()})(createModule, ${JSON.stringify(bodies)})); }
 catch(error) { document.querySelector('#result').textContent = JSON.stringify({ error: error.stack || String(error) }); }
 </script>`;
 const server = http.createServer((request, response) => {
   fs.appendFileSync(path.join(temporary, 'requests.log'), `${request.url}\n`);
-  if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end(html); return; }
+  if (request.url === '/') { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(html); return; }
   const file = fonts.get(request.url) || (request.url === '/probe.mjs' || request.url === '/probe.wasm' ? path.join(temporary, request.url.slice(1)) : null);
   if (!file) { response.writeHead(404).end(); return; }
   response.setHeader('Content-Type', request.url.endsWith('.mjs') ? 'text/javascript' : request.url.endsWith('.wasm') ? 'application/wasm' : 'font/ttf');
