@@ -283,6 +283,12 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-appimage-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Package the native Omarchy bundle from the Release build
+        env:
+          UBQ_CI_LINUX_IMAGE: "true"
+        run: |
+          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh python3 Scripts/release_ci.py omarchy --tag "$PRODUCT_TAG" --architecture "${{ matrix.architecture }}" --directory "$UBQ_BUILD_ROOT/dist"
+
       - name: Preserve the Linux publication files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -291,6 +297,7 @@ jobs:
             ${{ env.UBQ_BUILD_ROOT }}/dist/*.AppImage
             ${{ env.UBQ_BUILD_ROOT }}/dist/*.AppImage.zsync
             ${{ env.UBQ_BUILD_ROOT }}/dist/*-support-sources.tar.xz
+            ${{ env.UBQ_BUILD_ROOT }}/dist/*-omarchy-*.tar.gz*
           if-no-files-found: error
 
   release-ubq:

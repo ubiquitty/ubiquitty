@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import struct
+import tarfile
 import tempfile
 import textwrap
 import unittest
@@ -160,6 +161,75 @@ class ReleaseTests(unittest.TestCase):
                 else:
                     self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
                     self.assertIn("the built version", checked.stderr)
+
+    def test_omarchy_bundles_and_checksums_are_required_on_both_architectures(self):
+        expected = RELEASE.expected_assets("0.5.0")
+        for architecture in ("x86_64", "aarch64"):
+            name = f"Ubiquitty-0.5.0-omarchy-{architecture}.tar.gz"
+            self.assertIn(name, expected)
+            self.assertIn(name + ".sha256", expected)
+
+    def test_omarchy_packages_existing_release_and_rejects_bad_metadata(self):
+        for damage in ("", "version", "architecture", "configuration", "checksum", "missing"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                architecture = RELEASE.platform.machine()
+                commands = []
+                def package(command, **kwargs):
+                    commands.append(command)
+                    if Path(command[0]).name == "install-ubiquitty.sh":
+                        self.assertNotIn("--omarchy", command)
+                        return
+                    output = Path(command[command.index("--output-dir") + 1])
+                    if damage == "missing":
+                        return
+                    metadata = {"format": 1, "version": "ubiquitty 0.5.0 (fixture)",
+                                "architecture": architecture, "configuration": "Release"}
+                    if damage in metadata:
+                        metadata[damage] = "wrong"
+                    body = json.dumps(metadata).encode()
+                    archive = output / "original-package-name.tar.gz"
+                    with tarfile.open(archive, "w:gz") as content:
+                        member = tarfile.TarInfo("ubiquitty/manifest.json")
+                        member.size = len(body)
+                        content.addfile(member, io.BytesIO(body))
+                    digest = "0" * 64 if damage == "checksum" else hashlib.sha256(archive.read_bytes()).hexdigest()
+                    archive.with_name(archive.name + ".sha256").write_text(digest + "  " + archive.name + "\n")
+                with patch.object(RELEASE.subprocess, "run", side_effect=package):
+                    if damage:
+                        with self.assertRaises(ValueError):
+                            RELEASE.omarchy_package(root, root / "build", root / "dist", "0.5.0", architecture)
+                        self.assertFalse(list((root / "dist").iterdir()))
+                    else:
+                        RELEASE.omarchy_package(root, root / "build", root / "dist", "0.5.0", architecture)
+                        archive = root / f"dist/Ubiquitty-0.5.0-omarchy-{architecture}.tar.gz"
+                        self.assertEqual(archive.with_name(archive.name + ".sha256").read_text().split(),
+                                         [hashlib.sha256(archive.read_bytes()).hexdigest(), archive.name])
+                self.assertTrue(all("--build" not in command for command in commands))
+                self.assertIn("--build-dir", commands[0])
+        with patch.object(RELEASE.subprocess, "run") as run, self.assertRaises(ValueError):
+            RELEASE.omarchy_package(ROOT, ROOT / "build", ROOT / "dist", "0.5.0", "foreign")
+        run.assert_not_called()
+
+    def test_source_archive_contains_the_exact_pinned_omarchy_helpers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in (Path("."), RELEASE.KIT_PATH, RELEASE.CORE_PATH, RELEASE.OMARCHY_PATH):
+                directory = root / relative
+                directory.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["git", "init", "-q", str(directory)], check=True)
+                (directory / "tracked.txt").write_text(str(relative))
+                subprocess.run(["git", "-C", str(directory), "add", "tracked.txt"], check=True)
+                subprocess.run(["git", "-C", str(directory), "-c", "user.name=Fixture",
+                                "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Fixture"], check=True)
+            for relative in ("Source/Platform/Emacs", "Source/Platform/Neovim"):
+                (root / relative).mkdir(parents=True)
+            for name in ("LICENSE", "NOTICE"):
+                (root / name).write_text("Fixture")
+            RELEASE.source_packages(root, root / "dist", "0.5.0")
+            with tarfile.open(root / "dist/Ubiquitty-0.5.0-source.tar.xz") as content:
+                self.assertEqual(content.extractfile("Ubiquitty-0.5.0/Integrations/omarchy/tracked.txt").read(),
+                                 b"Integrations/omarchy")
 
     def test_tags_are_stable_versions_without_shell_or_path_syntax(self):
         self.assertEqual(RELEASE.version("v0.4.0"), "0.4.0")

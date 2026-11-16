@@ -12,17 +12,20 @@ import io
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 
 
 TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 CORE_PATH = Path("Libraries/ubiquitty-kit/Libraries/ubiquitty-core")
 KIT_PATH = Path("Libraries/ubiquitty-kit")
+OMARCHY_PATH = Path("Integrations/omarchy")
 
 def git(root, *arguments):
     return subprocess.check_output(["git", "-C", str(root), *arguments], text=True).strip()
@@ -73,6 +76,10 @@ def validate(root, tag):
         raise ValueError("App does not pin the tagged Kit")
     if git(root / KIT_PATH, "rev-parse", "HEAD:Libraries/ubiquitty-core") != composition["core"]:
         raise ValueError("Kit does not pin the tagged Core")
+    omarchy = root / OMARCHY_PATH
+    composition["omarchy"] = git(root, "rev-parse", f"HEAD:{OMARCHY_PATH}")
+    if git(omarchy, "rev-parse", "HEAD") != composition["omarchy"] or git(omarchy, "status", "--porcelain"):
+        raise ValueError("App does not contain its clean pinned Omarchy integration")
     return {"version": named_version, "tag": tag, "repositories": composition}
 
 
@@ -97,7 +104,9 @@ def expected_assets(named_version):
     for architecture in ("x86_64", "aarch64"):
         names.update((f"Ubiquitty-{named_version}-{architecture}.AppImage",
                       f"Ubiquitty-{named_version}-{architecture}.AppImage.zsync",
-                      f"Ubiquitty-{named_version}-{architecture}-support-sources.tar.xz"))
+                      f"Ubiquitty-{named_version}-{architecture}-support-sources.tar.xz",
+                      f"Ubiquitty-{named_version}-omarchy-{architecture}.tar.gz",
+                      f"Ubiquitty-{named_version}-omarchy-{architecture}.tar.gz.sha256"))
     names.update(f"ubiquitty-host-{platform}" for platform in ("linux-x86_64", "linux-arm64", "macos-arm64"))
     names.update(f"ubq-linux-{architecture}" for architecture in ("x86_64", "arm64"))
     names.update(f"Ubiquitty-{named_version}-{package}.tar.xz"
@@ -146,7 +155,7 @@ def source_packages(root, output, named_version):
     output.mkdir(parents=True, exist_ok=True)
     prefix = f"Ubiquitty-{named_version}/"
     with tarfile.open(output / f"Ubiquitty-{named_version}-source.tar.xz", "w:xz") as archive:
-        for relative in (Path("."), KIT_PATH, CORE_PATH):
+        for relative in (Path("."), KIT_PATH, CORE_PATH, OMARCHY_PATH):
             data = subprocess.check_output(["git", "-C", str(root / relative), "archive", "HEAD"])
             with tarfile.open(fileobj=io.BytesIO(data)) as tree:
                 for member in tree:
@@ -159,9 +168,43 @@ def source_packages(root, output, named_version):
                 archive.add(source, arcname=source.relative_to(root).as_posix())
 
 
+def omarchy_package(root, build, output, named_version, architecture):
+    if architecture != platform.machine():
+        raise ValueError("Omarchy bundles must be packaged on their native architecture")
+    output.mkdir(parents=True, exist_ok=True)
+    # Package the same PGO Release binary as the AppImage, with system libraries.
+    with tempfile.TemporaryDirectory(prefix="omarchy-", dir=output.parent) as temporary:
+        staged = Path(temporary)
+        subprocess.run([str(root / OMARCHY_PATH / "scripts/package-local-build.sh"),
+                        "--source-root", str(root), "--build-dir", str(build),
+                        "--output-dir", str(staged)], check=True)
+        archives = list(staged.glob("*.tar.gz"))
+        if len(archives) != 1:
+            raise ValueError("Omarchy packaging must produce exactly one archive")
+        archive = archives[0]
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if archive.with_name(archive.name + ".sha256").read_text().split() != [digest, archive.name]:
+            raise ValueError("Omarchy archive checksum differs from its manifest")
+        with tarfile.open(archive, "r:gz") as content:
+            manifest = json.load(content.extractfile("ubiquitty/manifest.json"))
+            identity = manifest.get("version", "").split()
+            if (manifest.get("format") != 1 or manifest.get("configuration") != "Release"
+                    or manifest.get("architecture") != architecture or len(identity) < 2
+                    or identity[:2] != ["ubiquitty", named_version]):
+                raise ValueError("Omarchy bundle metadata differs from the release")
+        # Exercise the public installer without desktop registration or user state.
+        environment = dict(os.environ, XDG_CONFIG_HOME=str(staged / "config"),
+                           XDG_STATE_HOME=str(staged / "state"), XDG_DATA_HOME=str(staged / "data"))
+        subprocess.run([str(root / OMARCHY_PATH / "scripts/install-ubiquitty.sh"),
+                        str(archive), "--prefix", str(staged / "installed")], env=environment, check=True)
+        target = output / f"Ubiquitty-{named_version}-omarchy-{architecture}.tar.gz"
+        shutil.copy2(archive, target)
+        target.with_name(target.name + ".sha256").write_text(f"{digest}  {target.name}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("validate", "image", "assemble", "verify", "sources", "web", "ios"))
+    parser.add_argument("command", choices=("validate", "image", "assemble", "verify", "sources", "web", "ios", "omarchy"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--tag", default=os.environ.get("PRODUCT_TAG", ""))
     parser.add_argument("--directory", type=Path)
@@ -184,6 +227,11 @@ def main():
                 verify_assets(args.directory, named_version)
             elif args.command == "assemble":
                 assemble(args.directory, named_version)
+            elif args.command == "omarchy":
+                if not args.architecture:
+                    raise ValueError("omarchy requires --architecture")
+                omarchy_package(args.root, Path(os.environ["UBQ_BUILD_ROOT"]) / "linux",
+                                args.directory, named_version, args.architecture)
             elif args.command == "sources":
                 source_packages(args.root, args.directory, named_version)
             else:

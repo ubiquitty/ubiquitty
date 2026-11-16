@@ -25,13 +25,19 @@ host jobs. CLI checks run natively against those same host binaries.
 |---|---|
 | Developer ID signed, notarized and stapled Apple-silicon macOS zip | GitHub, R2, Sparkle |
 | x86_64 and aarch64 AppImages, `.zsync` and matching support sources | GitHub, R2 |
+| Native Omarchy/Arch Linux x86_64 and aarch64 bundles, integration hooks and SHA256 checksums | GitHub |
 | Static Linux hosts for x86_64/arm64 and the signed macOS arm64 host | GitHub, R2 |
 | Static Linux `ubq` for x86_64/arm64, notices and group checksums | GitHub, R2 |
 | Servable WebAssembly/browser distribution, with fonts and notices | GitHub |
 | iOS device and simulator development app bundles | GitHub |
 | Emacs and Neovim source packages, including their MIT licenses | GitHub |
-| Recursive App + Kit + Core source archive, including the BSD wscons frontend | GitHub |
+| Recursive App + Kit + Core + Omarchy integration source archive, including the BSD wscons frontend | GitHub |
 | Exact source composition and combined `SHA256SUMS` | GitHub |
+
+The Omarchy bundles reuse the native AppImage job's PGO Release build and use
+system GTK, Vulkan and C++ libraries. Install them with the pinned
+[Omarchy helpers](https://github.com/ubiquitty/omarchy); their architecture,
+version, Release metadata and archive checksums are checked before installation.
 
 The iOS bundles use development signing and are not App Store or TestFlight
 uploads. Device installation requires signing for the recipient. BSD wscons is
@@ -39,8 +45,8 @@ distributed as source; this workflow does not claim to produce or test a native
 OpenBSD/NetBSD executable. Intel macOS remains outside the release matrix.
 
 All platform jobs and packaged CLI smokes must pass. The final CI job produces
-`release-preparation`, retained for 14 days: 18 nonempty prepared assets plus a
-manifest binding their SHA-256 hashes, tagged Core/Kit/App commits and GitHub run.
+`release-preparation`, retained for 14 days: 22 nonempty prepared assets plus a
+manifest binding their SHA-256 hashes, tagged Core/Kit/App commits and pinned Omarchy integration and GitHub run.
 The Mac app has ad-hoc signatures and release host policy. CI does not receive
 signing keys, certificates, provisioning profiles, notarization credentials or
 storage credentials. Its repository and registry access is read-only.
@@ -58,14 +64,14 @@ Scripts/release.sh --check
 After the release cut and distribution are approved and tag CI succeeds:
 
 ```sh
-Scripts/release.sh v0.4.1
+Scripts/release.sh v0.5.0
 ```
 
 The command downloads the successful CI preparation and verifies its complete
 asset inventory, hashes, run provenance and exact tagged source composition.
 It signs the prepared Mac bundle with the local Developer ID identity and
 provisioning profile, notarizes and staples it, and signs the Sparkle feed using
-the local keychain. It assembles and verifies all 23 required final assets and
+the local keychain. It assembles and verifies all 27 required final assets and
 their combined checksums before publication.
 
 Versioned R2 files and GitHub draft assets are read back and checked before any
