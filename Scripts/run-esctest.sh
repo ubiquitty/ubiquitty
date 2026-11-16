@@ -181,7 +181,14 @@ fi
 suiteCommand=("$interpreter" "$repoRoot/Scripts/esctest-observer.py" ${targetArguments[@]+"${targetArguments[@]}"} "$suiteMain" --expected-terminal="$terminalName" --logfile="$suiteLog" --no-print-logs ${suiteArguments[@]+"${suiteArguments[@]}"})
 completionFile="$(mktemp "$resultsDir/completion.XXXXXX")"
 rm -f "$completionFile"
-UBQ_ESCTEST_COMPLETION_FILE="$completionFile" "$executable" -e "${suiteCommand[@]}" ${forwarded+"${forwarded[@]}"} &
+startupFile="$(mktemp "$resultsDir/startup.XXXXXX")"
+rm -f "$startupFile"
+trap 'rm -f "$startupFile"' EXIT
+startupTimeout=45
+startDeadline=$((SECONDS + startupTimeout))
+startupDeadline="$("$interpreter" -c 'import sys, time; print(time.monotonic() + float(sys.argv[1]))' "$startupTimeout")"
+UBQ_ESCTEST_STARTUP_FILE="$startupFile" UBQ_ESCTEST_STARTUP_DEADLINE="$startupDeadline" \
+    UBQ_ESCTEST_COMPLETION_FILE="$completionFile" "$executable" -e "${suiteCommand[@]}" ${forwarded+"${forwarded[@]}"} &
 launcherPid=$!
 
 # The suite must prove it started, and the proof has to be something the
@@ -193,13 +200,20 @@ launcherPid=$!
 # Waiting on `pgrep -f esctest.py` instead is a trap: the
 # launcher's OWN command line contains that string, so the pattern matches the
 # process that was supposed to start the suite and the loop never ends.
-startDeadline=$((SECONDS + 45))
-while [ ! -s "$suiteLog" ]; do
+finishDeadline=0
+while [ ! -s "$suiteLog" ] || [ ! -s "$startupFile" ]; do
+    if [[ "$finishDeadline" = 0 && -s "$suiteLog" ]]; then
+        finishDeadline=$((SECONDS + 1800))
+    fi
     if ! kill -0 "$launcherPid" 2>/dev/null; then
         break
     fi
     if [ "$SECONDS" -ge "$startDeadline" ]; then
         kill "$launcherPid" 2>/dev/null || true
+        if [[ -s "$suiteLog" ]]; then
+            tail -n 25 "$suiteLog" >&2
+            refuse "error: esctest did not settle its initial window within $startupTimeout seconds"
+        fi
         cat >&2 <<EOF
 error: $executable did not start the suite.
 
@@ -216,11 +230,16 @@ EOF
     fi
     sleep 1
 done
+if [[ ! -s "$suiteLog" || ! -s "$startupFile" ]]; then
+    refuse "error: esctest did not confirm initial window readiness"
+fi
 
 # A macOS app can remain resident after its last child exits. The adapter
 # writes this receipt only after the suite's shutdown has returned, so closing
 # this one launcher cannot truncate a test or interfere with another app.
-finishDeadline=$((SECONDS + 1800))
+if [[ "$finishDeadline" = 0 ]]; then
+    finishDeadline=$((SECONDS + 1800))
+fi
 while kill -0 "$launcherPid" 2>/dev/null; do
     if [[ -s "$completionFile" ]]; then
         kill -TERM "$launcherPid" 2>/dev/null || true

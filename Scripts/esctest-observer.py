@@ -53,12 +53,20 @@ def settled_reset_geometry(commands, utility, timeout):
         # well: that window-state operation flushes the pending native frame.
         original(commands.WINOP_DEICONIFY, None, None)
         deadline = time.monotonic() + timeout
+        next_request = time.monotonic() + 0.1
         actual = None
         while time.monotonic() < deadline:
             size = utility.GetScreenSize()
             actual = (size.width(), size.height())
             if actual == (columns, rows):
                 return result
+            now = time.monotonic()
+            if now >= next_request:
+                # Initial window placement can supersede an early request.
+                # Reassert only this reset fixture, within the same deadline.
+                original(operation, rows, columns)
+                original(commands.WINOP_DEICONIFY, None, None)
+                next_request = now + 0.1
             time.sleep(min(0.005, max(0, deadline - time.monotonic())))
         raise RuntimeError(f"esctest reset requested {columns}x{rows}; reports {actual}")
 
@@ -130,8 +138,10 @@ def install_target(namespace, commands, utility):
     modes.doPermanentlyResetDecTest = check_mode
 
     original_reset = namespace["reset"]
+    is_initial_reset = True
 
     def reset_case():
+        nonlocal is_initial_reset
         # DECSTR preserves protected cells and several DEC registers. A case
         # must not inherit those from the preceding case; its own reset tests
         # still exercise DECSTR after arranging their state.
@@ -139,8 +149,17 @@ def install_target(namespace, commands, utility):
         # Window geometry lands asynchronously. Finish that fixture resize
         # before reset erases cells and installs tabs, then restore the command
         # so the case itself exercises the unmodified window operations.
-        with settled_reset_geometry(commands, utility, namespace["escargs"].args.timeout):
+        timeout = namespace["escargs"].args.timeout
+        if is_initial_reset and (deadline := os.environ.get("UBQ_ESCTEST_STARTUP_DEADLINE")):
+            # Initial layout belongs to the runner's existing startup budget;
+            # its readiness receipt keeps the parent enforcing that deadline.
+            timeout = max(0, float(deadline) - time.monotonic())
+        with settled_reset_geometry(commands, utility, timeout):
             original_reset()
+        if is_initial_reset:
+            if startup := os.environ.get("UBQ_ESCTEST_STARTUP_FILE"):
+                Path(startup).write_text("ready\n")
+            is_initial_reset = False
         commands.DECSET(commands.Allow80To132)
 
     namespace["reset"] = reset_case
@@ -214,6 +233,8 @@ def main():
     if target:
         run_target(suite, commands, utility)
     else:
+        if startup := os.environ.get("UBQ_ESCTEST_STARTUP_FILE"):
+            Path(startup).write_text("ready\n")
         runpy.run_path(str(suite), run_name="__main__")
     completion = os.environ.get("UBQ_ESCTEST_COMPLETION_FILE")
     if completion:

@@ -55,7 +55,7 @@ extension SurfaceSmoke {
         feed(surface.drive, "\u{1b}[3;\(Int(window.frame.minX));\(Int(screenHeight - window.frame.maxY))t\u{1b}[1t")
         controller.performPendingWindowRequests(from: surface)
         guard surface.drive.readSnapshot().rows == 27 else {
-            return failed("window geometry: a move changed the program's page size")
+            return failed("window geometry: a move changed the page size")
         }
         let originalFrame = window.frame
         feed(surface.drive, "\u{1b}[8;25;80t\u{1b}[1t")

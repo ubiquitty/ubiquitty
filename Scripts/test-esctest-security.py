@@ -72,6 +72,8 @@ pathlib.Path(os.environ["ESC_FIXTURE_REPORT"]).write_text(json.dumps({
 }))
 log = next(argument.split("=", 1)[1] for argument in sys.argv if argument.startswith("--logfile="))
 pathlib.Path(log).write_text("1 tests passed\\n")
+if not os.environ.get("ESC_FIXTURE_NO_STARTUP_RECEIPT"):
+    pathlib.Path(os.environ["UBQ_ESCTEST_STARTUP_FILE"]).write_text("ready\\n")
 if os.environ.get("ESC_FIXTURE_STAYS_RESIDENT"):
     import time
     pathlib.Path(os.environ["UBQ_ESCTEST_COMPLETION_FILE"]).write_text("complete\\n")
@@ -133,6 +135,12 @@ pathlib.Path(os.environ["ESC_FIXTURE_REPORT"]).write_text(json.dumps({
         self.assertEqual(report["arguments"][4], str(self.suite / "esctest" / "esctest.py"))
         self.assertIn("--xterm-reverse-wrap=383", report["arguments"])
         self.assertEqual(report["arguments"][-2:], ["--include", "DECRQM"])
+
+    def test_macos_requires_the_adapter_startup_receipt_even_with_a_summary(self):
+        self.environment["ESC_FIXTURE_NO_STARTUP_RECEIPT"] = "1"
+        completed = self.run_wrapper("macos")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("did not confirm initial window readiness", completed.stderr)
         self.assertIn("normal policy", (self.root / "BuildEsctest" / "esctest-provenance.txt").read_text())
 
     def test_macos_finds_its_app_with_the_nested_core_build_helper(self):
@@ -309,16 +317,34 @@ class EsctestObserverTests(unittest.TestCase):
         self.assertEqual(events[-1], "erase and set tabs")
 
     def test_reset_refuses_geometry_that_never_lands_without_extending_timeout(self):
-        commands, utility, events = self.geometry_fixture([(80, 24)] * 3)
+        commands, utility, events = self.geometry_fixture([(80, 24)] * 1000)
         original = commands.XTERM_WINOPS
-        clock = iter((0, 0, 0.5, 0.5, 1, 1))
-        with mock.patch.object(self.adapter.time, "monotonic", side_effect=lambda: next(clock)), \
-                mock.patch.object(self.adapter.time, "sleep"):
+        clock = [0]
+        def sleep(interval):
+            clock[0] += interval
+        with mock.patch.object(self.adapter.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(self.adapter.time, "sleep", side_effect=sleep):
             with self.assertRaisesRegex(RuntimeError, "reset requested 80x25; reports \\(80, 24\\)"):
                 with self.adapter.settled_reset_geometry(commands, utility, 1):
                     commands.XTERM_WINOPS(8, 25, 80)
                     self.fail("case must not start before the fixture is ready")
         self.assertIs(commands.XTERM_WINOPS, original)
+
+    def test_reset_reasserts_geometry_superseded_by_initial_window_placement(self):
+        commands, utility, events = self.geometry_fixture([])
+        def observe():
+            requests = sum(event == (8, 25, 80) for event in events)
+            return SimpleNamespace(width=lambda: 80, height=lambda: 25 if requests >= 2 else 24)
+        utility.GetScreenSize = observe
+        clock = [0]
+        def sleep(interval):
+            clock[0] += interval
+        with mock.patch.object(self.adapter.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(self.adapter.time, "sleep", side_effect=sleep):
+            with self.adapter.settled_reset_geometry(commands, utility, 1):
+                commands.XTERM_WINOPS(8, 25, 80)
+        self.assertEqual(events.count((8, 25, 80)), 2)
+        self.assertLess(clock[0], 1)
 
     def test_reset_preserves_nonresize_commands_and_restores_case_commands(self):
         commands, utility, events = self.geometry_fixture([(80, 25)])
@@ -383,6 +409,45 @@ class EsctestObserverTests(unittest.TestCase):
         namespace["reset"]()
         self.assertEqual(events[-3:], [("height", 24), ("height", 25), ("set", 40)])
         self.assertIs(commands.XTERM_WINOPS, original)
+
+    def test_initial_geometry_uses_only_the_remaining_runner_startup_budget(self):
+        namespace, commands, modes, colors, events = self.target_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "ready"
+            sizes = iter((24, 25, 25))
+            observed_receipts = []
+            def observe():
+                observed_receipts.append(receipt.exists())
+                height = next(sizes)
+                return SimpleNamespace(width=lambda: 80, height=lambda: height)
+            namespace["escutil"].GetScreenSize = observe
+            original = self.adapter.settled_reset_geometry
+            timeouts = []
+            def settling(commands, utility, timeout):
+                timeouts.append(timeout)
+                return original(commands, utility, timeout)
+            deadline = self.adapter.time.monotonic() + 45
+            with mock.patch.dict(os.environ, {"UBQ_ESCTEST_STARTUP_FILE": str(receipt),
+                                              "UBQ_ESCTEST_STARTUP_DEADLINE": str(deadline)}), \
+                    mock.patch.object(self.adapter, "settled_reset_geometry", side_effect=settling):
+                namespace["reset"]()
+                self.assertEqual(receipt.read_text(), "ready\n")
+                namespace["reset"]()
+            self.assertGreater(timeouts[0], 1)
+            self.assertLessEqual(timeouts[0], 45)
+            self.assertEqual(timeouts[1], 1)
+            self.assertEqual(observed_receipts, [False, False, True])
+
+    def test_failed_initial_geometry_cannot_publish_startup_readiness(self):
+        namespace, commands, modes, colors, events = self.target_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "ready"
+            namespace["escutil"].GetScreenSize = mock.Mock(side_effect=RuntimeError("no geometry"))
+            with mock.patch.dict(os.environ, {"UBQ_ESCTEST_STARTUP_FILE": str(receipt),
+                                              "UBQ_ESCTEST_STARTUP_DEADLINE": str(self.adapter.time.monotonic() + 45)}):
+                with self.assertRaisesRegex(RuntimeError, "no geometry"):
+                    namespace["reset"]()
+            self.assertFalse(receipt.exists())
 
     def test_special_reset_checks_every_alias_and_index(self):
         for alias, suffix in (("4", ""), ("5", "2")):
