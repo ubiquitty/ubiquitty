@@ -62,7 +62,7 @@ TEST(unresolvablePathsNeverFallBackToTheTerminalProcessesDirectory)
     CHECK(pathTarget("~/notes.txt", "/work/project", "").empty());
     CHECK(pathTarget("~user2/notes.txt").empty());
     CHECK(pathTarget(std::string_view("/tmp/notes\0ignored", 18)).empty());
-    CHECK(pathTarget(std::string_view("/tmp/a\0/../notes.txt", 19)).empty());
+    CHECK(pathTarget(std::string_view("/tmp/a\0/../notes.txt", 20)).empty());
     CHECK(pathTarget("/tmp/notes.txt", "", "") == "file:///tmp/notes.txt");
 }
 
