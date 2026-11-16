@@ -94,9 +94,20 @@ extension TerminalWindowController {
     private func applyProgramFrameNow() {
         guard let target = programFrameTarget else { return }
         programFrameTarget = nil
-        guard let window, !isInFullScreenTransition, target != window.frame else { return }
-        programFrameAppliedAt = ProcessInfo.processInfo.systemUptime
-        window.setFrame(target, display: true)
+        guard let window, !isInFullScreenTransition else { return }
+        if target != window.frame {
+            programFrameAppliedAt = ProcessInfo.processInfo.systemUptime
+            window.setFrame(target, display: true)
+        }
+        // DECSLPP can change Core's grid without moving this frame. AppKit
+        // also rounds a requested frame, so a numerically different target
+        // can leave the native size unchanged and send no resize callback.
+        for surface in projectedSurfaces {
+            let snapshot = surface.drive.readSnapshot()
+            if (Int(snapshot.rows), Int(snapshot.columns)) != surface.publishedGrid {
+                surface.refitGridToBounds()
+            }
+        }
     }
 
     /// Performs one request.

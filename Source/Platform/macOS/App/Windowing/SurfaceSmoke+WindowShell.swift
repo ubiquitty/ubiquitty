@@ -23,11 +23,52 @@ extension SurfaceSmokeEntry {
     /// - Returns: Whether the legs held.
     @MainActor
     package static func windowShellLegs(device: MTLDevice, library: MTLLibrary) -> Bool {
-        SurfaceSmoke.pasteLegs(device: device, library: library)
+        SurfaceSmoke.programGeometryLegs(device: device, library: library)
+            && SurfaceSmoke.pasteLegs(device: device, library: library)
     }
 }
 
 extension SurfaceSmoke {
+    fileprivate static func programGeometryLegs(device: MTLDevice, library: MTLLibrary) -> Bool {
+        guard let surface = TerminalSurface(rows: 25, columns: 80),
+              let renderer = SurfaceRenderer(device: device, library: library, familyName: "Menlo", pointSize: 12)
+        else { return failed("window geometry: no surface or renderer") }
+        surface.renderer = renderer
+        let controller = TerminalWindowController(
+            workspaceSurface: Ubiquitty.Session.Layout.invalidSurface,
+            pane: nil, surface: surface, renderer: renderer, rows: 25, columns: 80
+        )
+        controller.remoteSurface = surface
+        guard let window = controller.window else { return failed("window geometry: no window") }
+        defer { window.close() }
+        feed(surface.drive, "\u{1b}[8;25;80t")
+        controller.performPendingWindowRequests(from: surface)
+        let initialDeadline = Date(timeIntervalSinceNow: 0.1)
+        while Date() < initialDeadline {
+            _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
+        }
+        let originalFrame = window.frame
+        let originalGrid = surface.publishedGrid
+        guard originalGrid == (25, 80) else {
+            return failed("window geometry: fixture did not fit 80x25")
+        }
+        feed(surface.drive, "\u{1b}[27t")
+        guard surface.drive.readSnapshot().rows == 27 else {
+            return failed("window geometry: DECSLPP did not change the model")
+        }
+        feed(surface.drive, "\u{1b}[8;25;80t")
+        controller.performPendingWindowRequests(from: surface)
+        let deadline = Date(timeIntervalSinceNow: 0.1)
+        while surface.drive.readSnapshot().rows != 25, Date() < deadline {
+            _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
+        }
+        let snapshot = surface.drive.readSnapshot()
+        guard snapshot.rows == 25, snapshot.columns == 80, window.frame == originalFrame else {
+            return failed("window geometry: requested 80x25 in \(originalFrame), got \(snapshot.columns)x\(snapshot.rows) in \(window.frame)")
+        }
+        return true
+    }
+
     /// The paste action, against the window shape a remote attach builds.
     ///
     /// A hosted window holds no pane in the model, so the pane map answers
