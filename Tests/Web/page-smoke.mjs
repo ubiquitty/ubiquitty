@@ -430,18 +430,15 @@ if (phase === 'local') {
   // standalone page dead to the keyboard with nothing on screen explaining it, which
   // is a hole no assertion in this file could see.
   //
-  // The observable is a PAINT, for the reason the other arm uses one: a local feed
-  // repaints to show the character, so counting paints across a keystroke separates
-  // "swallowed" from "echoed" without reading the grid. Run here, while this page is
-  // still the standalone one — the attached import below replaces the listener.
+  // Local echo changes the grid and paints synchronously in the key listener.
+  // Observe both before yielding: cursor and hint timer repaints do not say
+  // whether input reached the grid. Run while this page is still standalone.
   {
     const keydown = listeners.get('ime:keydown');
     if (!keydown) {
       failures.push('no ime:keydown listener — the standalone echo check cannot run');
     } else {
-      const quiet = paints;
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      const drift = paints - quiet; // repaints that happen with no input at all
+      const beforeGrid = JSON.stringify(window.ubiquitty.capture().rows);
       const before = paints;
       keydown({
         key: 'a', code: 'KeyA', keyCode: 65,
@@ -449,10 +446,10 @@ if (phase === 'local') {
         isComposing: false,
         preventDefault() {}, stopPropagation() {},
       });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      if (paints - before <= drift)
-        failures.push(`a page with no host swallowed a keystroke (${paints - before} paint(s) against a ${drift}-paint `
-          + 'quiet baseline) — with nothing to send to, the page is the terminal and the echo is what makes it usable');
+      if (paints <= before)
+        failures.push('a page with no host swallowed a keystroke — the key listener did not paint its local echo');
+      if (JSON.stringify(window.ubiquitty.capture().rows) === beforeGrid)
+        failures.push('a page with no host swallowed a keystroke — the key listener left its grid unchanged');
     }
   }
 
@@ -964,7 +961,6 @@ if (phase === 'attached') {
         failures.push(`ubiquitty.sessionID reads ${api.sessionID} after detach() — that id belongs to a connection that no longer exists`);
 
       const quiet = socketsOpened;
-      const quietPaints = paints;
       await new Promise((resolve) => setTimeout(resolve, 900));
       if (socketsOpened > quiet)
         failures.push(`detach() left the reconnect timer armed (${socketsOpened} socket(s) opened, expected ${quiet}) — `
@@ -986,8 +982,7 @@ if (phase === 'attached') {
       if (!keydownWhileDetached) {
         failures.push('no ime:keydown listener — the detached-embedder echo check cannot run');
       } else {
-        const drift = paints - quietPaints; // repaints across the quiet window above
-        const beforeKey = paints;
+        const beforeGrid = JSON.stringify(api.capture().rows);
         keydownWhileDetached({
           key: 'b', code: 'KeyB', keyCode: 66,
           ctrlKey: false, altKey: false, shiftKey: false, metaKey: false,
@@ -995,9 +990,8 @@ if (phase === 'attached') {
           preventDefault() {}, stopPropagation() {},
         });
         await new Promise((resolve) => setTimeout(resolve, 300));
-        if (paints - beforeKey > drift)
-          failures.push(`a detached embedder page echoed a keystroke into the host's grid `
-            + `(${paints - beforeKey} paint(s) against a ${drift}-paint quiet baseline) — that forks the mirror`);
+        if (JSON.stringify(api.capture().rows) !== beforeGrid)
+          failures.push('a detached embedder page echoed a keystroke into the host\'s grid — that forks the mirror');
       }
     }
   }
