@@ -913,17 +913,26 @@ final class TerminalGestureUITests: XCTestCase {
         for visit in 0..<3 {
             hostRow.tap()
             XCTAssertTrue(seededTerminal.waitForExistence(timeout: 10), "visit \(visit): no terminal")
+            let keyboard = app.buttons["terminal-keyboard"]
+            // The surface can appear before navigation installs its bottom bar.
+            // Measure the resting viewport only once those controls are ready.
+            XCTAssertTrue(
+                waitUntil(timeout: 5) { keyboard.isHittable && self.app.buttons["terminal-leave"].isHittable },
+                "visit \(visit): terminal controls did not become ready"
+            )
+            XCTAssertFalse(app.keyboards.firstMatch.exists, "visit \(visit): keyboard already visible")
             let height = seededTerminal.frame.height
-            app.buttons["terminal-keyboard"].tap()
+            keyboard.tap()
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "visit \(visit): no keyboard")
             XCTAssertTrue(
                 waitUntil(timeout: 5) { self.seededTerminal.frame.height < height - 100 },
-                "visit \(visit): keyboard did not resize the grid"
+                "visit \(visit): keyboard did not resize the grid from \(height) to \(seededTerminal.frame.height)"
             )
             putTheTerminalKeyboardAway()
+            XCTAssertFalse(app.keyboards.firstMatch.exists, "visit \(visit): keyboard did not disappear")
             XCTAssertTrue(
                 waitUntil(timeout: 5) { self.seededTerminal.frame.height > height - 20 },
-                "visit \(visit): hiding the keyboard did not restore the grid"
+                "visit \(visit): hiding the keyboard did not restore the grid from \(height) to \(seededTerminal.frame.height)"
             )
             app.buttons["terminal-leave"].tap()
             let back = app.navigationBars.buttons["Hosts"].firstMatch
