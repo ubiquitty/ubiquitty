@@ -172,7 +172,7 @@ def omarchy_package(root, build, output, named_version, architecture):
     if architecture != platform.machine():
         raise ValueError("Omarchy bundles must be packaged on their native architecture")
     output.mkdir(parents=True, exist_ok=True)
-    # Package the same PGO Release binary as the AppImage, with system libraries.
+    # Omarchy owns its window frame; the decorated AppImage is a separate variant.
     with tempfile.TemporaryDirectory(prefix="omarchy-", dir=output.parent) as temporary:
         staged = Path(temporary)
         subprocess.run([str(root / OMARCHY_PATH / "scripts/package-local-build.sh"),
@@ -189,6 +189,7 @@ def omarchy_package(root, build, output, named_version, architecture):
             manifest = json.load(content.extractfile("ubiquitty/manifest.json"))
             identity = manifest.get("version", "").split()
             if (manifest.get("format") != 1 or manifest.get("configuration") != "Release"
+                    or manifest.get("chromeless") is not True
                     or manifest.get("architecture") != architecture or len(identity) < 2
                     or identity[:2] != ["ubiquitty", named_version]):
                 raise ValueError("Omarchy bundle metadata differs from the release")

@@ -283,11 +283,33 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           key: release-ccache-${{ runner.os }}-${{ runner.arch }}-appimage-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Package the native Omarchy bundle from the Release build
+      - name: Resolve the pinned Omarchy builder
+        id: builder
+        working-directory: ${{ github.workspace }}
+        run: echo "revision=$(git rev-parse HEAD:Integrations/omarchy)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ubiquitty/omarchy
+          ref: ${{ steps.builder.outputs.revision }}
+          path: omarchy-builder
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build the chromeless Omarchy variant with its canonical helper
         env:
-          UBQ_CI_LINUX_IMAGE: "true"
+          UBQ_CI_LINUX_IMAGE: 'true'
+          UBQ_BUILD_JOBS: '4'
+          UBQ_RELEASE_GH_TOKEN: ${{ github.token }}
+          UBQ_PRODUCT_TAG: ${{ env.PRODUCT_TAG }}
+          UBQ_OMARCHY_ARCH: ${{ matrix.architecture }}
+          UBQ_OMARCHY_RELEASE: ${{ github.workspace }}/Scripts/release_omarchy.py
+          UBQ_OMARCHY_BUILDER: ${{ github.workspace }}/omarchy-builder
         run: |
-          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh python3 Scripts/release_ci.py omarchy --tag "$PRODUCT_TAG" --architecture "${{ matrix.architecture }}" --directory "$UBQ_BUILD_ROOT/dist"
+          container_build="$(cat <<'UBQ_OMARCHY_BUILD'
+          export PATH="${UBQ_PGO_LLVM:+$UBQ_PGO_LLVM:}$PATH" CC=clang CXX=clang++ GH_TOKEN="$UBQ_RELEASE_GH_TOKEN"
+          python3 "$UBQ_OMARCHY_RELEASE" build --source-root "$PWD" --builder "$UBQ_OMARCHY_BUILDER" --build-root "$UBQ_BUILD_ROOT" --output "$UBQ_BUILD_ROOT/dist" --tag "$UBQ_PRODUCT_TAG" --architecture "$UBQ_OMARCHY_ARCH"
+          UBQ_OMARCHY_BUILD
+          )"
+          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh bash -c "$container_build"
 
       - name: Preserve the Linux publication files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -170,7 +170,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn(name + ".sha256", expected)
 
     def test_omarchy_packages_existing_release_and_rejects_bad_metadata(self):
-        for damage in ("", "version", "architecture", "configuration", "checksum", "missing"):
+        for damage in ("", "version", "architecture", "configuration", "chromeless", "checksum", "missing"):
             with self.subTest(damage=damage), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 architecture = RELEASE.platform.machine()
@@ -184,7 +184,7 @@ class ReleaseTests(unittest.TestCase):
                     if damage == "missing":
                         return
                     metadata = {"format": 1, "version": "ubiquitty 0.5.0 (fixture)",
-                                "architecture": architecture, "configuration": "Release"}
+                                "architecture": architecture, "configuration": "Release", "chromeless": True}
                     if damage in metadata:
                         metadata[damage] = "wrong"
                     body = json.dumps(metadata).encode()
