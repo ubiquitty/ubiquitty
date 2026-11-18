@@ -29,6 +29,11 @@ on:
         description: "Also run the macOS UI scenarios on the hosted runner"
         type: boolean
         default: false
+      ios_ui_workers:
+        description: "Concurrent iOS UI test workers sharing one app build"
+        type: choice
+        options: ["4", "2", "1"]
+        default: "4"
   # Once a day: a sweep stands down when main's tip already has a verdict.
   schedule:
     - cron: "13 5 * * *"
@@ -329,6 +334,8 @@ jobs:
       # here only when a run by hand asks for them.
       UBQ_CI_UI_SCENARIOS: ${{ github.event_name == 'workflow_dispatch' && inputs.ui_scenarios && 'true' || 'false' }}
       STAGES: ${{ matrix.stages }}
+      # Four independent XCTest classes share the one app and test-bundle build.
+      UBQ_IOS_UI_WORKERS: ${{ matrix.group == 'ios' && (inputs.ios_ui_workers || '4') || '1' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

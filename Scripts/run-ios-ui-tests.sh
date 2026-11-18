@@ -62,7 +62,15 @@ APP="${1:-$BUILD/Ubiquitty.app}"
 # short reads as a gate failure for a suite that was passing. Ninety seconds a
 # case allows for the slowest case under a loaded machine, with the boot and
 # the install on top; a single case asked for by name keeps a floor.
-declaredCases=$(cat "$ROOT/Source/Platform/iOS/UITest/"*.swift | grep -cE '^    func test[A-Za-z0-9_]*\(\)' || true)
+declaredCases=$(python3 "$ROOT/Scripts/ios_ui_cases.py" "$ROOT/Source/Platform/iOS/UITest") || exit 2
+expected=$(python3 "$ROOT/Scripts/ios_ui_cases.py" "$ROOT/Source/Platform/iOS/UITest" \
+    --only "${UBQ_IOS_UI_ONLY:-}") || exit 2
+WORKERS="${UBQ_IOS_UI_WORKERS:-1}"
+case "$WORKERS" in
+    1) PARALLEL=false; PARALLEL_ENABLED=NO ;;
+    2|3|4) PARALLEL=true; PARALLEL_ENABLED=YES ;;
+    *) echo "run-ios-ui-tests: UBQ_IOS_UI_WORKERS must be 1, 2, 3 or 4" >&2; exit 2 ;;
+esac
 TIMEOUT="${UI_TEST_TIMEOUT:-$(( 300 + 90 * ${declaredCases:-0} ))}"
 # The device this checkout owns, booted for this run and shut down when it
 # ends; see Scripts/ios-simulator.sh.
@@ -215,6 +223,7 @@ cat > "$XCTESTRUN" <<PLIST
 <plist version="1.0"><dict>
   <key>$BUNDLE_NAME</key>
   <dict>
+    <key>ParallelizationEnabled</key><$PARALLEL/>
     <key>IsUITestBundle</key><true/>
     <key>IsXCTRunnerHostedTestBundle</key><true/>
     <key>ProductModuleName</key><string>$BUNDLE_NAME</string>
@@ -380,72 +389,22 @@ if [ -n "${UBQ_IOS_UI_ONLY:-}" ]; then
         ONLY+=("-only-testing:$BUNDLE_NAME/$selection")
     done
 fi
-# The run must execute exactly the selected source cases. Comparing a focused
-# run with the whole suite incorrectly fails every documented one-case run.
-expected=$(/usr/bin/python3 - "$ROOT/Source/Platform/iOS/UITest" "${UBQ_IOS_UI_ONLY:-}" <<'PY'
-from pathlib import Path
-import re
-import sys
-
-cases = set()
-for path in Path(sys.argv[1]).glob("*.swift"):
-    current_class = None
-    for line in path.read_text().splitlines():
-        declaration = re.match(r"(?:final )?class (\w+): XCTestCase", line)
-        if declaration:
-            current_class = declaration[1]
-        method = re.match(r"    func (test\w+)\(\)", line)
-        if method and current_class:
-            cases.add(current_class + "/" + method[1])
-selected = set()
-for selection in sys.argv[2].split(",") if sys.argv[2] else []:
-    matches = {case for case in cases if case == selection or case.startswith(selection + "/")}
-    if not matches:
-        sys.exit("run-ios-ui-tests: unknown test selection: " + selection)
-    selected.update(matches)
-print(len(selected if sys.argv[2] else cases))
-PY
-) || exit 2
-/usr/bin/python3 - "$TIMEOUT" "$LOG" xcodebuild test-without-building \
-    -xctestrun "$XCTESTRUN" -destination "id=$DEVICE" ${ONLY[@]+"${ONLY[@]}"} <<'PY'
-import subprocess
-import sys
-
-seconds = int(sys.argv[1])
-log = sys.argv[2]
-command = sys.argv[3:]
-try:
-    completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               text=True, timeout=seconds)
-    output, code = completed.stdout, completed.returncode
-except subprocess.TimeoutExpired as expired:
-    output, code = (expired.stdout or ""), 124
-    if not isinstance(output, str):
-        output = output.decode("utf-8", "replace")
-with open(log, "w") as handle:
-    handle.write(output)
-sys.exit(code)
-PY
+# XCTest schedules concrete classes, each in an isolated simulator clone.
+# The same prebuilt app and bundle are reused by every worker.
+echo "run-ios-ui-tests: $expected selected cases, $WORKERS worker(s)"
+python3 "$ROOT/Scripts/ios_ui_runner.py" "$TIMEOUT" "$LOG" "$DEVICE" \
+    xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=$DEVICE" \
+    -parallel-testing-enabled "$PARALLEL_ENABLED" -parallel-testing-worker-count "$WORKERS" \
+    -maximum-concurrent-test-simulator-destinations "$WORKERS" \
+    ${ONLY[@]+"${ONLY[@]}"}
 rc=$?
 
-# The verdict is read from the log rather than taken from the exit code alone.
-# xcodebuild prints "Test Suite ... passed" for a suite that executed nothing —
-# after a runner crash it relaunches, selects the cases it has not run, finds
-# none, and reports three passing suites with "Executed 0 tests". A lane that
-# believed that would be green for a suite it never ran.
-passed=$(grep -cE "^Test Case '.*' passed" "$LOG" 2>/dev/null || true)
-failed=$(grep -cE "^Test Case '.*' failed" "$LOG" 2>/dev/null || true)
-# Skipped counts as EXECUTED, not as missing. A case that declines itself — the
-# live QUIC attach, with no daemon configured — prints "skipped", and a count of
-# passes alone would come up one short and fail the lane on every machine
-# without credentials.
-# The check is asking "did every declared case get to decide", and a skip is a
-# decision. A case that vanished is what it is meant to catch.
-skipped=$(grep -cE "^Test Case '.*' skipped" "$LOG" 2>/dev/null || true)
+# Verify identities as well as counts: parallel summaries and serial XCTest
+# records have different syntax, and a worker may exit without running its class.
+verdict=0
+python3 "$ROOT/Scripts/ios_ui_cases.py" "$ROOT/Source/Platform/iOS/UITest" \
+    --only "${UBQ_IOS_UI_ONLY:-}" --log "$LOG" --receipt "$STAGE/cases.json" || verdict=$?
 
-for line in $(grep -oE "^Test Case '.*' (passed|failed)" "$LOG" 2>/dev/null | sed 's/Test Case .-\[[^ ]* //;s/\]. /|/'); do
-    printf '  %s\n' "$line" | sed 's/|passed/  ok/;s/|failed/  FAIL/'
-done
 # Keep multiline assertion diagnostics in the job log: the first line alone
 # drops the accessibility tree explaining a missing control. Omit automation's
 # action trace, which can include text entered into the app.
@@ -469,36 +428,14 @@ text = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-
 print(text, end="")
 PY
 
-echo "run-ios-ui-tests: $passed passed, $failed failed, $skipped skipped ($expected selected, $declaredCases declared)"
-
 if [ "$rc" -eq 124 ]; then
     echo "run-ios-ui-tests: TIMED OUT after ${TIMEOUT}s — see $LOG" >&2
     exit 1
 fi
-if [ "$failed" -ne 0 ]; then
-    # The names, not just the count. A verdict that says how many and defers to
-    # a log for which sends the reader to the log to learn the first thing they
-    # were going to ask.
-    failed_names="$(grep -oE "^Test Case '.*' failed" "$LOG" 2>/dev/null \
-        | sed "s/^Test Case .-\[[^ ]* //;s/\]. failed$//" | paste -sd' ' -)"
-    echo "run-ios-ui-tests: FAILED — $failed case(s): ${failed_names:-unnamed}" >&2
-    echo "run-ios-ui-tests: the run's output is in $LOG" >&2
+if [ "$verdict" -ne 0 ]; then
+    echo "run-ios-ui-tests: selected cases did not all complete successfully — see $LOG" >&2
     exit 1
 fi
-if [ "$((passed + skipped))" -ne "$expected" ]; then
-    echo "run-ios-ui-tests: RAN $((passed + skipped)) of $expected selected case(s) — see $LOG" >&2
-    echo "run-ios-ui-tests: a suite that reports no failures having run nothing is not a pass" >&2
-    exit 1
-fi
-# This comparison cannot see a case that was deleted. Both numbers come
-# from the same suite, so removing a case lowers them together and the run
-# reports a confident "N passed (the suite declares N)": a branch reset that
-# discards uncommitted cases leaves a green run with the surfaces they cover
-# unchecked.
-#
-# Nothing inside one run can catch that; the count is only a floor against a
-# stale bundle. What catches it is the case count being in version control, so a
-# disappearance is a diff rather than a quieter green.
 if [ "$rc" -ne 0 ]; then
     echo "run-ios-ui-tests: xcodebuild exited $rc with every case passing — see $LOG" >&2
     exit 1

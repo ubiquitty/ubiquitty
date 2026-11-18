@@ -7,7 +7,7 @@
 # loopback host built from this checkout.
 #
 #   ./Scripts/run-ios-live-lane.sh
-#   UBQ_IOS_UI_ONLY=TerminalGestureUITests/testALiveArrowDragMovesTheCursorOneArrowPerStep \
+#   UBQ_IOS_UI_ONLY=TerminalWorkspaceUITests/testALiveArrowDragMovesTheCursorOneArrowPerStep \
 #       ./Scripts/run-ios-live-lane.sh
 #   UBQ_LIVE_LANE_RUNS=3 ./Scripts/run-ios-live-lane.sh   the same selection three times in a row
 #   UBQ_LIVE_LANE_KEEP=1 ./Scripts/run-ios-live-lane.sh   keep the directory, with the listener's

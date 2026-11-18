@@ -89,6 +89,7 @@ gate_commit_rules_app() {
 gate_style_app() {
     # CI runs the UI suite; validate its exception tables locally on every push.
     run "UI scenario entries" python3 ./Scripts/check-ui-scenarios.py --entries
+    run "iOS UI result accounting" python3 ./Scripts/test-ios-ui-cases.py
     # Prints rather than blocks, and cannot do otherwise: it names a build this
     # machine may not be able to run. A Core type whose layout is pinned by a
     # static_assert in a frontend has that assertion compiled by one build only,
@@ -99,6 +100,7 @@ gate_style_app() {
 # gate_style_app minus nothing: neither of its gates compiles.
 gate_style_app_without_builds() {
     run "UI scenario entries" python3 ./Scripts/check-ui-scenarios.py --entries
+    run "iOS UI result accounting" python3 ./Scripts/test-ios-ui-cases.py
     python3 ./Scripts/check-build-arm.py --since origin/main || true
 }
 

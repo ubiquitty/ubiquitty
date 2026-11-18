@@ -514,6 +514,14 @@ editor and terminal gestures. Live SSH/QUIC cases need the credentials described
 in `Scripts/run-ios-ui-tests.sh`; without them those cases report skips.
 The Apple battery includes `ios-build`, `ios-smokes`, and `ios-ui`.
 
+CI runs the UI suite's four XCTest classes with four simulator workers after
+building the app and test bundle once. Local runs default to one worker;
+`UBQ_IOS_UI_WORKERS=4 ./Scripts/run-ios-ui-tests.sh` enables four. A manual CI
+run can select one, two or four workers to compare elapsed time. Every selected
+case must report its own verdict; simulator clones created by the run are
+deleted when it ends. Assertions, per-case waits and the suite budget are the
+same at every worker count.
+
 For interactive development, run `./Scripts/generate-xcode-workspace.sh --ios-only`,
 open `UbiquittyIOS.xcworkspace`, and select `UbiquittyIOSApp` with an iPhone, an
 iPad or a simulator as the destination. A physical device needs a development
