@@ -3,9 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Reject incomplete parallel UI runs and preserve other simulator owners."""
 
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -167,6 +170,68 @@ class RunnerLifecycleTests(unittest.TestCase):
         process.poll.return_value = None
         runner.stop(process)
         process.wait.assert_called_once_with()
+
+
+class RunnerProgressTests(unittest.TestCase):
+    """Real child output and silence must both leave a bounded live report."""
+
+    def observe(self, body, seconds=2):
+        with tempfile.TemporaryDirectory(prefix="ubq-ios-progress-") as directory:
+            log = Path(directory) / "child.log"
+            result = io.StringIO()
+            with log.open("w") as stream:
+                process = subprocess.Popen([sys.executable, "-u", "-c", body], stdout=stream,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
+                try:
+                    with redirect_stdout(result):
+                        code = runner.wait_with_progress(process, log, seconds, 2, heartbeat_seconds=0.05)
+                finally:
+                    runner.stop(process)
+            return code, result.getvalue(), log.read_text()
+
+    def testObservedCasesAreCountedOnceAcrossSerialAndParallelFormats(self):
+        body = '''
+import time
+print("Test Case '-[Module.One testA]' started.")
+print("Test Case '-[Module.One testA]' passed (0.100 seconds).")
+print("Test case 'One.testA()' passed on 'Clone 1 of fixture' (0.100 seconds)")
+print("Test Case '-[Module.Two testB]' started.")
+time.sleep(0.18)
+'''
+        code, progress, raw = self.observe(body)
+        self.assertEqual(code, 0)
+        self.assertIn("1/2 completed", progress)
+        self.assertNotIn("2/2 completed", progress)
+        self.assertIn("active Two/testB", progress)
+        self.assertIn("last Two/testB (started)", progress)
+        self.assertRegex(progress, r"last output 0\.[1-9][0-9]*s ago")
+        self.assertIn("passed on 'Clone 1", raw)
+
+    def testSilentChildStillReportsWithoutInventingCases(self):
+        code, progress, raw = self.observe("import time; time.sleep(0.18)")
+        self.assertEqual(code, 0)
+        self.assertEqual(raw, "")
+        self.assertGreaterEqual(progress.count("0/2 completed"), 2)
+        self.assertIn("active none reported; last none reported", progress)
+        self.assertRegex(progress, r"no output for 0\.[1-9][0-9]*s")
+
+    def testHeartbeatDoesNotExtendTheOriginalDeadline(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.observe("import time; time.sleep(5)", seconds=0.15)
+
+    def testMainPreservesTheChildFailureAndUsesTheSelectedCount(self):
+        with tempfile.TemporaryDirectory(prefix="ubq-ios-progress-main-") as directory:
+            log = Path(directory) / "child.log"
+            command = [sys.executable, "-c", "import sys; print(\"Test Case '-[Module.One testA]' failed (0.1 seconds).\"); sys.exit(7)"]
+            argv = ["ios_ui_runner.py", "2", str(log), "parent", "1", *command]
+            inventory = {"runtime": [{"udid": "parent", "name": "fixture"}]}
+            progress = io.StringIO()
+            with patch.object(runner.sys, "argv", argv), patch.object(runner, "inventory", return_value=inventory), \
+                    redirect_stdout(progress):
+                self.assertEqual(runner.main(), 7)
+            self.assertIn("1/1 completed", progress.getvalue())
+            self.assertIn("last One/testA (failed)", progress.getvalue())
+            self.assertIn("failed", log.read_text())
 
 
 if __name__ == "__main__":

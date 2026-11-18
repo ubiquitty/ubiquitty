@@ -10,6 +10,9 @@ import re
 import signal
 import subprocess
 import sys
+import time
+
+import ios_ui_cases
 
 
 def inventory():
@@ -50,9 +53,67 @@ def interrupted(signum, frame):
     raise InterruptedError(f"UI test runner received signal {signum}")
 
 
+def wait_with_progress(process, log, seconds, expected, heartbeat_seconds=30):
+    """Report observed XCTest identities without changing its deadline or verdict."""
+    started = time.monotonic()
+    deadline = started + seconds
+    completed = {}
+    active = set()
+    last_case = "none reported"
+    received_output = False
+    pending = ""
+    event = re.compile(r"^Test (?:Case|case) '([^']+)' (started|passed|failed|skipped)\b")
+    objc_name = re.compile(r"-\[(?:\w+\.)?(\w+) (test\w+)\]")
+    swift_name = re.compile(r"(?:\w+\.)?(\w+)\.(test\w+)\(\)")
+    with Path(log).open(errors="replace") as reader:
+        def report(final=False):
+            nonlocal pending, last_case, received_output
+            chunk = reader.read()
+            received_output = received_output or bool(chunk)
+            lines = (pending + chunk).splitlines(keepends=True)
+            pending = ""
+            if lines and not lines[-1].endswith(("\n", "\r")) and not final:
+                pending = lines.pop()
+            for line in lines:
+                parsed, _ = ios_ui_cases.log_results(line)
+                completed.update(parsed)
+                match = event.match(line)
+                if not match:
+                    continue
+                name = objc_name.fullmatch(match[1]) or swift_name.fullmatch(match[1])
+                if not name:
+                    continue
+                case = "/".join(name.groups())
+                if match[2] == "started":
+                    active.add(case)
+                else:
+                    active.discard(case)
+                last_case = f"{case} ({match[2]})"
+            elapsed = time.monotonic() - started
+            age = max(0, time.time() - Path(log).stat().st_mtime) if received_output else elapsed
+            output_age = f"last output {age:.1f}s ago" if received_output else f"no output for {age:.1f}s"
+            print(f"run-ios-ui-tests: progress — {len(completed)}/{expected} completed; "
+                  f"active {', '.join(sorted(active)) or 'none reported'}; "
+                  f"last {last_case}; {output_age}; {elapsed:.1f}s elapsed", flush=True)
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, seconds)
+            try:
+                code = process.wait(timeout=min(remaining, heartbeat_seconds))
+            except subprocess.TimeoutExpired:
+                report()
+                continue
+            report(final=True)
+            return code
+
+
 def main():
     """Keep the original xcodebuild status, and fail if owned cleanup fails."""
-    seconds, log, device, *command = sys.argv[1:]
+    seconds, log, device, expected, *command = sys.argv[1:]
+    if int(expected) <= 0:
+        raise ValueError("the selected XCTest case count must be positive")
     before = inventory()
     new_clones(before, before, device)  # Require the parent before spawning Xcode.
     code = 2
@@ -63,7 +124,7 @@ def main():
             process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
                                        start_new_session=True)
             try:
-                code = process.wait(timeout=int(seconds))
+                code = wait_with_progress(process, log, int(seconds), int(expected))
             except subprocess.TimeoutExpired:
                 stop(process)
                 code = 124

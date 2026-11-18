@@ -392,7 +392,7 @@ fi
 # XCTest schedules concrete classes, each in an isolated simulator clone.
 # The same prebuilt app and bundle are reused by every worker.
 echo "run-ios-ui-tests: $expected selected cases, $WORKERS worker(s)"
-python3 "$ROOT/Scripts/ios_ui_runner.py" "$TIMEOUT" "$LOG" "$DEVICE" \
+python3 "$ROOT/Scripts/ios_ui_runner.py" "$TIMEOUT" "$LOG" "$DEVICE" "$expected" \
     xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=$DEVICE" \
     -parallel-testing-enabled "$PARALLEL_ENABLED" -parallel-testing-worker-count "$WORKERS" \
     -maximum-concurrent-test-simulator-destinations "$WORKERS" \
