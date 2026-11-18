@@ -5,8 +5,8 @@
 
 Measure the app through its real PTY, renderer, and presentation path when the
 question concerns interactive behavior. A Core replay benchmark answers a
-narrower question; see [measuring a Core change](measuring-a-core-change.md) and
-[the measurement guide](benchmarks.md).
+narrower question; see [measuring a Core change](https://github.com/ubiquitty/core/blob/main/Docs/measuring-a-core-change.md) and
+[the measurement guide](https://github.com/ubiquitty/core/blob/main/Docs/benchmarks.md).
 
 ## Reproducible measurements
 
@@ -29,7 +29,7 @@ available alongside the measurements.
 
 ## Driving an isolated instance
 
-The [control socket](control-socket.md) supports scripted input and screen
+The [control socket](https://github.com/ubiquitty/core/blob/main/Docs/control-socket.md) supports scripted input and screen
 inspection. Give a test instance a separate `UBIQUITTY_HOME` and
 `XDG_CONFIG_HOME` so its socket and configuration do not belong to the user's
 session. Verify the intended instance before sending input.

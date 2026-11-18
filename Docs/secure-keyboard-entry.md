@@ -72,5 +72,5 @@ process running with the user's privileges.
 
 `[security]` settings have no Profile slot, so `secure_keyboard_entry` is excluded
 from the `CONFIG` sync frame by construction (see
-[platform-config-and-sync](platform-config-and-sync.md)) — it never travels to a
+[platform-config-and-sync](https://github.com/ubiquitty/core/blob/main/Docs/platform-config-and-sync.md)) — it never travels to a
 client.

@@ -131,5 +131,5 @@ does only the cancellation.
 
 Put reusable developer tools in `Tools/`. A script specific to one behavior
 belongs with its tests and should call a shared tool when one exists. The
-[architecture](architecture.md), [coding conventions](coding-conventions.md), and
-[naming conventions](naming-conventions.md) define the source rules.
+[architecture](https://github.com/ubiquitty/core/blob/main/Docs/architecture.md), [coding conventions](https://github.com/ubiquitty/core/blob/main/Docs/coding-conventions.md), and
+[naming conventions](https://github.com/ubiquitty/core/blob/main/Docs/naming-conventions.md) define the source rules.

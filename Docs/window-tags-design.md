@@ -220,9 +220,9 @@ also distinct from this window-local presentation.
 
 ## Source contracts
 
-- [Tag matching, color lookup, and precedence](../Source/Core/Session/Tags.h)
-- [Host identity](../Source/Core/Session/SessionLocation.h)
+- [Tag matching, color lookup, and precedence](https://github.com/ubiquitty/core/blob/main/Source/Core/Session/Tags.h)
+- [Host identity](https://github.com/ubiquitty/core/blob/main/Source/Core/Session/SessionLocation.h)
 - Window tag composition: [Source/Platform/macOS/App/Windowing/TerminalWindowController+TitlebarIdentity.swift](../Source/Platform/macOS/App/Windowing/TerminalWindowController%2BTitlebarIdentity.swift)
-- [Capsule rendering](../Source/Platform/macOS/App/TerminalView/TitlebarTagChip.swift)
+- [Capsule rendering](https://github.com/ubiquitty/kit/blob/main/Source/Platform/macOS/App/TerminalView/TitlebarTagChip.swift)
 - [Tab tag dot](../Source/Platform/macOS/App/Windowing/TabTagDots.swift)
 - [Capture and restoration](../Source/Platform/macOS/App/Windowing/TerminalWindows.swift)

@@ -115,7 +115,7 @@ work. Those operations retain their host-side permission and consent checks.
 
 See [session restoration](../guides/session-resurrection.md),
 [remote sessions](../guides/remote-sessions-and-agents.md), and the
-[session model](../session-model.md).
+[session model](https://github.com/ubiquitty/core/blob/main/Docs/session-model.md).
 
 ## UI requirements
 
@@ -131,7 +131,7 @@ from fresh processes.
 
 ## Source contracts
 
-- [Profile schema and resolver](../../Source/Core/Preferences/Profile.h)
-- [Profile resolution and transfer](../../Source/Core/Preferences/Profile.cpp)
+- [Profile schema and resolver](https://github.com/ubiquitty/core/blob/main/Source/Core/Preferences/Profile.h)
+- [Profile resolution and transfer](https://github.com/ubiquitty/core/blob/main/Source/Core/Preferences/Profile.cpp)
 - [Profile editor](../../Source/Platform/macOS/App/ProfilesPane.swift)
 - [Window capture and restoration](../../Source/Platform/macOS/App/Windowing/TerminalWindows.swift)

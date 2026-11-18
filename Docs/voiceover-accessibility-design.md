@@ -89,6 +89,6 @@ alone do not validate accessibility behavior.
 
 ## Source contracts
 
-- Apple accessibility adapter: [Source/UbiquittyKit/Swift/TerminalSurface+Accessibility.swift](../Source/UbiquittyKit/Swift/TerminalSurface%2BAccessibility.swift)
-- [GTK accessibility adapter](../Source/Platform/Linux/Accessibility.cpp)
-- [Core text projection](../Source/Core/Accessibility/TextProjection.h)
+- Apple accessibility adapter: [Source/UbiquittyKit/Swift/TerminalSurface+Accessibility.swift](https://github.com/ubiquitty/kit/blob/main/Source/UbiquittyKit/Swift/TerminalSurface%2BAccessibility.swift)
+- [GTK accessibility adapter](https://github.com/ubiquitty/kit/blob/main/Source/Platform/Linux/Accessibility.cpp)
+- [Core text projection](https://github.com/ubiquitty/core/blob/main/Source/Core/Accessibility/TextProjection.h)

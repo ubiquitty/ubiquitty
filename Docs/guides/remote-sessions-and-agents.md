@@ -179,7 +179,7 @@ offers guidance to use Connect.
 The default host build opens a QUIC UDP listener on all interfaces at an
 OS-assigned port, as well as its owner-only local Unix socket. To disable UDP
 when starting a daemon, use `--quic-port -1`; see
-[listener defaults, authentication, and controls](../quic-trust.md#what-the-daemon-listens-on).
+[listener defaults, authentication, and controls](https://github.com/ubiquitty/core/blob/main/Docs/quic-trust.md#what-the-daemon-listens-on).
 
 ## Share This Window with Agents
 
@@ -213,14 +213,14 @@ watch or type into those terminals.
 
 `ubq` is a headless client of the daemon — the same Sync protocol, minus the
 renderer. It's how AI tooling drives terminals. Build it with `./Scripts/build-agent.sh`.
-The manual, with every verb and an example for each, is [Docs/ubq.md](../ubq.md).
+The manual, with every verb and an example for each, is [Docs/ubq.md](https://github.com/ubiquitty/core/blob/main/Docs/ubq.md).
 The daemon refuses an agent that presents no capability token, so issue one before the first
 command (see **Token auth** below).
 
 **As a CLI** it has verbs to create and drive sessions, each an operation in
 the method registry with a schema (`ubq api list`). Under the default `confirm`
 policy, `new`, `run` and `send` need an `allow` rule or `--yes` typed at your
-terminal, and exit 4 without one; see [Policy](../ubq.md#policy).
+terminal, and exit 4 without one; see [Policy](https://github.com/ubiquitty/core/blob/main/Docs/ubq.md#policy).
 
 ```
 ubq new --label build              # start a session in the daemon
@@ -264,7 +264,7 @@ command, arguments, and environment; adapt the outer key to your client:
 Replace both paths with executable binaries from the same build. A daemon must already
 be running or the agent must be able to start it through `UBIQUITTY_HOST_BIN`.
 Registration alone does not grant access: token authentication and consent still apply
-as described below. See the [agent reference](../../Source/Agent/README.md) for commands,
+as described below. See the [agent reference](https://github.com/ubiquitty/core/blob/main/Source/Agent/README.md) for commands,
 tool schemas, policy, authentication, and exit codes.
 
 Safety for the agent side:

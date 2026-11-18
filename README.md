@@ -885,6 +885,79 @@ python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py 
 
 ## Repository layout
 
+Ubiquitty is three repositories. This one holds the apps; the engine and the
+terminal views are the libraries it carries as submodules, `kit` directly and
+`core` through it. Every top-level entry under `Source/Platform/` and every
+directory at this repository's root is listed.
+[Architecture](https://github.com/ubiquitty/core/blob/main/Docs/architecture.md#source-tree)
+describes every Core module.
+
+```
+Source/
+  Platform/         per-frontend code:
+    Apple/            code shared by the macOS and iOS apps (SSH, host outline)
+    macOS/            native app: AppKit windows and Swift chrome
+    iOS/              SwiftUI iPhone/iPad app over UbiquittyRenderKit, SSH + QUIC
+    Linux/            GTK4 + Vulkan frontend
+    Web/              WebGL frontend over Core's WebAssembly PAL
+    Wscons/           OpenBSD/NetBSD console: no toolkit, no GPU
+    Emacs/            ubiquitty-sync.el, a Sync client with no C++ linked
+    Neovim/           ubiquitty_sync, the same seam in Lua, over the host's attach bridge
+Libraries/
+  ubiquitty-kit/    the terminal views and renderers (github.com/ubiquitty/kit):
+                    UbiquittyKit, UbiquittyRenderKit (Swift + Metal), and the
+                    Vulkan, FreeType and GTK platform layer
+    Libraries/ubiquitty-core/
+                    the engine and multiplexer (github.com/ubiquitty/core):
+                    Source/Base, PAL, Core, Agent and ThirdParty, the host
+                    daemon and POSIX backend under Source/Platform, the shared
+                    build, test and gate scripts, Samples/ and Support/
+Integrations/
+  omarchy/          the Omarchy package (github.com/ubiquitty/omarchy), a submodule
+Tests/              the frontends' tests, smokes, snapshots and web tests
+Scripts/            the apps' build, release, test and gate scripts; shared ones are Core's
+Tools/              UI scenario, iOS UI test and README screenshot drivers
+Docs/               app design notes, user guides, release and build documents
+Resources/          app icon and Linux desktop files
+LICENSES/           the Apache-2.0 license text
+Ubiquitty.xcworkspace/ the Xcode workspace over the projects generated into build/xcode/
+UbiquittyIOS.xcworkspace/ the same over the iOS project alone, which Xcode Cloud archives
+ci_scripts/         Xcode Cloud's build step for the iOS app
+.github/            CI workflows, issue and PR templates, contributing and security guides, code of conduct
+```
+
+Build outputs live outside the checkout. Resolve their root with
+`export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)"`. macOS uses Xcode's
+DerivedData; Linux uses `$XDG_CACHE_HOME/ubiquitty/build` (default
+`~/.cache/ubiquitty/build`), with a separate hashed directory per checkout.
+`UBQ_BUILD_ROOT` overrides the location on either platform.
+
+Host tests go under `$UBQ_BUILD_ROOT/BuildHostTests/`. Core’s
+`./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/run-coverage.sh` writes its per-file summary to
+`$UBQ_BUILD_ROOT/BuildHostTests/coverage/summary.txt`.
+`./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/check-coverage-floor.sh` reads that summary without running tests:
+it fails when a file it lists, or the weighted total, is below its line-coverage
+floor or has no row, and refuses a summary older than any `Source/` `.cpp` file.
+
+A Linux machine renders the portable catalog from the core snapshot binary,
+which it builds first:
+
+```sh
+export UBQ_BUILD_ROOT="$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)"
+./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build-core-snapshot.sh &&
+python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend portable
+```
+
+On macOS, also build the app and run both native catalogs against that build:
+
+```sh
+./Scripts/build-macos.sh --no-linux-hosts &&
+python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend macos &&
+python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Snapshots/run.py --source-root "$PWD" --backend swift
+```
+
+## Repository layout
+
 Every top-level entry under `Source/` and every directory at the repository root
 is listed; under `Source/Core/` only the larger modules are. [Architecture](https://github.com/ubiquitty/core/blob/main/Docs/architecture.md#source-tree)
 describes every Core module.

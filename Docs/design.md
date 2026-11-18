@@ -5,7 +5,7 @@
 
 These are design requirements for interface changes, not a list of implemented
 features. The [user guides](guides/README.md) describe available behavior;
-[architecture](architecture.md) defines ownership and terminal compatibility.
+[architecture](https://github.com/ubiquitty/core/blob/main/Docs/architecture.md) defines ownership and terminal compatibility.
 
 ## Content and hierarchy
 
@@ -39,7 +39,7 @@ Color communicates state but must not be its only cue. Selection, focus,
 connection health, and consent outcomes need a visible shape or text label.
 Respect system accessibility settings and test both light and dark themes.
 Do not reinterpret sRGB-authored theme colors as Display P3 colors; see
-[wide-gamut rendering](wide-gamut.md).
+[wide-gamut rendering](https://github.com/ubiquitty/kit/blob/main/Docs/wide-gamut.md).
 
 Keep theme-derived colors consistent across dividers, focus cues, notifications,
 and window controls. A terminal application's chosen colors are separate from
@@ -87,7 +87,7 @@ has not granted.
 
 Host authorization remains authoritative. The interface displays its result and
 does not infer success from a sent request. For the policy contracts, see
-[capability origin](capability-origin.md) and [host policy](capability-host-policy.md).
+[capability origin](https://github.com/ubiquitty/core/blob/main/Docs/capability-origin.md) and [host policy](https://github.com/ubiquitty/core/blob/main/Docs/capability-host-policy.md).
 
 ## Copy
 

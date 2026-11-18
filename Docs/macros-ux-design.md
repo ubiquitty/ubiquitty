@@ -84,4 +84,4 @@ this byte-sequence contract.
 
 - [Macro editor](../Source/Platform/macOS/App/MacrosPane.swift)
 - [Macro store](../Source/Platform/macOS/App/MacroStore.swift)
-- [Keyboard actions](../Source/Core/Input/Keybindings.h)
+- [Keyboard actions](https://github.com/ubiquitty/core/blob/main/Source/Core/Input/Keybindings.h)

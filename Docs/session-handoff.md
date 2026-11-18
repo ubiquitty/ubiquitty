@@ -54,7 +54,7 @@ identity and the trusted-binary rule remain applicable.
 
 If QUIC is selected, the receiver obtains its one-time token and certificate
 pin over its authenticated SSH bootstrap. Those credentials travel through
-that channel, not through the locator. See [QUIC trust](quic-trust.md).
+that channel, not through the locator. See [QUIC trust](https://github.com/ubiquitty/core/blob/main/Docs/quic-trust.md).
 
 ## Session lifetime
 
@@ -81,5 +81,5 @@ mismatch, daemon replacement, missing sessions, attach-only behavior, and
 independent authentication. Link parsing alone does not prove the complete
 handoff path.
 
-See [Host management](host-management.md), [Session model](session-model.md),
-and [Agent token authentication](agent-token-auth.md).
+See [Host management](https://github.com/ubiquitty/core/blob/main/Docs/host-management.md), [Session model](https://github.com/ubiquitty/core/blob/main/Docs/session-model.md),
+and [Agent token authentication](https://github.com/ubiquitty/core/blob/main/Docs/agent-token-auth.md).

@@ -81,7 +81,7 @@ full Unicode Bidirectional Algorithm (UAX #9): it reverses each run of
 right-to-left letters and the spaces between them, and has no embedding levels,
 isolates, bracket pairing, or paragraph direction, so digits between two
 right-to-left words split them into separate runs. The rule and its limits are
-in [Arabic joining and bidirectional display](../arabic-shaping-design.md).
+in [Arabic joining and bidirectional display](https://github.com/ubiquitty/core/blob/main/Docs/arabic-shaping-design.md).
 
 ### Fractional character spacing
 
