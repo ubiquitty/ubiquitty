@@ -27,6 +27,13 @@ SPEC.loader.exec_module(RELEASE)
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_cache_paths_resolve_from_preceding_canonical_roots(self):
+        core = Path(os.environ.get("UBQ_CORE_ROOT") or ROOT / "Libraries/ubiquitty-kit/Libraries/ubiquitty-core")
+        spec = importlib.util.spec_from_file_location("workflow_cache_paths", core / "Tests/Tools/test_draft_workflows.py")
+        workflow_tests = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(workflow_tests)
+        self.assertEqual(workflow_tests.cache_path_problems(ROOT), [])
+
     def release_source_bootstrap(self, version="0.4.0", identity="01234567", failed_field=""):
         action = (ROOT / ".github/actions/release-source/action.yml").read_text()
         script = textwrap.dedent(action.split("      run: |\n", 1)[1])

@@ -84,7 +84,7 @@ jobs:
       - name: Restore the compiler cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ github.workspace }}/../ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-
@@ -92,7 +92,7 @@ jobs:
       - name: Cache pinned Swift package sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ github.workspace }}/../swiftpm-cache/repositories
+          path: ${{ env.UBIQUITTY_SWIFTPM_CACHE }}/repositories
           key: swiftpm-sources-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Source/Platform/Apple/SSH/Package.resolved') }}
       - name: Run the fail-fast Apple battery
         id: battery
@@ -146,5 +146,5 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ github.workspace }}/../ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}

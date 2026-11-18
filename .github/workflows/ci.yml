@@ -192,13 +192,17 @@ jobs:
           df -h /
           sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup
           df -h /
+      - name: Compiler and dependency cache roots
+        run: |
+          echo "CCACHE_DIR=$RUNNER_WORKSPACE/ccache" >> "$GITHUB_ENV"
+          echo "UBQ_QUIC_CACHE_PREFIX=$RUNNER_WORKSPACE/build-gcc/quic-deps" >> "$GITHUB_ENV"
       - name: Cache QUIC dependencies
         if: needs.preflight.outputs.code == 'true' && matrix.group != 'wasm'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: |
-            ${{ github.workspace }}/../build-gcc/quic-deps/lib
-            ${{ github.workspace }}/../build-gcc/quic-deps/include
+            ${{ env.UBQ_QUIC_CACHE_PREFIX }}/lib
+            ${{ env.UBQ_QUIC_CACHE_PREFIX }}/include
           key: quic-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh') }}
       # A hosted runner starts with an empty compiler cache, and the host test
       # build then runs close to ubq_build's 900 s budget. The cache sits beside
@@ -211,7 +215,7 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ github.workspace }}/../ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-${{ matrix.group }}-
@@ -302,7 +306,7 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ github.workspace }}/../ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
   apple:
     # The macOS app and host tests run independently. The optional simulator
@@ -370,7 +374,7 @@ jobs:
       - name: Restore the compiler cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ github.workspace }}/../ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-
@@ -460,7 +464,7 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ github.workspace }}/../ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
   # The one check branch protection names. It passes when every job that had
   # to run passed: preflight always, and the rest unless change reach

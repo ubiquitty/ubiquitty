@@ -448,7 +448,7 @@ jobs:
       - name: Cache pinned Swift package sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/swiftpm-cache/repositories
+          path: ${{ env.UBIQUITTY_SWIFTPM_CACHE }}/repositories
           key: swiftpm-sources-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('product/Source/Platform/Apple/SSH/Package.resolved') }}
       - name: Build the device or simulator development app
         env:
