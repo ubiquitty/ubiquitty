@@ -394,7 +394,14 @@ enum LinkScenarios {
         UBUITestRegister("swift_shell_link_settings_follow_mouse_reporting_on_both_screens") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
-                guard let shell = TerminalWindowController.spawn(),
+                // The scenario supplies its own terminal bytes; a login
+                // shell's delayed prompt must not overwrite its first URL.
+                guard
+                    let shell = TerminalWindowController.spawn(
+                        arguments: ["/bin/sh", "-c", "exec sleep 1000"],
+                        localePolicy: .auto,
+                        sessionLifetime: .outlivesChild
+                    ),
                     let window = shell.window,
                     let content = window.contentView,
                     let surface = terminalSurface(under: content)
@@ -418,9 +425,14 @@ enum LinkScenarios {
                     (name: "alternate reporting", mode: "\u{1b}[?1049h\u{1b}[?1003h", isReporting: true),
                 ]
                 for screen in screens {
-                    surface.feed(Data(("\u{1b}[?1003l\u{1b}[?1049l\u{1b}[H\u{1b}[2J" + screen.mode
-                        + "\u{1b}]8;;https://example.com/declared\u{1b}\\DECLARED\u{1b}]8;;\u{1b}\\\r\n"
-                        + "https://example.com/guessed").utf8))
+                    surface.feed(
+                        Data(
+                            ("\u{1b}[?1003l\u{1b}[?1049l\u{1b}[H\u{1b}[2J" + screen.mode
+                                + "\u{1b}]8;;https://example.com/declared\u{1b}\\DECLARED\u{1b}]8;;\u{1b}\\\r\n"
+                                + "https://example.com/guessed")
+                                .utf8
+                        )
+                    )
                     t.pump(0.1)
                     guard let declared = surface.viewPoint(forRow: 0, column: 2),
                         let guessed = surface.viewPoint(forRow: 1, column: 2)
@@ -429,7 +441,9 @@ enum LinkScenarios {
                         continue
                     }
                     for isOverrideEnabled in [false, true] {
-                        restoreLiveDocument(base + "\n[selection]\nosc8_click_opens = true\nlinks_override_reporting = \(isOverrideEnabled)\n")
+                        restoreLiveDocument(
+                            base + "\n[selection]\nosc8_click_opens = true\nlinks_override_reporting = \(isOverrideEnabled)\n"
+                        )
                         opened.removeAll()
                         let didOpenDeclared = surface.openLink(atViewPoint: declared, isCommandHeld: false)
                         t.expect(

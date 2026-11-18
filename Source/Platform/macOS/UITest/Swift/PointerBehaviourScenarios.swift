@@ -2044,6 +2044,7 @@ enum PointerBehaviourScenarios {
                     !surface.drive.hasDeferredHistoryRewrap,
                     desc: "a settled resize owes nothing afterwards"
                 )
+                surface.beginLiveResize()
                 surface.drive.resize(rows: rows, columns: columns / 2, gesture: .interactive)
                 t.pump(0.3)
                 t.expect(
@@ -2053,7 +2054,7 @@ enum PointerBehaviourScenarios {
 
                 // And the settle pays for it once, at the width the drag
                 // stopped at.
-                surface.drive.settleResize()
+                surface.endLiveResize()
                 t.pump(0.3)
                 t.expect(
                     !surface.drive.hasDeferredHistoryRewrap,

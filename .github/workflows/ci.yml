@@ -3,7 +3,7 @@
 
 name: CI
 
-# The full matrix, on every pull request and every push to main: the batteries
+# The required matrix, on every pull request and every push to main: the batteries
 # Core's ci_batteries.py defines, run over the app with the Kit and the Core it
 # pins, and the push gates Scripts/pre-push-gates.sh runs that the batteries do
 # not (the same families, through the same runner, with every diff-chosen gate
@@ -29,11 +29,6 @@ on:
         description: "Also run the macOS UI scenarios on the hosted runner"
         type: boolean
         default: false
-      ios_ui_workers:
-        description: "Concurrent iOS UI test workers sharing one app build"
-        type: choice
-        options: ["4", "2", "1"]
-        default: "4"
   # Once a day: a sweep stands down when main's tip already has a verdict.
   schedule:
     - cron: "13 5 * * *"
@@ -310,9 +305,8 @@ jobs:
           path: ${{ github.workspace }}/../ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
   apple:
-    # Three groups of the Apple battery on three runners: the macOS app and its
-    # gates, the whole suite, and the iOS simulator arm. ci_reach.py reads the
-    # battery as complete only when every group is.
+    # The macOS app and host tests run independently. The optional simulator
+    # battery lives in ios.yml and does not gate the required CI check.
     name: Apple battery (${{ matrix.group }})
     needs: preflight
     if: needs.preflight.outputs.apple == 'true'
@@ -330,9 +324,6 @@ jobs:
           - group: tests
             stages: --only setup --only quic --only host-tests
             families: core_gate_host_builds core_gate_forks core_gate_style_checks
-          - group: ios
-            stages: --only setup --only quic --only ios-build --only ios-smokes --only ios-sync --only ios-ui
-            families: ""
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
       UBQ_CI_CODE: ${{ needs.preflight.outputs.code }}
@@ -342,8 +333,6 @@ jobs:
       # here only when a run by hand asks for them.
       UBQ_CI_UI_SCENARIOS: ${{ github.event_name == 'workflow_dispatch' && inputs.ui_scenarios && 'true' || 'false' }}
       STAGES: ${{ matrix.stages }}
-      # Four independent XCTest classes share the one app and test-bundle build.
-      UBQ_IOS_UI_WORKERS: ${{ matrix.group == 'ios' && (inputs.ios_ui_workers || '4') || '1' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -352,11 +341,6 @@ jobs:
           fetch-depth: 0
       - name: Selected Apple toolchain
         run: |
-          # Finish mounting simulator runtimes before other Apple tools can
-          # activate a second cryptex concurrently (runner-images#14946).
-          if [ "${{ matrix.group }}" = ios ]; then
-            xcrun simctl runtime list
-          fi
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
           xcrun --sdk iphonesimulator --show-sdk-version
@@ -391,12 +375,6 @@ jobs:
           restore-keys: |
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-
             ccache-apple-${{ matrix.group }}-
-      - name: Cache pinned Swift package sources
-        if: matrix.group == 'ios'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
-        with:
-          path: ${{ github.workspace }}/../swiftpm-cache/repositories
-          key: swiftpm-sources-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Source/Platform/Apple/SSH/Package.resolved') }}
       - name: Install the conformance suite at the baseline revision
         if: matrix.group == 'macos'
         env:

@@ -184,10 +184,88 @@ private enum QuietWindowShape: CaseIterable {
     }
 }
 
+/// Supplies a compositor report independently of the pane visibility under test.
+@MainActor
+private final class RepaintRetryVisibilityWindow: NSWindow {
+    override var occlusionState: NSWindow.OcclusionState { [] }
+}
+
 /// Registers the quiet-chrome scenarios with the UI-test runner.
 enum QuietChromeScenarios {
     /// Registers every scenario in this file.
     static func register() {
+        UBUITestRegister("swift_shell_a_closed_window_stops_repaint_retries") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                guard let surface = TerminalSurface(rows: 24, columns: 80, fontFamily: "Menlo", pointSize: 13) else {
+                    t.expect(false, desc: "a closed-window probe has a rendered surface")
+                    return
+                }
+                let window = RepaintRetryVisibilityWindow(
+                    contentRect: NSRect(x: 100, y: 100, width: 800, height: 400),
+                    styleMask: [.titled, .closable, .resizable],
+                    backing: .buffered,
+                    defer: false
+                )
+                window.isReleasedWhenClosed = false
+                window.contentView = surface
+                window.orderFront(nil)
+                report(surface, covered: false, pumpingWith: t)
+                window.close()
+                t.pump(1.2)
+                let asked = surface.repaintRetriesAsked
+                let refused = surface.repaintRetriesRefused
+                surface.askForAnotherFrame()
+                t.expect(
+                    t.wait(until: { surface.repaintRetriesRefused > refused }, timeout: 1),
+                    desc: "a closed window refuses another repaint retry after its reveal budget expires"
+                )
+                t.expect(surface.repaintRetriesAsked == asked, desc: "a closed window leaves no new repaint queued")
+            }
+        }
+
+        UBUITestRegister("swift_shell_repaint_retry_follows_the_reported_occlusion") { context in
+            guard let t = context else { return }
+            MainActor.assumeIsolated {
+                guard let surface = TerminalSurface(rows: 24, columns: 80, fontFamily: "Menlo", pointSize: 13) else {
+                    t.expect(false, desc: "a repaint-retry probe has a rendered surface")
+                    return
+                }
+                let window = RepaintRetryVisibilityWindow(
+                    contentRect: NSRect(x: 100, y: 100, width: 800, height: 400),
+                    styleMask: [.titled, .closable, .resizable],
+                    backing: .buffered,
+                    defer: false
+                )
+                window.isReleasedWhenClosed = false
+                defer { window.close() }
+                window.contentView = surface
+                window.orderFront(nil)
+                surface.feed(Data("\u{1b}[?25l".utf8))
+                report(surface, covered: false, pumpingWith: t)
+                t.pump(1.2)
+                let asked = surface.repaintRetriesAsked
+                surface.askForAnotherFrame()
+                t.expect(
+                    t.wait(until: { surface.repaintRetriesAsked > asked }, timeout: 1),
+                    desc: "a pane reported visible can retry after its reveal budget expires"
+                )
+                report(surface, covered: true, pumpingWith: t)
+                t.pump(1.2)
+                let refused = surface.repaintRetriesRefused
+                let askedWhileCovered = surface.repaintRetriesAsked
+                surface.askForAnotherFrame()
+                t.expect(
+                    t.wait(until: { surface.repaintRetriesRefused > refused }, timeout: 1),
+                    desc: "a covered pane refuses another repaint retry"
+                )
+                t.expect(
+                    surface.repaintRetriesAsked == askedWhileCovered,
+                    desc: "a covered pane schedules no repaint"
+                )
+            }
+        }
+
         UBUITestRegister("swift_shell_idle_terminal_stops_capture_retries") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
@@ -204,15 +282,23 @@ enum QuietChromeScenarios {
                 surface.isFullyOccludedForTesting = false
                 surface.feed(Data("\u{1b}[?25l\u{1b}[2J\u{1b}[HQUIET-RETRY".utf8))
                 surface.deliver([.screenDirty])
-                t.expect(t.wait(until: {
-                    surface.framesEncodedForTesting > 0 && !surface.drive.isFrameHeld && !surface.isFrameOwedForTesting
-                }, timeout: 5), desc: "the hidden-cursor terminal draws its quiet state")
+                t.expect(
+                    t.wait(
+                        until: {
+                            surface.framesEncodedForTesting > 0 && !surface.drive.isFrameHeld && !surface.isFrameOwedForTesting
+                        },
+                        timeout: 5
+                    ),
+                    desc: "the hidden-cursor terminal draws its quiet state"
+                )
                 t.pump(1.2)
                 let attempts = surface.encodeAttemptCount
                 let captures = surface.drive.syncFrameCaptureAttemptCount
                 let retries = surface.repaintRetriesAsked
                 t.pump(0.5)
-                print("[idle-work] attempts=\(surface.encodeAttemptCount - attempts) captures=\(surface.drive.syncFrameCaptureAttemptCount - captures) retries=\(surface.repaintRetriesAsked - retries)")
+                print(
+                    "[idle-work] attempts=\(surface.encodeAttemptCount - attempts) captures=\(surface.drive.syncFrameCaptureAttemptCount - captures) retries=\(surface.repaintRetriesAsked - retries)"
+                )
                 t.expect(surface.encodeAttemptCount == attempts, desc: "an idle terminal makes no encode attempts")
                 t.expect(surface.drive.syncFrameCaptureAttemptCount == captures, desc: "an idle terminal requests no captures")
                 t.expect(surface.repaintRetriesAsked == retries, desc: "an idle terminal queues no repaint retries")

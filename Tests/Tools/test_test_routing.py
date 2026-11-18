@@ -9,6 +9,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,6 +39,57 @@ INPUTS = {
     "cmake/BundleResources.cmake": "kit",
     "cmake/SwiftInteropStamp.cmake": "kit",
 }
+
+
+class OptionalIOSWorkflow(unittest.TestCase):
+    def assert_policy(self, required, optional):
+        spec = importlib.util.spec_from_file_location("optional_ios_workflow_reader", CORE_ROOT / "Tests/Tools/test_draft_workflows.py")
+        reader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reader)
+        main = reader.Workflow(required)
+        manual = reader.Workflow(optional)
+        self.assertEqual(set(manual.events), {"workflow_dispatch"})
+        self.assertEqual(set(main.jobs), {"preflight", "linux", "apple", "ci"})
+        self.assertEqual(set(manual.jobs), {"ios"})
+        groups = re.findall(r"(?m)^          - group: (\S+)$", main.jobs["apple"]["strategy"])
+        self.assertEqual(groups, ["macos", "tests"])
+        self.assertEqual(reader.scalar(main.jobs["ci"]["needs"]), "[preflight, linux, apple]")
+        self.assertNotIn(".github/workflows/ios.yml", required)
+        job = manual.jobs["ios"]
+        self.assertEqual(reader.scalar(job["name"]), "iOS tests")
+        self.assertEqual(reader.scalar(job["timeout-minutes"]), "180")
+        selected = re.findall(r"(?m)^            stages: (.*)$", job["strategy"])
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(shlex.split(selected[0]), [word for stage in
+                         ("setup", "quic", "ios-build", "ios-smokes", "ios-sync", "ios-ui")
+                         for word in ("--only", stage)])
+        environment = reader.mapping(job["env"], 6)
+        self.assertEqual(reader.scalar(environment["UBQ_CI_PREFLIGHT_COMPLETE"]), '"0"')
+        self.assertEqual(reader.scalar(environment["UBQ_IOS_UI_WORKERS"]), "${{ inputs.ios_ui_workers }}")
+        self.assertIn('default: "4"', optional)
+        steps = job["steps"]
+        self.assertIn("submodules: recursive", steps)
+        self.assertIn("xcrun simctl runtime list", steps)
+        self.assertIn("name: Cache pinned Swift package sources", steps)
+        battery = steps.split("      - name: Run the fail-fast Apple battery\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotIn("continue-on-error", battery)
+        self.assertIn('ci_batteries.py run apple --source-root "$GITHUB_WORKSPACE" $STAGES', battery)
+
+    def workflow_texts(self):
+        workflows = ROOT / ".github/workflows"
+        return (workflows / "ci.yml").read_text(), (workflows / "ios.yml").read_text()
+
+    def test_ios_is_manual_and_complete_without_blocking_required_ci(self):
+        self.assert_policy(*self.workflow_texts())
+
+    def test_routing_rejects_reintroduced_required_ios_or_missing_optional_stages(self):
+        main, manual = self.workflow_texts()
+        for required, optional in ((main.replace("- group: tests", "- group: ios"), manual),
+                                   (main, manual.replace(" --only ios-sync", "")),
+                                   (main, manual.replace('UBQ_CI_PREFLIGHT_COMPLETE: "0"', 'UBQ_CI_PREFLIGHT_COMPLETE: "1"'))):
+            with self.subTest(required_changed=required != main, optional_changed=optional != manual):
+                with self.assertRaises(AssertionError):
+                    self.assert_policy(required, optional)
 
 
 class PlatformSmokeOwnership(unittest.TestCase):

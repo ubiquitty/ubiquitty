@@ -64,7 +64,10 @@ enum WindowFollowsFontScenarios {
                     t.expect(false, desc: "tmux becomes the foreground program")
                     return
                 }
-                t.pump(0.8)
+                // The job's bounded startup retries cover a SIGWINCH handler
+                // installed after its first size read. This edit measures
+                // steady-state delivery, after that startup interval.
+                t.pump(TimeInterval(Ubiquitty.Runtime.windowSizeReassertWindowMicros) / 1_000_000)
                 let beforeTmux = surface.drive.windowSizeDeliveryCount
                 app.settingsSetLineSpacing(spacing + 4)
                 t.pump(0.8)

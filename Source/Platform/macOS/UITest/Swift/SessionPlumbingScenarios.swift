@@ -79,7 +79,8 @@ enum SessionPlumbingScenarios {
         panes: [(id: Int32, marker: String)],
         relisting: (marker: String, dropTrigger: String, relistTrigger: String)? = nil
     ) -> String {
-        let layout = panes.count == 1
+        let layout =
+            panes.count == 1
             ? "ef01,80x24,0,0,\(panes[0].id)"
             : "abcd,80x24,0,0{40x24,0,0,\(panes[0].id),39x24,41,0,\(panes[1].id)}"
         var script = "stty -echo; printf '%%begin 1 1 0\\n%%end 1 1 0\\n"
@@ -91,7 +92,7 @@ enum SessionPlumbingScenarios {
         if let relisting {
             let first = panes[0].id
             script += "while [ ! -e '\(relisting.dropTrigger)' ]; do sleep 0.05; done; "
-            script += "printf '%%layout-change @1 ef02,80x24,0,0,90199 ef02,80x24,0,0,90199 *\\n'; "
+            script += "printf '%%layout-change @1 ef02,80x24,0,0,60199 ef02,80x24,0,0,60199 *\\n'; "
             script += "while [ ! -e '\(relisting.relistTrigger)' ]; do sleep 0.05; done; "
             script += "printf '%%layout-change @1 ef01,80x24,0,0,\(first) ef01,80x24,0,0,\(first) *\\n"
             script += "%%output %%\(first) \(relisting.marker)\\\\015\\\\012\\n'; "
@@ -308,8 +309,8 @@ enum SessionPlumbingScenarios {
     // bound pane, as a session gives each pane its own.
     @MainActor
     private static func closedWindowReleasesItsPanes(_ t: UBUITestContext) {
-        let pane: Int32 = 90_101
-        let shared: Int32 = 90_102
+        let pane: Int32 = 60_101
+        let shared: Int32 = 60_102
         guard
             let closingSource = hostingSession(
                 t,
@@ -388,7 +389,7 @@ enum SessionPlumbingScenarios {
     // reading the old.
     @MainActor
     private static func reboundPaneGetsANewSurface(_ t: UBUITestContext) {
-        let pane: Int32 = 90_103
+        let pane: Int32 = 60_103
         let triggers = NSTemporaryDirectory() + "ubq-relist-\(UUID().uuidString)"
         let dropTrigger = triggers + "-drop"
         let relistTrigger = triggers + "-relist"
@@ -424,7 +425,7 @@ enum SessionPlumbingScenarios {
         // the layout left and releases it; tmux lists the pane again.
         FileManager.default.createFile(atPath: dropTrigger, contents: nil)
         t.expect(
-            t.wait(until: { source.hostedPaneFacts(90_199) != nil }, timeout: 10),
+            t.wait(until: { source.hostedPaneFacts(60_199) != nil }, timeout: 10),
             desc: "tmux drops the pane from its window"
         )
         host.unbindTmuxPane(pane)

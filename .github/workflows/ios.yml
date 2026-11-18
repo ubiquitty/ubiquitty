@@ -1,0 +1,150 @@
+# Copyright (C) 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+
+name: iOS (optional)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ios_ui_workers:
+        description: "Concurrent iOS UI test workers sharing one app build"
+        type: choice
+        options: ["4", "2", "1"]
+        default: "4"
+
+permissions:
+  contents: read
+
+env:
+  UBQ_CI_ANNOTATE: "1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  ios:
+    # This manual battery reports its own failures without entering required CI.
+    name: iOS tests
+    # GitHub's image with the Xcode this tree builds with (27.1, as the
+    # maintainers' Macs have it); see .github/actionlint.yml.
+    runs-on: xcode-27
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: ios
+            stages: --only setup --only quic --only ios-build --only ios-smokes --only ios-sync --only ios-ui
+            families: ""
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      UBQ_CI_CODE: "true"
+      UBQ_CI_CMAKE: "true"
+      UBQ_CI_PREFLIGHT_COMPLETE: "0"
+      STAGES: ${{ matrix.stages }}
+      # Four XCTest classes share one app and test-bundle build.
+      UBQ_IOS_UI_WORKERS: ${{ inputs.ios_ui_workers }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+          fetch-depth: 0
+      - name: Selected Apple toolchain
+        run: |
+          # Mount runtimes before another Apple tool activates a cryptex.
+          xcrun simctl runtime list
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+      # A job's env cannot read the runner context, so this step sets the cache
+      # beside the checkout from the runner's own variables; every later step
+      # reads it.
+      - name: Compiler cache and build root
+        id: roots
+        run: |
+          command -v ccache >/dev/null 2>&1 || brew install ccache
+          {
+            echo "CCACHE_DIR=$RUNNER_WORKSPACE/ccache"
+            echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            echo "CCACHE_MAXSIZE=2G"
+            echo "UBIQUITTY_SWIFTPM_CACHE=$RUNNER_WORKSPACE/swiftpm-cache"
+          } >> "$GITHUB_ENV"
+          echo "build=$(python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/build_root.py .)" >> "$GITHUB_OUTPUT"
+          echo "quic_toolchain=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Restore QUIC dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ steps.roots.outputs.build }}/quic-deps
+            !${{ steps.roots.outputs.build }}/quic-deps/**/src/*/build
+          key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.roots.outputs.quic_toolchain }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/macos-deployment-target.txt', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/cmake/UbiquittyPreProject.cmake') }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.roots.outputs.quic_toolchain }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/macos-deployment-target.txt', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/cmake/UbiquittyPreProject.cmake') }}-apple-${{ matrix.group }}-
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ github.workspace }}/../ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-
+            ccache-apple-${{ matrix.group }}-
+      - name: Cache pinned Swift package sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ github.workspace }}/../swiftpm-cache/repositories
+          key: swiftpm-sources-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Source/Platform/Apple/SSH/Package.resolved') }}
+      - name: Run the fail-fast Apple battery
+        id: battery
+        run: |
+          # STAGES is this group's list of `--only <stage>` words, split on purpose.
+          # shellcheck disable=SC2086
+          python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py run apple --source-root "$GITHUB_WORKSPACE" $STAGES
+      - name: iOS battery completed
+        if: steps.battery.outputs.full_code == 'true'
+        run: echo "Every enabled Apple code stage of this group reached its verdict"
+      - name: Report completed, failed, and unexecuted Apple stages
+        if: always()
+        run: |
+          # shellcheck disable=SC2086
+          python3 Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci_batteries.py report apple --source-root "$GITHUB_WORKSPACE" $STAGES
+      # A failed stage's log, in full, in the job log. CI uploads no artifacts: the
+      # job log is where a failure is read.
+      - name: Print the failed stage logs
+        if: failure()
+        run: |
+          for log in "$RUNNER_TEMP/ubiquitty-ci/apple"/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::${log##*/}"
+            cat "$log"
+            echo "::endgroup::"
+          done
+      - name: Tools the Apple battery ran with
+        if: always()
+        run: |
+          sw_vers
+          xcodebuild -version
+          tmux -V || echo "tmux: not installed"
+          chafa --version | head -1 || echo "chafa: not installed"
+          go version || echo "go: not installed"
+          ninja --version || echo "ninja: not installed"
+      - name: Compiler cache hit rate
+        if: always()
+        run: |
+          if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi
+      - name: Save QUIC dependencies
+        if: always() && steps.roots.outputs.build != '' && !cancelled()
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: |
+            ${{ steps.roots.outputs.build }}/quic-deps
+            !${{ steps.roots.outputs.build }}/quic-deps/**/src/*/build
+          key: quic-apple-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.roots.outputs.quic_toolchain }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/macos-deployment-target.txt', 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/cmake/UbiquittyPreProject.cmake') }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save the compiler cache
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
+        with:
+          path: ${{ github.workspace }}/../ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
