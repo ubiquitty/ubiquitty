@@ -903,6 +903,9 @@ Source/
     Wscons/           OpenBSD/NetBSD console: no toolkit, no GPU
     Emacs/            ubiquitty-sync.el, a Sync client with no C++ linked
     Neovim/           ubiquitty_sync, the same seam in Lua, over the host's attach bridge
+```
+
+```
 Libraries/
   ubiquitty-kit/    the terminal views and renderers (github.com/ubiquitty/kit):
                     UbiquittyKit, UbiquittyRenderKit (Swift + Metal), and the
