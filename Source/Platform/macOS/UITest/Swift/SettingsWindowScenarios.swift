@@ -224,6 +224,7 @@ enum SettingsWindowScenarios {
                     .padding()
                 )
                 let window = NSWindow(contentViewController: hosting)
+                window.isReleasedWhenClosed = false
                 defer {
                     window.close()
                     app.settingsSetFontFeatures(originalFeatures)
@@ -310,6 +311,7 @@ enum SettingsWindowScenarios {
                 let model = SettingsCatalogModel()
                 let hosting = NSHostingController(rootView: SettingsView(catalogModel: model, previewState: state))
                 let window = NSWindow(contentViewController: hosting)
+                window.isReleasedWhenClosed = false
                 window.setContentSize(NSSize(width: 760, height: 640))
                 defer { window.close() }
                 window.orderFront(nil)
@@ -495,6 +497,7 @@ enum SettingsWindowScenarios {
                 let proposal = SettingsResetProposal(title: "Font Size", rows: [size])
                 let hosting = NSHostingController(rootView: SettingsResetSheet(proposal: proposal))
                 let window = NSWindow(contentViewController: hosting)
+                window.isReleasedWhenClosed = false
                 window.orderFront(nil)
                 t.pump(0.2)
                 window.close()

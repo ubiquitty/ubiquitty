@@ -1091,6 +1091,7 @@ enum ScrollerChromeScenarios {
                     backing: .buffered,
                     defer: false
                 )
+                window.isReleasedWhenClosed = false
                 window.contentView = surface
                 window.makeKeyAndOrderFront(nil)
                 defer { window.close() }

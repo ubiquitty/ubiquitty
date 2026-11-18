@@ -292,35 +292,37 @@ public final class UITestRunner: NSObject {
                 guard let index = wanted.firstIndex(of: scenario.name) else { continue }
                 matched[index] = true
             }
-            // A scenario can remember a resized frame even as its windows
-            // close. Restore the entry value after cleanup for the next one.
-            let rememberedWindowFrame = UserDefaults.standard.object(forKey: "UbiquittyWindowFrame")
-            total += 1
-            PasteboardIsolation.reset()
-            context.beginScenario()
-            scenario.body(context)
-            // A refusal outranks the assertions: a scenario whose shell never
-            // spawned failed every check that needed one, and reporting those
-            // names twenty product regressions for one exhausted machine.
-            if let refusal = context.scenarioRefusal {
-                refused += 1
-                print("REFUSED  \(scenario.name)")
-                print(uiTestFailureLinePrefix + refusal)
-            } else if context.scenarioFailures.isEmpty {
-                passed += 1
-                print("PASS  \(scenario.name)")
-            } else {
-                print("FAIL  \(scenario.name)")
-                for failure in context.scenarioFailures {
-                    print(uiTestFailureLinePrefix + failure)
+            autoreleasepool {
+                // A scenario can remember a resized frame even as its windows
+                // close. Restore the entry value after cleanup for the next one.
+                let rememberedWindowFrame = UserDefaults.standard.object(forKey: "UbiquittyWindowFrame")
+                total += 1
+                PasteboardIsolation.reset()
+                context.beginScenario()
+                scenario.body(context)
+                // A refusal outranks the assertions: a scenario whose shell never
+                // spawned failed every check that needed one, and reporting those
+                // names twenty product regressions for one exhausted machine.
+                if let refusal = context.scenarioRefusal {
+                    refused += 1
+                    print("REFUSED  \(scenario.name)")
+                    print(uiTestFailureLinePrefix + refusal)
+                } else if context.scenarioFailures.isEmpty {
+                    passed += 1
+                    print("PASS  \(scenario.name)")
+                } else {
+                    print("FAIL  \(scenario.name)")
+                    for failure in context.scenarioFailures {
+                        print(uiTestFailureLinePrefix + failure)
+                    }
                 }
-            }
-            fflush(stdout)
-            context.closeAllWindows()
-            if let rememberedWindowFrame {
-                UserDefaults.standard.set(rememberedWindowFrame, forKey: "UbiquittyWindowFrame")
-            } else {
-                UserDefaults.standard.removeObject(forKey: "UbiquittyWindowFrame")
+                fflush(stdout)
+                context.closeAllWindows()
+                if let rememberedWindowFrame {
+                    UserDefaults.standard.set(rememberedWindowFrame, forKey: "UbiquittyWindowFrame")
+                } else {
+                    UserDefaults.standard.removeObject(forKey: "UbiquittyWindowFrame")
+                }
             }
         }
 

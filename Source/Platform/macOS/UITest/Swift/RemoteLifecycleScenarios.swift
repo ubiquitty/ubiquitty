@@ -492,6 +492,7 @@ enum RemoteLifecycleScenarios {
         let originalPolicy = NSApp.activationPolicy()
         let originalApplication = NSWorkspace.shared.frontmostApplication
         let window = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
         defer { window.close() }
         var readyCount = 0
         holdProbeWindow(window, seconds: 0, context: t) { readyCount += 1 }

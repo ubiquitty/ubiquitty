@@ -239,6 +239,7 @@ enum MenuRoutingScenarios {
                     backing: .buffered,
                     defer: false
                 )
+                other.isReleasedWhenClosed = false
                 defer {
                     window.close()
                     other.close()
@@ -427,6 +428,7 @@ enum MenuRoutingScenarios {
                     backing: .buffered,
                     defer: false
                 )
+                excluded.isReleasedWhenClosed = false
                 excluded.title = marker + " hidden"
                 excluded.isExcludedFromWindowsMenu = true
                 excluded.orderFront(nil)

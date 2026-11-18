@@ -138,6 +138,7 @@ enum ConsentPromptScenarios {
                     backing: .buffered,
                     defer: false
                 )
+                window.isReleasedWhenClosed = false
                 defer { window.close() }
                 window.orderBack(nil)
                 var request = SyncWire.StructureConsent()
@@ -204,6 +205,7 @@ enum ConsentPromptScenarios {
                     backing: .buffered,
                     defer: false
                 )
+                window.isReleasedWhenClosed = false
                 defer { window.close() }
                 window.contentView = surface
                 window.orderBack(nil)
