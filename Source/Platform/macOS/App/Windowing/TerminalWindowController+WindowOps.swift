@@ -104,12 +104,11 @@ extension TerminalWindowController {
         // DECSLPP can change Core's grid without moving this frame. AppKit
         // also rounds a requested frame, so a numerically different target
         // can leave the native size unchanged and send no resize callback.
+        // The model and published grid can agree while both differ from the
+        // native bounds, so their equality cannot stand in for this fit.
         guard shouldFitGrid else { return }
         for surface in projectedSurfaces {
-            let snapshot = surface.drive.readSnapshot()
-            if (Int(snapshot.rows), Int(snapshot.columns)) != surface.publishedGrid {
-                surface.refitGridToBounds()
-            }
+            surface.refitGridToBounds()
         }
     }
 

@@ -31,12 +31,16 @@ extension SurfaceSmokeEntry {
 extension SurfaceSmoke {
     fileprivate static func programGeometryLegs(device: MTLDevice, library: MTLLibrary) -> Bool {
         guard let surface = TerminalSurface(rows: 25, columns: 80),
-              let renderer = SurfaceRenderer(device: device, library: library, familyName: "Menlo", pointSize: 12)
+            let renderer = SurfaceRenderer(device: device, library: library, familyName: "Menlo", pointSize: 12)
         else { return failed("window geometry: no surface or renderer") }
         surface.renderer = renderer
         let controller = TerminalWindowController(
             workspaceSurface: Ubiquitty.Session.Layout.invalidSurface,
-            pane: nil, surface: surface, renderer: renderer, rows: 25, columns: 80
+            pane: nil,
+            surface: surface,
+            renderer: renderer,
+            rows: 25,
+            columns: 80
         )
         controller.remoteSurface = surface
         guard let window = controller.window else { return failed("window geometry: no window") }
@@ -62,7 +66,41 @@ extension SurfaceSmoke {
         controller.performPendingWindowRequests(from: surface)
         let snapshot = surface.drive.readSnapshot()
         guard snapshot.rows == 25, snapshot.columns == 80, window.frame == originalFrame else {
-            return failed("window geometry: requested 80x25 in \(originalFrame), got \(snapshot.columns)x\(snapshot.rows) in \(window.frame)")
+            return failed(
+                "window geometry: requested 80x25 in \(originalFrame), got \(snapshot.columns)x\(snapshot.rows) in \(window.frame)"
+            )
+        }
+        guard let adoptedSurface = TerminalSurface(rows: 25, columns: 132) else {
+            return failed("window geometry: no surface to adopt")
+        }
+        let adoptedController = TerminalWindowController(
+            workspaceSurface: Ubiquitty.Session.Layout.invalidSurface,
+            pane: nil,
+            surface: adoptedSurface,
+            renderer: renderer,
+            rows: 25,
+            columns: 80,
+            isGridPinned: true
+        )
+        adoptedController.remoteSurface = adoptedSurface
+        guard let adoptedWindow = adoptedController.window else { return failed("window geometry: no adoption window") }
+        defer { adoptedWindow.close() }
+        // The renderer joins a view whose native bounds already fit 80 columns.
+        // Its published grid and model still agree on the adopted 132 columns.
+        adoptedSurface.renderer = renderer
+        let adoptedFrame = adoptedWindow.frame
+        guard adoptedSurface.publishedGrid == (25, 132), adoptedSurface.drive.readSnapshot().columns == 132 else {
+            return failed("window geometry: adoption did not preserve the standing 132-column grid")
+        }
+        feed(adoptedSurface.drive, "\u{1b}[8;25;80t\u{1b}[1t")
+        adoptedController.performPendingWindowRequests(from: adoptedSurface)
+        let adoptedSnapshot = adoptedSurface.drive.readSnapshot()
+        guard adoptedSurface.publishedGrid == (25, 80), adoptedSnapshot.columns == 80,
+            adoptedSnapshot.rows == 25, adoptedWindow.frame == adoptedFrame
+        else {
+            return failed(
+                "window geometry: unchanged adoption frame left \(adoptedSnapshot.columns)x\(adoptedSnapshot.rows), published \(adoptedSurface.publishedGrid)"
+            )
         }
         return true
     }
