@@ -664,8 +664,8 @@ if wanted web_refused_reconnect; then
 fi
 
 # The app's tool contracts, run against fixture bundles and stand-in tools: the
-# macOS installer, the bundle's licence notices and Sparkle's fetch. Tests/Tools
-# holds the others of the app's tool tests, which no driver runs.
+# macOS installer, the bundle's licence notices and Sparkle's fetch. Release
+# workflow and preparation tests have their own required CTest entries.
 if wanted test_app_tools; then
     echo "=== test_app_tools ==="
     RAN=$((RAN + 1))
@@ -674,5 +674,4 @@ if wanted test_app_tools; then
     python3 "$ROOT/Tests/Tools/test_fetch_sparkle.py" || exit 1
     python3 "$ROOT/Tests/Tools/test_test_routing.py" || exit 1
     python3 "$ROOT/Tests/Tools/test_package_notices.py" || exit 1
-    python3 "$ROOT/Tests/Tools/test_release_ci.py" || exit 1
 fi

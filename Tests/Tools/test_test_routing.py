@@ -4,6 +4,7 @@
 """Checks App tool routing, source ownership, snapshots, and verdict caching."""
 
 import ast
+from dataclasses import replace
 import importlib.util
 import json
 import os
@@ -14,6 +15,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Scripts"))
@@ -54,6 +56,235 @@ class PlatformSmokeOwnership(unittest.TestCase):
                 self.assertIn('Stage("' + stage + '"', battery)
         self.assertIn("Scripts/check-macos-smokes.py", battery)
         self.assertIn("Scripts/run-linux-smokes.sh", battery)
+
+
+class CTestExecutionOwnership(unittest.TestCase):
+    def registration(self, *, native=True, advertise=True, remove_filter=False):
+        temporary = tempfile.TemporaryDirectory(prefix="ubiquitty-app-test-ownership-")
+        self.addCleanup(temporary.cleanup)
+        source = Path(temporary.name)
+        driver = source / "driver.sh"
+        stanzas = ["test_app_tools"] + (["test_macos_file_read"] if advertise else [])
+        driver.write_text("#!/bin/sh\nprintf '%s\\n' " + " ".join(stanzas) + "\n")
+        driver.chmod(0o755)
+        owner = (ROOT / "Tests/CMakeLists.txt").read_text()
+        start = owner.index("ubiquitty_read_shell_stanzas(_ubq_app_stanzas ")
+        end = owner.index("add_test(NAME test_ios_sync_driver", start)
+        scheduling = owner[start:end]
+        if remove_filter:
+            scheduling = scheduling.replace("    list(REMOVE_ITEM _ubq_app_stanzas test_macos_file_read)\n", "")
+        release = owner[owner.index("foreach(release_test release_ci release_preparation)"):]
+        module = source / "Tests/Tools/test_release_ci.py"
+        module.parent.mkdir(parents=True)
+        module.symlink_to(ROOT / "Tests/Tools/test_release_ci.py")
+        cmake = [
+            "cmake_minimum_required(VERSION 3.20)",
+            "project(TestOwnership NONE)",
+            "enable_testing()",
+            f'set(UBIQUITTY_CORE_SOURCE_DIR "{CORE_ROOT}")',
+            f'set(Python3_EXECUTABLE "{sys.executable}")',
+            f'include("{CORE_ROOT}/Scripts/cmake/UbiquittyTests.cmake")',
+            f'set(_ubq_app_shell_driver "{driver}")',
+        ]
+        if native:
+            cmake += [
+                "add_test(NAME test_macos_file_read COMMAND cmake -E true)",
+                "ubiquitty_set_test_entry_properties(test_macos_file_read)",
+                "set_property(DIRECTORY APPEND PROPERTY UBIQUITTY_HOST_TESTS test_macos_file_read)",
+            ]
+        cmake += [scheduling, "ubiquitty_finish_host_tests()", release]
+        (source / "CMakeLists.txt").write_text("\n".join(cmake) + "\n")
+        build = source / "build"
+        configured = subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja"],
+                                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        listing = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                                 capture_output=True, text=True, timeout=15, check=True)
+        tests = json.JSONDecoder().raw_decode(listing.stdout)[0]["tests"]
+        return {test["name"]: test for test in tests}, (build / "ctest-covered.txt").read_text().splitlines()
+
+    def assert_file_read_has_one_owner(self, tests):
+        self.assertEqual(sum(name in tests for name in ("test_macos_file_read", "shell_test_macos_file_read")), 1)
+
+    def test_native_file_read_runs_once_and_is_covered_for_the_outer_driver(self):
+        tests, covered = self.registration()
+        self.assert_file_read_has_one_owner(tests)
+        self.assertIn("test_macos_file_read", tests)
+        properties = {row["name"]: row["value"] for row in tests["test_macos_file_read"]["properties"]}
+        self.assertEqual(properties["TIMEOUT"], 60.0)
+        self.assertIn("ubq_build_fixture", properties["FIXTURES_REQUIRED"])
+        self.assertIn("test_macos_file_read", covered)
+        self.assertIn("test_app_tools", covered)
+
+    def test_file_read_keeps_its_shell_owner_without_a_native_entry(self):
+        tests, covered = self.registration(native=False)
+        self.assert_file_read_has_one_owner(tests)
+        self.assertIn("shell_test_macos_file_read", tests)
+        self.assertIn("test_macos_file_read", covered)
+
+    def test_file_read_census_rejects_duplicate_and_missing_owners(self):
+        for arguments in ({"remove_filter": True}, {"native": False, "advertise": False}):
+            with self.subTest(arguments=arguments):
+                tests, _ = self.registration(**arguments)
+                with self.assertRaises(AssertionError):
+                    self.assert_file_read_has_one_owner(tests)
+
+    def test_release_ci_module_runs_only_from_its_required_ctest_entry(self):
+        tests, _ = self.registration()
+        entry = tests["test_release_ci"]
+        self.assertEqual(Path(entry["command"][1]).resolve(), ROOT / "Tests/Tools/test_release_ci.py")
+        properties = {row["name"]: row["value"] for row in entry["properties"]}
+        self.assertEqual(properties["TIMEOUT"], 60.0)
+        self.assertIn("ubq_build_fixture", properties["FIXTURES_REQUIRED"])
+        with tempfile.TemporaryDirectory(prefix="ubiquitty-app-tools-invocations-") as directory:
+            log = Path(directory) / "invocations"
+            script = '''
+set -euo pipefail
+ROOT="$1"
+CORE_ROOT="$UBQ_CORE_ROOT"
+KIT_ROOT="$UBQ_KIT_ROOT"
+RAN=0
+wanted() { [ "$1" = test_app_tools ]; }
+build_and_run() { :; }
+python3() { printf '%s\\n' "$1" >> "$OWNERSHIP_LOG"; }
+. "$ROOT/Scripts/run-tests-stanzas-app.sh"
+'''
+            checked = subprocess.run(["bash", "-c", script, "fixture", str(ROOT)],
+                                     env={**os.environ, "OWNERSHIP_LOG": str(log),
+                                          "UBQ_CORE_ROOT": str(CORE_ROOT), "UBQ_KIT_ROOT": str(KIT_ROOT)},
+                                     capture_output=True, text=True, timeout=15)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            modules = [Path(line).name for line in log.read_text().splitlines()]
+        self.assertEqual(modules, [
+            "test_install_macos.py", "test_bundle_resources.py", "test_fetch_sparkle.py",
+            "test_test_routing.py", "test_package_notices.py",
+        ])
+        owners = [Path(entry["command"][1]).name] + modules
+        self.assertEqual(owners.count("test_release_ci.py"), 1)
+
+
+class AppleTestBuildReuse(unittest.TestCase):
+    def push_script(self):
+        apple = (ROOT / ".github/workflows/ci.yml").read_text().split("  apple:\n", 1)[1]
+        step = apple.split("      - name: Push gates (${{ matrix.group }})\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("UBQ_BUILD_ROOT: ${{ steps.roots.outputs.build }}", step)
+        self.assertIn("UBQ_APPLE_GROUP: ${{ matrix.group }}", step)
+        return "\n".join(line[10:] for line in step.split("        run: |\n", 1)[1].splitlines())
+
+    def test_apple_tests_reuse_the_batterys_compile_configuration_and_postcheck_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="ubiquitty-apple-test-reuse-") as temporary:
+            directory = Path(temporary).resolve()
+            app = directory / "app with spaces"
+            (app / "Scripts").mkdir(parents=True)
+            (app / "CMakeLists.txt").write_text("# App source fixture\n")
+            (app / "Scripts/repository.txt").write_text("app\n")
+            subprocess.run(["git", "init", "--quiet", str(app)], check=True)
+            tools = directory / "tools"
+            tools.mkdir()
+            trace = directory / "calls.jsonl"
+            cmake = tools / "cmake"
+            cmake.write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+with open(os.environ['BUILD_REUSE_TRACE'], 'a') as output:
+    output.write(json.dumps({{'arguments': sys.argv[1:], 'CC': os.environ.get('CC'), 'CXX': os.environ.get('CXX')}}) + '\\n')
+if '-B' in sys.argv:
+    pathlib.Path(sys.argv[sys.argv.index('-B') + 1]).mkdir(parents=True, exist_ok=True)
+''')
+            cmake.chmod(0o755)
+            python = tools / "python3"
+            python.write_text(f'''#!{sys.executable}
+import os, sys
+if len(sys.argv) > 1 and sys.argv[1].endswith('/Scripts/check-build-reached.py'):
+    sys.exit(0)
+os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
+''')
+            python.chmod(0o755)
+            captured = directory / "postcheck-environment.json"
+            (app / "Scripts/pre-push-gates.sh").write_text(f'''#!/bin/bash
+set -euo pipefail
+"{sys.executable}" - "$BUILD_REUSE_ENV" <<'PY'
+import json, os, sys
+with open(sys.argv[1], 'w') as output:
+    json.dump({{name: os.environ.get(name) for name in ('UBQ_BUILD_ROOT', 'UBQ_TESTS_BUILD', 'UBQ_HOST_TEST_TREE', 'UBIQUITTY_QUIC_PREFIX')}}, output)
+PY
+if [ "$UBQ_APPLE_GROUP" = tests ]; then "$ACTUAL_CORE_ROOT/Scripts/build-tests.sh"; fi
+''')
+            (app / "Scripts/pre-push-gates.sh").chmod(0o755)
+            base = directory / "build root"
+            environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+            environment.update(PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
+                               UBQ_TESTS_ROOT=str(app), UBQ_CORE_ROOT=str(CORE_ROOT), UBQ_KIT_ROOT=str(KIT_ROOT),
+                               ACTUAL_CORE_ROOT=str(CORE_ROOT), UBQ_BUILD_ROOT=str(base), UBQ_APPLE_GROUP="tests",
+                               BUILD_REUSE_TRACE=str(trace), BUILD_REUSE_ENV=str(captured),
+                               CC="apple-clang", CXX="apple-clang++", BUILD_JOBS="1")
+            environment.pop("UBQ_TESTS_BUILD", None)
+            environment.pop("UBQ_HOST_TEST_TREE", None)
+            environment.pop("UBIQUITTY_QUIC_PREFIX", None)
+            tree = base / "subject/BuildHostTests/ctest"
+            driver = (CORE_ROOT / "Scripts/run-tests.sh").read_text()
+            start = driver.index("ubq_configure_ctest_tree() {\n")
+            configure = driver[start:driver.index("\n}\n", start) + 3]
+            configured = subprocess.run(["bash", "-c", configure + '\nROOT="$1"\nubq_configure_ctest_tree "$2"',
+                                         "fixture", str(app), str(tree)], cwd=app, env=environment,
+                                        capture_output=True, text=True, timeout=20)
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+            checked = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", self.push_script()],
+                                     cwd=app, env=environment, capture_output=True, text=True, timeout=20)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            calls = [json.loads(line) for line in trace.read_text().splitlines()]
+            configurations = [call for call in calls if "-S" in call["arguments"]]
+            self.assertEqual(len(configurations), 2)
+            for call in configurations:
+                arguments = call["arguments"]
+                self.assertEqual(arguments[arguments.index("-S") + 1], str(app))
+                self.assertEqual(arguments[arguments.index("-B") + 1], str(tree))
+                self.assertEqual((call["CC"], call["CXX"]), ("apple-clang", "apple-clang++"))
+                self.assertIn("-DCMAKE_BUILD_TYPE=Debug", arguments)
+                self.assertIn("-DUBIQUITTY_FRONTEND=Core", arguments)
+                self.assertIn("-DUBIQUITTY_BUILD_TESTS=ON", arguments)
+                self.assertFalse(any("OWNERSHIP_ANALYSIS" in argument or "SANITIZERS" in argument for argument in arguments))
+            values = json.loads(captured.read_text())
+            self.assertEqual(values, {"UBQ_BUILD_ROOT": str(base / "subject"),
+                                      "UBQ_TESTS_BUILD": str(tree), "UBQ_HOST_TEST_TREE": str(tree),
+                                      "UBIQUITTY_QUIC_PREFIX": str(base / "quic-deps")})
+            spec = importlib.util.spec_from_file_location("reuse_prerequisites", CORE_ROOT / "Scripts/prepush_preflight.py")
+            prerequisites = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = prerequisites
+            spec.loader.exec_module(prerequisites)
+            object_file = tree / "CMakeFiles/core.dir/Source/Core/example.cpp.o"
+            object_file.parent.mkdir(parents=True)
+            object_file.touch()
+            context = prerequisites.Context(build_root=Path(values["UBQ_BUILD_ROOT"]), core_root=CORE_ROOT,
+                                             kit_root=KIT_ROOT, subject_root=app, darwin=True, tools=frozenset())
+            self.assertTrue(prerequisites.NEEDS["host-test-objects"].present(context))
+            context = replace(context, build_root=base)
+            self.assertFalse(prerequisites.NEEDS["host-test-objects"].present(context))
+            for name in ("check-core-subset-symbols", "check-ownership-analysis-on"):
+                spec = importlib.util.spec_from_file_location(name, CORE_ROOT / "Scripts" / (name + ".py"))
+                gate = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(gate)
+                if name == "check-core-subset-symbols":
+                    with patch.dict(os.environ, UBQ_HOST_TEST_TREE=values["UBQ_HOST_TEST_TREE"]):
+                        self.assertEqual(gate.objectTree([]), tree)
+                else:
+                    cache = tree / "CMakeCache.txt"
+                    cache.write_text("UBIQUITTY_OWNERSHIP_ANALYSIS:BOOL=ON\n")
+                    self.assertEqual(gate.judge([values["UBQ_BUILD_ROOT"]]), ([(tree, "ON")], []))
+                    cache.write_text("UBIQUITTY_OWNERSHIP_ANALYSIS:BOOL=OFF\n")
+                    self.assertEqual(gate.judge([values["UBQ_BUILD_ROOT"]]), ([], [(tree, "OFF")]))
+            # Other groups retain their own native product roots.
+            environment["UBQ_APPLE_GROUP"] = "macos"
+            checked = subprocess.run(["bash", "-e", "-c", self.push_script()], cwd=app, env=environment,
+                                     capture_output=True, text=True, timeout=15)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            self.assertEqual(json.loads(captured.read_text()), {"UBQ_BUILD_ROOT": str(base),
+                                                               "UBQ_TESTS_BUILD": None, "UBQ_HOST_TEST_TREE": None,
+                                                               "UBIQUITTY_QUIC_PREFIX": None})
+
+    def test_compile_census_rejects_the_original_second_test_tree(self):
+        script = self.push_script().replace('  export UBQ_BUILD_ROOT="$UBQ_BUILD_ROOT/subject"\n', "")
+        with patch.object(self, "push_script", return_value=script), self.assertRaises(AssertionError):
+            self.test_apple_tests_reuse_the_batterys_compile_configuration_and_postcheck_inputs()
 
 
 class GTKGateInputs(unittest.TestCase):

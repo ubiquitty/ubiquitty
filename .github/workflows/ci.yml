@@ -202,8 +202,8 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
           path: |
-            ${{ runner.workspace }}/build-gcc/quic-deps/lib
-            ${{ runner.workspace }}/build-gcc/quic-deps/include
+            ${{ github.workspace }}/../build-gcc/quic-deps/lib
+            ${{ github.workspace }}/../build-gcc/quic-deps/include
           key: quic-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/fetch-quic-deps.sh') }}
       # A hosted runner starts with an empty compiler cache, and the host test
       # build then runs close to ubq_build's 900 s budget. The cache sits beside
@@ -216,7 +216,7 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/ccache
+          path: ${{ github.workspace }}/../ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-${{ matrix.group }}-
@@ -255,12 +255,15 @@ jobs:
           UBQ_PREPUSH_SELECT: all
           UBQ_PREPUSH_STRICT: "1"
           UBIQUITTY_PREPUSH_CACHE: "off"
-          UBQ_BUILD_ROOT: ${{ runner.workspace }}/build-gates
+          UBQ_BUILD_ROOT: ${{ github.workspace }}/../build-gates
         run: |
-          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c '
+          jobCommand=$(cat <<'UBQ_SCRIPT'
             emsdk="$RUNNER_TOOL_CACHE/emsdk-6.0.9/emsdk_env.sh"
             if [ -f "$emsdk" ]; then . "$emsdk" >/dev/null; fi
-            exec ./Scripts/pre-push-gates.sh'
+            exec ./Scripts/pre-push-gates.sh
+          UBQ_SCRIPT
+          )
+          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c "$jobCommand"
       - name: Save the CI image
         if: always() && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true' && !cancelled()
         continue-on-error: true
@@ -293,13 +296,18 @@ jobs:
         if: always()
         env:
           UBQ_CI_LINUX_IMAGE: "true"
-        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c 'if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi'
+        run: |
+          jobCommand=$(cat <<'UBQ_SCRIPT'
+            if [ -s "$CCACHE_STATSLOG" ]; then ccache --show-log-stats; else echo "No compiler invocations recorded in this job"; fi
+          UBQ_SCRIPT
+          )
+          ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c "$jobCommand"
       - name: Save the compiler cache
         if: always() && runner.environment == 'github-hosted' && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/ccache
+          path: ${{ github.workspace }}/../ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
   apple:
     # Three groups of the Apple battery on three runners: the macOS app and its
@@ -378,7 +386,7 @@ jobs:
       - name: Restore the compiler cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/ccache
+          path: ${{ github.workspace }}/../ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-
@@ -387,7 +395,7 @@ jobs:
         if: matrix.group == 'ios'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/swiftpm-cache/repositories
+          path: ${{ github.workspace }}/../swiftpm-cache/repositories
           key: swiftpm-sources-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Source/Platform/Apple/SSH/Package.resolved') }}
       - name: Install the conformance suite at the baseline revision
         if: matrix.group == 'macos'
@@ -418,7 +426,16 @@ jobs:
           UBQ_PREPUSH_SELECT: all
           UBQ_PREPUSH_STRICT: "1"
           UBIQUITTY_PREPUSH_CACHE: "off"
-        run: ./Scripts/pre-push-gates.sh
+          UBQ_BUILD_ROOT: ${{ steps.roots.outputs.build }}
+          UBQ_APPLE_GROUP: ${{ matrix.group }}
+        run: |
+          if [ "$UBQ_APPLE_GROUP" = tests ]; then
+            export UBIQUITTY_QUIC_PREFIX="${UBIQUITTY_QUIC_PREFIX:-$UBQ_BUILD_ROOT/quic-deps}"
+            export UBQ_BUILD_ROOT="$UBQ_BUILD_ROOT/subject"
+            export UBQ_TESTS_BUILD="$UBQ_BUILD_ROOT/BuildHostTests/ctest"
+            export UBQ_HOST_TEST_TREE="$UBQ_TESTS_BUILD"
+          fi
+          ./Scripts/pre-push-gates.sh
       - name: Full Apple battery completed
         if: steps.battery.outputs.full_code == 'true'
         run: echo "Every enabled Apple code stage of this group reached its verdict"
@@ -465,7 +482,7 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
-          path: ${{ runner.workspace }}/ccache
+          path: ${{ github.workspace }}/../ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-apple-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
   # The one check branch protection names. It passes when every job that had
   # to run passed: preflight always, and the rest unless change reach

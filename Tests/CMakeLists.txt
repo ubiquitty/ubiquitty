@@ -28,7 +28,12 @@ set(shell_test_font_fanout_SKIP_RETURN_CODE 77)
 set(shell_snapshots_SKIP_REGULAR_EXPRESSION
     "(^|\n)SKIP: snapshots: explicitly disabled with SNAPSHOT=skip(\n|$)")
 set(shell_snapshots_TIMEOUT 2400)
-ubiquitty_schedule_shell_stanzas(DRIVER "${_ubq_app_shell_driver}")
+ubiquitty_read_shell_stanzas(_ubq_app_stanzas DRIVER "${_ubq_app_shell_driver}")
+# The native entry runs this exact target with no additional stanza setup.
+if(TEST test_macos_file_read)
+    list(REMOVE_ITEM _ubq_app_stanzas test_macos_file_read)
+endif()
+ubiquitty_schedule_shell_stanzas(DRIVER "${_ubq_app_shell_driver}" STANZAS ${_ubq_app_stanzas})
 add_test(NAME test_ios_sync_driver
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/Tests/Tools/test_ios_sync_conformance.py")
 ubiquitty_set_test_entry_properties(test_ios_sync_driver)
