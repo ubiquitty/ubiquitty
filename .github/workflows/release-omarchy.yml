@@ -114,6 +114,10 @@ jobs:
           name: omarchy-native-${{ matrix.architecture }}
           path: ${{ env.UBQ_BUILD_ROOT }}/omarchy-dist/*
           if-no-files-found: error
+      - name: Stop remaining owned CI containers
+        if: always()
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+
   collect:
     name: Verify both chromeless Omarchy packages
     needs: native

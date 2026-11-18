@@ -148,6 +148,10 @@ jobs:
             cat "$log"
             echo "::endgroup::"
           done
+      - name: Stop remaining owned CI containers
+        if: always()
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+
   linux:
     # Three groups of the Linux battery on three runners, so the battery's wall
     # time is its longest group rather than their sum. ci_reach.py reads the
@@ -301,8 +305,12 @@ jobs:
           UBQ_SCRIPT
           )
           ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" bash -c "$jobCommand"
+      - name: Stop owned CI containers before caching
+        id: stop-containers
+        if: always()
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
       - name: Save the compiler cache
-        if: always() && runner.environment == 'github-hosted' && !cancelled()
+        if: always() && runner.environment == 'github-hosted' && !cancelled() && steps.stop-containers.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0.2.3
         with:
