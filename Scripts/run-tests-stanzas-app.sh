@@ -575,7 +575,7 @@ if wanted web_page_smoke; then
     echo "=== web_page_smoke ==="
     if ubq_web_probe_ready web_page_smoke; then
         RAN=$((RAN + 1))
-        node "$ROOT/Tests/Web/page-smoke.mjs" "$UBQ_WEB_DIST" || exit 1
+        node "$ROOT/Tests/Smokes/Web/page-smoke.mjs" "$UBQ_WEB_DIST" || exit 1
     fi
 fi
 

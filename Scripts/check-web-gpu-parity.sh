@@ -90,7 +90,11 @@ if [[ ! -x "$CHROME" ]]; then
     exit 0
 fi
 
-cp "$ROOT/Tests/Web/$PROBE.html" "$DIST/$PROBE.html"
+probeSource="$ROOT/Tests/Web/$PROBE.html"
+if [ -f "$ROOT/Tests/Smokes/Web/$PROBE.html" ]; then
+    probeSource="$ROOT/Tests/Smokes/Web/$PROBE.html"
+fi
+cp "$probeSource" "$DIST/$PROBE.html"
 
 # A port from the kernel rather than a guess, so two runs cannot collide.
 PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"

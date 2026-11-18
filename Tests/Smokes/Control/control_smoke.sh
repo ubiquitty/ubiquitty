@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 #
-# Tests/Control/control_smoke.sh — end-to-end check of the macOS app's
+# Tests/Smokes/Control/control_smoke.sh — end-to-end check of the macOS app's
 # remote-control socket (Source/Core/Protocol/Control/Server.h).
 #
 # Drives the live app over its unix-domain socket with real newline-delimited

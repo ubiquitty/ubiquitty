@@ -542,7 +542,7 @@ jobs:
           chmod +x "$binary" "$host"
           python3 Scripts/check-ubq-release-version.py "$binary" "${PRODUCT_TAG#v}"
           UBQ_BIN="$binary" UBIQUITTY_HOST_BIN="$host" UBIQUITTY_HOME="$RUNNER_TEMP/ubq-mcp-home" \
-            bash Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Agent/mcp_smoke.sh
+            bash Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Tests/Smokes/Agent/mcp_smoke.sh
 
   prepare:
     name: Verify complete release preparation

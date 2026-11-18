@@ -227,7 +227,7 @@ fi
 # reads it throws on the first paint and kills the page, with every one of
 # those checks green.
 if command -v node >/dev/null 2>&1; then
-    if node "$ROOT/Tests/Web/page-smoke.mjs" "$STAGE" 2>&1 | grep -vE "wasm streaming|falling back"; then
+    if node "$ROOT/Tests/Smokes/Web/page-smoke.mjs" "$STAGE" 2>&1 | grep -vE "wasm streaming|falling back"; then
         :
     else
         echo "build-web: FAIL — the page does not reach a frame" >&2

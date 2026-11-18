@@ -85,7 +85,7 @@ EXEMPT = {
         "a precondition, not the assertion under test: it guards that the window "
         "can hold a wrapped line before the scenario feeds one, and the wrap "
         "assertion that follows is anchored to the grid's own text",
-    "Source/UbiquittyKit/Swift/DrawEntrySmoke.swift:guard picture.columns == 132, picture.isColumnCountHeld":
+    "Source/UbiquittyKit/Swift/Smokes/DrawEntrySmoke.swift:guard picture.columns == 132, picture.isColumnCountHeld":
         "a precondition, not the assertion under test: 132 is the width DECCOLM "
         "sets, not a measurement, and the guard only establishes that the "
         "picture is wider than the drawable before the hit test runs; the "

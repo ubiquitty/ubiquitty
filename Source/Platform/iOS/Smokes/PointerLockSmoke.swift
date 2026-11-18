@@ -15,7 +15,7 @@ import UbiquittyKit
 /// here, and neither does a GameController mouse delta. What is asserted is
 /// the seam every one of those calls into, which Core answers the same way
 /// whoever calls it — the same scope
-/// `Source/UbiquittyKit/Swift/SurfaceSmoke.swift` covers for the AppKit arm.
+/// `Source/UbiquittyKit/Swift/Smokes/SurfaceSmoke.swift` covers for the AppKit arm.
 /// A real iPad with a trackpad still owes: that a click grants first
 /// responder and iPadOS actually takes the grab, that a locked mouse's
 /// deltas arrive as reports rather than being swallowed, and that the

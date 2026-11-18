@@ -53,10 +53,10 @@ if [ "$SMOKE" = "1" ]; then
     echo "== build-all: smokes on the fresh host + agent =="
     export UBIQUITTY_HOST_BIN="$UBQ_BUILD_ROOT/host/ubiquitty-host"
     export UBQ_BIN="$UBQ_BUILD_ROOT/agent/ubq"
-    "$CORE_ROOT/Tests/Host/smoke.sh"
-    "$CORE_ROOT/Tests/Agent/smoke.sh"
-    "$CORE_ROOT/Tests/Agent/mcp_smoke.sh"
-    "$CORE_ROOT/Tests/Agent/auth_smoke.sh"
+    "$CORE_ROOT/Tests/Smokes/Host/smoke.sh"
+    "$CORE_ROOT/Tests/Smokes/Agent/smoke.sh"
+    "$CORE_ROOT/Tests/Smokes/Agent/mcp_smoke.sh"
+    "$CORE_ROOT/Tests/Smokes/Agent/auth_smoke.sh"
     # The app lane drives the fresh macOS build over its control socket; it
     # SKIPs where there is no app to launch.
     "$ROOT/Tests/Control/control_gate_lane.sh"

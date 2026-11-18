@@ -18,7 +18,7 @@
 // twenty calls, and stubbing them is cheaper than adding jsdom to a repository
 // that has no node dependencies at all.
 //
-//   node Tests/Web/page-smoke.mjs [dist-dir]
+//   node Tests/Smokes/Web/page-smoke.mjs [dist-dir]
 
 import fs from 'fs';
 import path from 'path';

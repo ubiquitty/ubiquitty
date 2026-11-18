@@ -1124,7 +1124,7 @@ async function main(module) {
   // Declared here, above every reader. A `let` is in its temporal dead zone
   // until its declaration is EVALUATED, not merely hoisted, so a reader that
   // runs first throws ReferenceError and kills the page before it draws.
-  // Tests/Web/page-smoke.mjs catches it.
+  // Tests/Smokes/Web/page-smoke.mjs catches it.
   let socket = null;
 
   // The host's verdict on this attach, and the same dead-zone rule: every writer

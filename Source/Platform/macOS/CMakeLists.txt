@@ -667,7 +667,7 @@ ubiquitty_kit_add_swift_modules(PLATFORM macOS
         "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TitlebarTagPalette.swift"
         "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/ProcessIcons.swift"
         "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/PhosphorIcons.swift"
-        "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/ShippedIconsSmoke.swift"
+        "${UBIQUITTY_KIT_SOURCE_DIR}/Source/UbiquittyKit/Swift/Smokes/ShippedIconsSmoke.swift"
         "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TagIconPicker.swift"
         "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStripStyling.swift"
         "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TabStripMaterial.swift"
@@ -733,8 +733,8 @@ ubiquitty_kit_add_swift_modules(PLATFORM macOS
         "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TagRulePrefill.swift"
         "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/WindowFrameMemory.swift"
         "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/TerminalWindowController+Beam.swift"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/ShellSmoke.swift"
-        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/App/Windowing/SurfaceSmoke+WindowShell.swift")
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/Smokes/ShellSmoke.swift"
+        "${CMAKE_SOURCE_DIR}/Source/Platform/macOS/Smokes/SurfaceSmoke+WindowShell.swift")
 
 # Every Swift module that inlines Core carries the interop stamp, this
 # executable's included, and it matters most here to trust the tests:

@@ -43,7 +43,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=Scripts/build-root.sh
 . "$CORE_ROOT/Scripts/build-root.sh"
 APP="${1:-$UBQ_BUILD_ROOT/ios-iphonesimulator/Ubiquitty.app}"
-SRC="$ROOT/Source/Platform/iOS/App/SmokeLaunch.swift"
+SRC="$ROOT/Source/Platform/iOS/Smokes/SmokeLaunch.swift"
 TIMEOUT="${SMOKE_TIMEOUT:-120}"
 WARMUP_TIMEOUT="${SMOKE_WARMUP_TIMEOUT:-600}"
 # The device this checkout owns, booted for this run and shut down when it

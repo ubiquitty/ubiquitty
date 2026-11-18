@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Stanislav Yaglo
 // SPDX-License-Identifier: Apache-2.0
 
-#include "Platform/Linux/Diagnostics/Rendering/PaddingSmoke.h"
+#include "Platform/Linux/Smokes/PaddingSmoke.h"
 
 #include "Core/Preferences/RenderStyle.h"
 #include "Core/Rendering/PNGEncoder.h"

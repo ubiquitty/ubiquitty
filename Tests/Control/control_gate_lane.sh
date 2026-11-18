@@ -63,7 +63,7 @@ run_lane() {
     for _tick in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.5; done
     [ -S "$SOCK" ] || fail "$label: the app bound no socket at $SOCK ($(tail -3 "$WORK/app-$label.log" | tr '\n' ' '))"
     echo "control-gate-lane: $label"
-    env UBIQUITTY_HOME="$HOME_DIR" CONTROL_SOCKET="$SOCK" CONTROL_REQUIRE=1 "$@" bash "$ROOT/Tests/Control/control_smoke.sh" \
+    env UBIQUITTY_HOME="$HOME_DIR" CONTROL_SOCKET="$SOCK" CONTROL_REQUIRE=1 "$@" bash "$ROOT/Tests/Smokes/Control/control_smoke.sh" \
         || fail "$label: control_smoke.sh failed"
     stop_app
 }

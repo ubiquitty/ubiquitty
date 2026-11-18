@@ -503,7 +503,7 @@ gate_swift_renderer_drivers() {
 # silent pass for a gate. A machine without emsdk reports SKIPPED and is counted
 # as having checked nothing.
 # Source/Platform/Web is in the selection because build-web.sh runs
-# Tests/Web/page-smoke.mjs, which `await import`s the built terminal.js and
+# Tests/Smokes/Web/page-smoke.mjs, which `await import`s the built terminal.js and
 # executes it — the only thing in the tree that loads that file. Selecting on
 # Core and Base alone leaves a change confined to terminal.js or webgl.js running
 # nothing that reads it. The renderer arm a Web change does select launches

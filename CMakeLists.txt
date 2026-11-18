@@ -638,10 +638,10 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         Source/Platform/iOS/App/BackgroundRefreshCoordinator.swift
         Source/Platform/iOS/App/NotificationPresentation.swift
         Source/Platform/iOS/App/BackgroundRefreshView.swift
-        Source/Platform/iOS/App/BackgroundRefreshSmoke.swift
+        Source/Platform/iOS/Smokes/BackgroundRefreshSmoke.swift
         Source/Platform/iOS/App/ColdResumeDescriptor.swift
         Source/Platform/iOS/App/ColdResumeSession.swift
-        Source/Platform/iOS/App/ColdResumeSmoke.swift
+        Source/Platform/iOS/Smokes/ColdResumeSmoke.swift
         Source/Platform/iOS/App/LiveHostSeed.swift
         Source/Platform/iOS/App/HostListView.swift
         Source/Platform/iOS/App/HostSessionsView.swift
@@ -665,33 +665,33 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         Source/Platform/iOS/App/QUICBootstrapClosePolicy.swift
         Source/Platform/iOS/App/QUICCarrierProvider.swift
         Source/Platform/iOS/App/SyncSSHCarrier.swift
-        Source/Platform/iOS/App/NetworkPathSmoke.swift
-        Source/Platform/iOS/App/PasswordLockSmoke.swift
-        Source/Platform/iOS/App/SSHPipelineSmoke.swift
-        Source/Platform/iOS/App/SSHConnectSmoke.swift
-        Source/Platform/iOS/App/SecretStoreSmoke.swift
-        Source/Platform/iOS/App/HostRecordSmoke.swift
-        Source/Platform/iOS/App/SecondPickSmoke.swift
-        Source/Platform/iOS/App/RedialSmoke.swift
-        Source/Platform/iOS/App/BootstrapRetrySmoke.swift
-        Source/Platform/iOS/App/BootstrapSupersedeSmoke.swift
-        Source/Platform/iOS/App/TerminalGroundSmoke.swift
-        Source/Platform/iOS/App/HintSmoke.swift
-        Source/Platform/iOS/App/ScreenVisibilitySmoke.swift
-        Source/Platform/iOS/App/BackgroundViewSmoke.swift
-        Source/Platform/iOS/App/PaneArrangementSmoke.swift
-        Source/Platform/iOS/App/SwipeNavigationSmoke.swift
-        Tests/Platform/KeyboardAccessorySmoke.swift
-        Tests/Platform/NotificationPresentationSmoke.swift
-        Source/Platform/iOS/App/PointerLockSmoke.swift
-        Source/Platform/iOS/App/CursorBlinkSmoke.swift
-        Source/Platform/iOS/App/SurfaceFocusSmoke.swift
-        Source/Platform/iOS/App/InlineImageSmoke.swift
-        Source/Platform/iOS/App/ConfigurationSmoke.swift
-        Source/Platform/iOS/App/RichTextSmoke.swift
-        Source/Platform/iOS/App/SkipInkSmoke.swift
+        Source/Platform/iOS/Smokes/NetworkPathSmoke.swift
+        Source/Platform/iOS/Smokes/PasswordLockSmoke.swift
+        Source/Platform/iOS/Smokes/SSHPipelineSmoke.swift
+        Source/Platform/iOS/Smokes/SSHConnectSmoke.swift
+        Source/Platform/iOS/Smokes/SecretStoreSmoke.swift
+        Source/Platform/iOS/Smokes/HostRecordSmoke.swift
+        Source/Platform/iOS/Smokes/SecondPickSmoke.swift
+        Source/Platform/iOS/Smokes/RedialSmoke.swift
+        Source/Platform/iOS/Smokes/BootstrapRetrySmoke.swift
+        Source/Platform/iOS/Smokes/BootstrapSupersedeSmoke.swift
+        Source/Platform/iOS/Smokes/TerminalGroundSmoke.swift
+        Source/Platform/iOS/Smokes/HintSmoke.swift
+        Source/Platform/iOS/Smokes/ScreenVisibilitySmoke.swift
+        Source/Platform/iOS/Smokes/BackgroundViewSmoke.swift
+        Source/Platform/iOS/Smokes/PaneArrangementSmoke.swift
+        Source/Platform/iOS/Smokes/SwipeNavigationSmoke.swift
+        Tests/Smokes/iOS/KeyboardAccessorySmoke.swift
+        Tests/Smokes/iOS/NotificationPresentationSmoke.swift
+        Source/Platform/iOS/Smokes/PointerLockSmoke.swift
+        Source/Platform/iOS/Smokes/CursorBlinkSmoke.swift
+        Source/Platform/iOS/Smokes/SurfaceFocusSmoke.swift
+        Source/Platform/iOS/Smokes/InlineImageSmoke.swift
+        Source/Platform/iOS/Smokes/ConfigurationSmoke.swift
+        Source/Platform/iOS/Smokes/RichTextSmoke.swift
+        Source/Platform/iOS/Smokes/SkipInkSmoke.swift
         Source/Platform/iOS/App/ConnectionLog.swift
-        Source/Platform/iOS/App/ConnectionLogSmoke.swift
+        Source/Platform/iOS/Smokes/ConnectionLogSmoke.swift
         Source/Platform/iOS/App/TerminalPaneArrangement.swift
         Source/Platform/iOS/App/TerminalSwipeNavigation.swift
         Source/Platform/iOS/App/TerminalSurfaceHost.swift
@@ -712,7 +712,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "iOS")
         Source/Platform/iOS/App/TerminalFind.swift
         Source/Platform/iOS/App/TerminalScreenView.swift
         Source/Platform/iOS/App/IOSSnapshotLaunch.swift
-        Source/Platform/iOS/App/SmokeLaunch.swift)
+        Source/Platform/iOS/Smokes/SmokeLaunch.swift)
 
     # The shaders the renderer loads, compiled for the SDK being built. Same
     # source as the macOS arm: a shader is not platform code, and a second copy
@@ -1675,8 +1675,8 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     add_executable(ubiquitty-linux
         # Linux frontend (GTK4 shell + Vulkan renderer + the local PAL)
         Source/Platform/Linux/main.cpp
-        Source/Platform/Linux/Diagnostics/Rendering/PaddingSmoke.cpp
-        Source/Platform/Linux/Diagnostics/Rendering/SkipInkSmoke.cpp
+        Source/Platform/Linux/Smokes/PaddingSmoke.cpp
+        Source/Platform/Linux/Smokes/SkipInkSmoke.cpp
         Source/Platform/Linux/Input/LinkInteraction.cpp
         Source/Platform/Linux/Input/LinkTarget.cpp
         Source/Platform/Linux/Presentation/PaneGeometry.cpp

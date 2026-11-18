@@ -34,11 +34,14 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 REPO = subprocess.run(["git", "rev-parse", "--show-toplevel"],
                       capture_output=True, text=True).stdout.strip() or "."
 
 WEB_TESTS = os.path.join("Tests", "Web")
+WEB_SMOKES = os.path.join("Tests", "Smokes", "Web")
 FIXTURE = os.path.join(WEB_TESTS, "stub-dom.mjs")
 
 # What standing a browser up looks like. Each of these replaces a global the
@@ -61,11 +64,11 @@ PROBE_MAY_OWN = ("globalThis.WebSocket", "globalThis.location", "globalThis.fetc
 
 
 def probeFiles():
-    """Returns the tracked probe files under Tests/Web, fixture excluded.
+    """Returns the tracked web probes and smokes, fixture excluded.
 
     - Returns: A list of repository-relative paths, empty if git answers nothing.
     """
-    listing = subprocess.run(["git", "-C", REPO, "ls-files", WEB_TESTS],
+    listing = subprocess.run(["git", "-C", REPO, "ls-files", WEB_TESTS, WEB_SMOKES],
                              capture_output=True, text=True).stdout
     return [p for p in listing.split()
             if p.endswith(".mjs") and os.path.normpath(p) != os.path.normpath(FIXTURE)]
@@ -130,10 +133,26 @@ def selfTest():
         print("  FAIL %s is not a file, so the rule names nowhere to put anything" % FIXTURE)
         failures += 1
 
+    # Exercise discovery as well as the rule: a smoke outside Tests/Web must
+    # still be rejected when it installs a browser of its own.
+    with tempfile.TemporaryDirectory(prefix="ubq-web-smoke-fixture-") as temporary:
+        directory = Path(temporary)
+        planted = directory / WEB_SMOKES / "planted.mjs"
+        planted.parent.mkdir(parents=True)
+        planted.write_text("globalThis.document = {};\n")
+        environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        subprocess.run(["git", "init", "--quiet", temporary], env=environment, check=True)
+        subprocess.run(["git", "-C", temporary, "add", "."], env=environment, check=True)
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve())], cwd=temporary,
+                                env=environment, capture_output=True, text=True)
+        detected = result.returncode == 1 and "planted.mjs" in result.stderr
+        print("  %s a smoke in its own directory is checked" % ("ok " if detected else "FAIL"))
+        failures += not detected
+
     if failures:
         print("check-web-fixture: %d self-test arm(s) failed" % failures, file=sys.stderr)
         return 1
-    print("check-web-fixture: self-test ok (%d arms)" % (len(arms) + 1))
+    print("check-web-fixture: self-test ok (%d arms)" % (len(arms) + 2))
     return 0
 
 

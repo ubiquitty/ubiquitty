@@ -18,7 +18,7 @@
 // twenty calls, and stubbing them is cheaper than adding jsdom to a repository
 // that has no node dependencies at all.
 //
-//   node Tests/Web/page-smoke.mjs [dist-dir]
+//   node Tests/Smokes/Web/page-smoke.mjs [dist-dir]
 
 import fs from 'fs';
 import path from 'path';
@@ -203,7 +203,7 @@ if (!['local', 'attached'].includes(phase)) {
 //
 // One file for every probe here; see Tests/Web/stub-dom.mjs for what a copy per
 // probe cost when the copies drifted.
-import { installStubDom, elementFor, elements, listeners, hostRecordTouches, paints } from './stub-dom.mjs';
+import { installStubDom, elementFor, elements, listeners, hostRecordTouches, paints } from '../../Web/stub-dom.mjs';
 
 installStubDom(dist);
 
