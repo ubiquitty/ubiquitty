@@ -825,9 +825,12 @@ WebFontRasterizer::WebFontRasterizer(GlyphRasterizer& fallback, int pixelSize, i
     m_face.descent = static_cast<float>(descent);
     m_face.lineGapTopInPixels = layout.lineGapTop;
     // The face rule policy (RuleGeometry.h) with what the browser can tell
-    // this arm: the descent, which places the rule; no underline weight
-    // reaches a canvas, so the stroke keeps the size-only rule.
+    // this arm: the weight its underscore draws at on the canvas, read by
+    // Core's rule, and the descent. No declared underline weight reaches a
+    // canvas, so a face whose underscore draws nothing keeps the size-only
+    // stroke.
     Rendering::RuleFaceMetrics faceRules;
+    faceRules.underscoreWeight = Rendering::underscoreWeight(*this, static_cast<int>(std::ceil(m_metrics.cellWidth)), static_cast<int>(std::ceil(m_metrics.cellHeight)));
     faceRules.descent = static_cast<float>(descent);
     const Rendering::RuleGeometry rules = Rendering::ruleGeometry(static_cast<float>(m_pixelSize), static_cast<float>(m_deviceScale), faceRules);
     m_metrics.underlineDrop = rules.underlineDrop;

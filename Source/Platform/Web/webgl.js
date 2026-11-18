@@ -166,7 +166,7 @@ function sliceStreams(frame, segment) {
     cellWidth: frame.cellWidth, cellHeight: frame.cellHeight,
   };
 }
-const DECORATION_INSTANCE_STRIDE = 160; // Rendering::DecorationInstance
+export const DECORATION_INSTANCE_STRIDE = 64; // Rendering::DecorationInstance
 const WIDE_GLYPH_INSTANCE_STRIDE = 64; // Rendering::GlyphInstance
 
 // Wide-glyph pass — two-cell glyphs, from their own atlas page.
@@ -230,6 +230,10 @@ void main()
     // holds, so the result does not depend on what drew underneath.
     // Atlas pixels; normalize here, where a divide is free.
     float coverage = texture(uWideAtlas, vAtlasUV / vec2(textureSize(uWideAtlas, 0))).r * clamp(abs(vForeground.a), 0.0, 1.0);
+    // A pixel the glyph puts no ink on keeps what lies beneath it, as
+    // SoftwareRenderer::compositeGlyph skips a zero-coverage byte and the Vulkan
+    // glyph pass discards one: a circle or a picture under the quad stays.
+    if (coverage * 255.0 < 0.5) discard;
     fragColor = vec4(mix(vBackground.rgb, vForeground.rgb, coverage), 1.0);
 }
 `;
@@ -349,32 +353,25 @@ void main()
 // Decoration pass — underline (solid, dotted, dashed, curly), overline,
 // strikethrough and box rules, from `decoration.{vert,frag}` with the dialect
 // and the Y flip changed. Rules carry their own alpha, so ordinary alpha
-// blending over the cell pass suffices and no framebuffer read is needed.
+// blending over the cell pass suffices and no framebuffer read is needed. A
+// rule glyph ink cuts arrives as the pieces Core left standing
+// (Core/Rendering/SkipInk.h), each laid out across the whole rule's band, so
+// no glyph is sampled here. A piece's cut end lies wherever the cut does,
+// inside a pixel as often as not, and that pixel is drawn in the part the
+// piece covers.
 const DECORATION_VERTEX_SHADER = `#version 300 es
-layout(location = 0) in vec2 inMin;        // topLeftInPixels      @0
-layout(location = 1) in vec2 inMax;        // bottomRightInPixels  @8
-layout(location = 2) in vec4 inColor;      //                      @16
-layout(location = 3) in vec4 inParams;     // kind, period, thickness, skipInk @32
-layout(location = 4) in vec4 inInk;        // glyph cell box, atlas pixels     @48
-layout(location = 5) in vec4 inPad;        // dilation, tap count, selectors   @64
-layout(location = 6) in vec4 inSlot;       // own atlas-slot clamp             @80
-layout(location = 7) in vec4 inLeftInk;    //                      @96
-layout(location = 8) in vec4 inLeftBox;    //                      @112
-layout(location = 9) in vec4 inRightInk;   //                      @128
-layout(location = 10) in vec4 inRightBox;  //                      @144
+layout(location = 0) in vec2 inMin;        // topLeftInPixels: the piece    @0
+layout(location = 1) in vec2 inMax;        // bottomRightInPixels           @8
+layout(location = 2) in vec4 inColor;      //                               @16
+layout(location = 3) in vec4 inParams;     // kind, period, thickness, cut ends @32
+layout(location = 4) in vec4 inBand;       // the whole rule's corners      @48
 
 uniform vec2 uViewportSize;
 
 out vec4 vLocal;
 out vec4 vColor;
 flat out vec4 vParams;
-out vec2 vInkUV;
-flat out vec4 vPad;
-flat out vec4 vSlot;
-flat out vec4 vLeftInk;
-flat out vec4 vLeftBox;
-flat out vec4 vRightInk;
-flat out vec4 vRightBox;
+flat out vec2 vCutAcross; // the piece's cut ends across; far outside where none
 
 const vec2 kCorners[6] = vec2[](
     vec2(0, 0), vec2(1, 0), vec2(0, 1),
@@ -382,85 +379,37 @@ const vec2 kCorners[6] = vec2[](
 
 void main() {
     vec2 corner = kCorners[gl_VertexID];
-    vec2 sizePx = inMax - inMin;
-    vec2 px = inMin + corner * sizePx;
+    // A cut end's pixel is drawn in part, so the quad reaches the whole pixel
+    // the end lies in, and no further than the band's own pixels.
+    int cutEnds = int(inParams.w + 0.5);
+    bool isLeftCut = (cutEnds == 1 || cutEnds == 3);
+    bool isRightCut = (cutEnds >= 2);
+    float quadLeft = isLeftCut ? max(floor(inMin.x), ceil(inBand.x - 0.5)) : inMin.x;
+    float quadRight = isRightCut ? min(ceil(inMax.x), ceil(inBand.z - 0.5)) : inMax.x;
+    vec2 px = vec2(mix(quadLeft, quadRight, corner.x), mix(floor(inMin.y), ceil(inMax.y), corner.y));
     vec2 ndc = px / uViewportSize * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0); // GL clip space is bottom-left origin
-    vLocal = vec4(corner * sizePx, sizePx);
+    // The pattern is the band's: a piece of a cut rule draws its own part of it.
+    vLocal = vec4(px - inBand.xy, inBand.zw - inBand.xy);
     vColor = inColor;
     vParams = inParams;
-    // The ink corners span the rule rect, so per-axis interpolation hands
-    // this fragment the glyph UV at its own 2D position.
-    vInkUV = mix(inInk.xy, inInk.zw, corner);
-    vPad = inPad;
-    vSlot = inSlot;
-    vLeftInk = inLeftInk;
-    vLeftBox = inLeftBox;
-    vRightInk = inRightInk;
-    vRightBox = inRightBox;
+    vCutAcross = vec2(isLeftCut ? inMin.x : -1.0e9, isRightCut ? inMax.x : 1.0e9);
 }`;
 
 const DECORATION_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
-precision highp sampler2D;
 
 in vec4 vLocal;
 in vec4 vColor;
 flat in vec4 vParams;
-in vec2 vInkUV;
-flat in vec4 vPad;
-flat in vec4 vSlot;
-flat in vec4 vLeftInk;
-flat in vec4 vLeftBox;
-flat in vec4 vRightInk;
-flat in vec4 vRightBox;
-
-uniform sampler2D uAtlas;
-uniform sampler2D uProportionalStripAtlas;
-uniform sampler2D uLigatureAtlas;
-uniform sampler2D uProportionalGlyphAtlas; // the dedicated glyph sheet, for a run drawn glyph by glyph
+flat in vec2 vCutAcross;
 
 out vec4 outColor;
 
+const float decorationSolid = 0.0;
 const float decorationDotted = 1.0;
 const float decorationDashed = 2.0;
 const float decorationCurly = 3.0;
-
-// The texel a tap names, read whole and clamped, as the CPU reads it.
-float texelTap(sampler2D sheet, vec2 uv) {
-    ivec2 size = textureSize(sheet, 0);
-    return texelFetch(sheet, clamp(ivec2(floor(uv)), ivec2(0), size - 1), 0).r;
-}
-
-float sheetTap(int sheetSelector, vec2 uv) {
-    return sheetSelector == 1 ? texelTap(uProportionalStripAtlas, uv)
-        : sheetSelector == 2 ? texelTap(uLigatureAtlas, uv)
-        : sheetSelector == 3 ? texelTap(uProportionalGlyphAtlas, uv)
-        : texelTap(uAtlas, uv);
-}
-
-// The tap's nudge off the texel grid, SoftwareRenderer's skipInkTapBias.
-const float skipInkTapBias = 1.0 / 128.0;
-
-// The glyph's coverage dilated by a disc of radius padUV, on a grid whose taps
-// stay about a pixel apart, as the CPU compositor takes it. Only the glyph's
-// own slot answers; a slot whose max does not pass its min is absent.
-float discCoverage(int sheetSelector, vec2 centre, vec2 padUV, int steps, vec2 minSlot, vec2 maxSlot) {
-    if (maxSlot.x <= minSlot.x)
-        return 0.0;
-    vec2 stepUV = padUV / float(steps);
-    float strongest = 0.0;
-    for (int dy = -steps; dy <= steps; ++dy)
-        for (int dx = -steps; dx <= steps; ++dx) {
-            if (dx * dx + dy * dy > steps * steps)
-                continue;
-            vec2 uv = centre + vec2(float(dx), float(dy)) * stepUV + skipInkTapBias;
-            if (uv.x < minSlot.x || uv.x > maxSlot.x || uv.y < minSlot.y || uv.y > maxSlot.y)
-                continue;
-            strongest = max(strongest, sheetTap(sheetSelector, uv));
-        }
-    return strongest;
-}
 
 void main() {
     vec2 vLocalPx = vLocal.xy;
@@ -468,45 +417,78 @@ void main() {
     float vKind = vParams.x;
     float vCellSize = vParams.y;
     float vThickness = vParams.z;
-    float alpha = vColor.a;
+    // The part of this pixel the piece covers across, at a cut end; all of it
+    // elsewhere.
+    float across = clamp(min(gl_FragCoord.x + 0.5, vCutAcross.y) - max(gl_FragCoord.x - 0.5, vCutAcross.x), 0.0, 1.0);
+    float alpha = vColor.a * across;
     if (vKind == decorationDotted) {
-        float r = max(vSizePx.y * 0.5, 1.0);
-        float period = max(vCellSize * 0.5, r * 3.0);
-        float cx = (floor(vLocalPx.x / period) + 0.5) * period;
-        float dx = vLocalPx.x - cx;
-        float dy = vLocalPx.y - vSizePx.y * 0.5;
-        float d = length(vec2(dx, dy));
-        alpha *= clamp(r + 0.5 - d, 0.0, 1.0);
+        // Round dots the band's height across, one at the start of each
+        // pitch from the band's left edge, where the run starts, (CellInstanceBuilder's patternPitch):
+        // the nearer of the dot this pixel's centre lies in the pitch of and
+        // the next.
+        float period = vCellSize;
+        float radius = vSizePx.y * 0.5;
+        float along = vLocalPx.x;
+        float first = floor(along / period) * period + radius;
+        float deltaY = vLocalPx.y - radius;
+        // A circle fitted to the pixel grid: its square's corners rounded to
+        // the radius less half a pixel (dottedRuleCornerInset), so a small dot
+        // is solid and a heavy one round.
+        float corner = max(radius - 0.5, 0.0);
+        vec2 toThis = abs(vec2(along - first, deltaY)) - (radius - corner);
+        vec2 toNext = abs(vec2(along - first - period, deltaY)) - (radius - corner);
+        float apart = min(length(max(toThis, 0.0)) + min(max(toThis.x, toThis.y), 0.0),
+                          length(max(toNext, 0.0)) + min(max(toNext.x, toNext.y), 0.0)) - corner;
+        alpha *= clamp(0.5 - apart, 0.0, 1.0);
     } else if (vKind == decorationDashed) {
-        float period = max(vCellSize, vThickness * 6.0);
-        float phase = fract(vLocalPx.x / period);
-        if (phase >= 0.65)
-            alpha = 0.0;
-    } else if (vKind == decorationCurly) {
-        float period = max(vCellSize, 2.0);
-        float halfThick = vThickness * 0.8;
-        float amp = max(vSizePx.y * 0.5 - halfThick, 0.5);
-        float mid = vSizePx.y * 0.5;
-        float wave = mid + amp * sin(vLocalPx.x / period * 6.2831853);
-        float dist = abs(vLocalPx.y - wave);
-        alpha *= clamp(halfThick + 0.5 - dist, 0.0, 1.0);
+        // Dashes from the band's left edge, where the run starts, at the pitch Core chose,
+        // three-fifths of it on (dashedRuleOnShare): the part of this pixel
+        // the dash it lies in covers, and the one before it.
+        float period = vCellSize;
+        float along = vLocalPx.x;
+        float start = floor(along / period) * period;
+        float marks = clamp(min(along + 0.5, start + 0.6 * period) - max(along - 0.5, start), 0.0, 1.0)
+            + clamp(min(along + 0.5, start - 0.4 * period) - max(along - 0.5, start - period), 0.0, 1.0);
+        alpha *= min(marks, 1.0);
     }
-
-    // Skip-ink: cut the rule where glyph coverage crosses it, so a descender
-    // breaks the underline instead of being struck through.
-    if (vParams.w > 0.5) {
-        int steps = max(int(vPad.z + 0.5), 1);
-        int selectors = int(vPad.w + 0.5);
-        vec2 fraction = vec2(vSizePx.x > 0.0 ? vLocalPx.x / vSizePx.x : 0.0,
-            vSizePx.y > 0.0 ? vLocalPx.y / vSizePx.y : 0.0);
-        float cov = discCoverage(selectors % 8, vInkUV, vPad.xy, steps, vSlot.xy, vSlot.zw);
-        // A rule is per cell, so a descender leaning in from either neighbour
-        // is cut by this cell's rule too.
-        vec2 leftUV = vec2(mix(vLeftInk.x, vLeftInk.y, fraction.x + 1.0), mix(vLeftInk.z, vLeftInk.w, fraction.y));
-        cov = max(cov, discCoverage((selectors / 8) % 8, leftUV, vPad.xy, steps, vLeftBox.xy, vLeftBox.zw));
-        vec2 rightUV = vec2(mix(vRightInk.x, vRightInk.y, fraction.x - 1.0), mix(vRightInk.z, vRightInk.w, fraction.y));
-        cov = max(cov, discCoverage((selectors / 64) % 8, rightUV, vPad.xy, steps, vRightBox.xy, vRightBox.zw));
-        alpha *= clamp(1.0 - cov, 0.0, 1.0);
+    if (vKind == decorationDashed || vKind == decorationSolid) {
+        // A straight rule is drawn at its weight exactly (ruleWeight): the
+        // part of this pixel's row its band covers.
+        // The fraction of this pixel's row the band covers, as every other
+        // renderer takes it: the summed weight is the band's height exactly,
+        // at any sub-pixel size.
+        float rowTop = max(vLocalPx.y - 0.5, 0.0);
+        float rowBottom = min(vLocalPx.y + 0.5, vSizePx.y);
+        alpha *= max(rowBottom - rowTop, 0.0);
+    } else if (vKind == decorationCurly) {
+        // Circular arcs half a period across, alternately crest and trough,
+        // meeting on the centre line with matching tangents (CellInstanceBuilder's
+        // curlyRuleProportions): the distance to the nearest of the arc
+        // this pixel lies under and its two neighbours, or to an arc's end where
+        // its circle's nearest point is past it.
+        float period = max(vCellSize, 2.0);
+        float halfWeight = vThickness * 0.5;
+        float swing = max(vSizePx.y * 0.5 - halfWeight - 0.5, 0.25);
+        float middle = vSizePx.y * 0.5;
+        float span = period * 0.5;
+        float radius = (span * span * 0.25 + swing * swing) / (2.0 * swing);
+        float index = floor(vLocalPx.x / span);
+        float apart = 1.0e9;
+        for (int step = -1; step <= 1; ++step) {
+            float arc = index + float(step);
+            // Even arcs crest toward the text, odd ones dip away from it.
+            float side = arc - 2.0 * floor(arc * 0.5) < 0.5 ? -1.0 : 1.0;
+            float arcLeft = arc * span;
+            vec2 circle = vec2(arcLeft + span * 0.5, middle - side * (radius - swing));
+            vec2 offset = vec2(vLocalPx.x, vLocalPx.y) - circle;
+            float reach = length(offset);
+            vec2 nearest = reach > 0.0 ? circle + offset / reach * radius : circle + vec2(0.0, side * radius);
+            bool isOnArc = nearest.x >= arcLeft && nearest.x <= arcLeft + span && (side < 0.0 ? nearest.y <= middle : nearest.y >= middle);
+            float distance = isOnArc ? abs(reach - radius)
+                                     : min(length(vec2(vLocalPx.x - arcLeft, vLocalPx.y - middle)), length(vec2(vLocalPx.x - arcLeft - span, vLocalPx.y - middle)));
+            apart = min(apart, distance);
+        }
+        alpha *= clamp(halfWeight + 0.5 - apart, 0.0, 1.0);
     }
     outColor = vec4(vColor.rgb, alpha);
 }`;
@@ -894,10 +876,6 @@ export class WebGLRenderer {
 
     this.decorationProgram = link(gl, DECORATION_VERTEX_SHADER, DECORATION_FRAGMENT_SHADER, 'decoration');
     this.dViewportSize = gl.getUniformLocation(this.decorationProgram, 'uViewportSize');
-    this.dAtlas = gl.getUniformLocation(this.decorationProgram, 'uAtlas');
-    this.dProportionalStripAtlas = gl.getUniformLocation(this.decorationProgram, 'uProportionalStripAtlas');
-    this.dProportionalGlyphAtlas = gl.getUniformLocation(this.decorationProgram, 'uProportionalGlyphAtlas');
-    this.dLigatureAtlas = gl.getUniformLocation(this.decorationProgram, 'uLigatureAtlas');
     this.decorationBuffer = gl.createBuffer();
     this.decorationVao = gl.createVertexArray();
     gl.bindVertexArray(this.decorationVao);
@@ -910,16 +888,8 @@ export class WebGLRenderer {
     decorationAttribute(0, 2, 0);   // topLeftInPixels
     decorationAttribute(1, 2, 8);   // bottomRightInPixels
     decorationAttribute(2, 4, 16);  // color
-    // Whole vec4s, so the cut's neighbour pairs fit in the sixteen
-    // attributes WebGL 2 promises.
-    decorationAttribute(3, 4, 32);  // kind, dashPeriodInPixels, thicknessInPixels, skipInk
-    decorationAttribute(4, 4, 48);  // inkTopLeft, inkBottomRight
-    decorationAttribute(5, 4, 64);  // padInAtlas, tap count, sheet selectors
-    decorationAttribute(6, 4, 80);  // glyphSlotTopLeftUV, glyphSlotBottomRightUV
-    decorationAttribute(7, 4, 96);  // leftInk
-    decorationAttribute(8, 4, 112); // leftBox
-    decorationAttribute(9, 4, 128); // rightInk
-    decorationAttribute(10, 4, 144); // rightBox
+    decorationAttribute(3, 4, 32);  // kind, dashPeriodInPixels, thicknessInPixels, cutEnds
+    decorationAttribute(4, 4, 48);  // bandTopLeftInPixels, bandBottomRightInPixels
     gl.bindVertexArray(null);
 
     this.wideGlyphProgram = link(gl, WIDE_GLYPH_VERTEX_SHADER, WIDE_GLYPH_FRAGMENT_SHADER, 'wide-glyph');
@@ -1318,25 +1288,14 @@ export class WebGLRenderer {
       gl.disable(gl.BLEND);
     }
 
-    // Rules carry their own alpha (the pattern mask, the skip-ink cut), so this
-    // pass blends rather than replacing.
+    // Rules carry their own alpha (the pattern mask), so this pass blends
+    // rather than replacing. They sample no sheet: Core cut them around glyph
+    // ink and sent the pieces left standing.
     if (streams.decorationCount > 0) {
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.useProgram(this.decorationProgram);
       gl.uniform2f(this.dViewportSize, width, height);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.atlasTexture);
-      gl.uniform1i(this.dAtlas, 0);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, this.proportionalStripAtlasTexture);
-      gl.uniform1i(this.dProportionalStripAtlas, 1);
-      gl.activeTexture(gl.TEXTURE2);
-      gl.bindTexture(gl.TEXTURE_2D, this.ligatureAtlasTexture);
-      gl.uniform1i(this.dLigatureAtlas, 2);
-      gl.activeTexture(gl.TEXTURE3);
-      gl.bindTexture(gl.TEXTURE_2D, this.proportionalAtlasTexture);
-      gl.uniform1i(this.dProportionalGlyphAtlas, 3);
       gl.bindVertexArray(this.decorationVao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.decorationBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, streams.decorationBytes, gl.STREAM_DRAW);

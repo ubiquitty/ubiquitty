@@ -2391,7 +2391,7 @@ const char* WebTerminal::captureProgramState()
             style.set("invisible", has(VT::Attribute::Hidden));
             style.set("strikethrough", has(VT::Attribute::Strike));
             style.set("overline", has(VT::Attribute::Overline));
-            style.set("underline", Codec::JSON::Value::number(cell.pen.attributes.contains(VT::Attribute::Underline) ? penUnderlineShape(&cell.pen) : VT::underlineNone));
+            style.set("underline", Codec::JSON::Value::number(cell.pen.attributes.contains(VT::Attribute::Underline) ? std::to_underlying(penUnderlineShape(&cell.pen)) : std::to_underlying(VT::UnderlineShape::None)));
             style.set("link", Codec::JSON::Value::boolean(cell.linkID() != 0));
             style.set("semantic", Codec::JSON::Value::string(cell.pen.semanticRole == SemanticRole::Prompt ? "prompt" : cell.pen.semanticRole == SemanticRole::Input ? "input"
                                                                                                                                                                      : "output"));
@@ -3082,8 +3082,10 @@ bool WebTerminal::buildFrame()
         m_overlays.resize(maxOverlays);
     if (m_boxFills.size() < maxCells)
         m_boxFills.resize(maxCells);
-    // A cell carries an underline, a strikethrough and an overline at once, so
-    // the decoration ceiling is a multiple of the grid rather than equal to it.
+    // A cell carries an underline, a strikethrough and an overline at once, and
+    // a rule glyph ink cuts arrives as several pieces, so this is a seed rather
+    // than a ceiling: the builder reports the count it needed, and the frame
+    // regrows to it below.
     const std::size_t maxDecorations = maxCells * 4;
     if (m_decorations.size() < maxDecorations)
         m_decorations.resize(maxDecorations);
@@ -3155,11 +3157,13 @@ bool WebTerminal::buildFrame()
     // out, which the renderer keeps (pointerCell).
     m_fonts->renderer.lendLetters(inputs, out);
     Rendering::InstanceCounts counts = Rendering::buildCellInstances(inputs, backend, out);
-    // A packed run or box decomposition can emit more quads than grid cells.
+    // A packed run, a box decomposition or a rule cut into pieces can emit
+    // more quads than the seeds hold.
     if (counts.proportionalGlyphs > m_proportionalGlyphs.size()
         || counts.proportionalStrips > m_proportionalStrips.size()
         || counts.ligatureGlyphs > m_ligatureGlyphs.size()
-        || counts.boxFills > m_boxFills.size()) {
+        || counts.boxFills > m_boxFills.size()
+        || counts.decorations > m_decorations.size()) {
         m_proportionalGlyphs.resize(std::max(counts.proportionalGlyphs, m_proportionalGlyphs.size()));
         m_proportionalStrips.resize(std::max(counts.proportionalStrips, m_proportionalStrips.size()));
         m_ligatureGlyphs.resize(std::max(counts.ligatureGlyphs, m_ligatureGlyphs.size()));
@@ -3172,6 +3176,9 @@ bool WebTerminal::buildFrame()
         m_boxFills.resize(std::max(counts.boxFills, m_boxFills.size()));
         out.boxFills = m_boxFills.data();
         out.boxFillCapacity = m_boxFills.size();
+        m_decorations.resize(std::max(counts.decorations, m_decorations.size()));
+        out.decorations = m_decorations.data();
+        out.decorationCapacity = m_decorations.size();
         counts = Rendering::buildCellInstances(inputs, backend, out);
     }
     // A count past capacity means the builder had more to write than room;

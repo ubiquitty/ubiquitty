@@ -496,10 +496,17 @@ private struct RowView: View {
                     case .menu(let options, _, let get, let set) = control
                 {
                     SettingsFontPicker(options: options, get: get, set: set)
-                } else if case .fontWidth = row.presentation,
-                    case .stepper(let minimum, let maximum, let step, _, let get, let set) = control
+                } else if case .automaticNumber(let automatic) = row.presentation,
+                    case .stepper(let minimum, let maximum, let step, let unit, let get, let set) = control
                 {
-                    FontWidthControl(range: minimum...maximum, step: step, get: get, set: set)
+                    AutomaticNumberControl(
+                        automatic: automatic,
+                        range: minimum...maximum,
+                        step: step,
+                        unit: unit,
+                        get: get,
+                        set: set
+                    )
                 } else {
                     ControlView(control: control)
                 }
@@ -511,33 +518,49 @@ private struct RowView: View {
     }
 }
 
-private struct FontWidthControl: View {
+// A choice between a setting's automatic value and a number, with the stepper
+// shown only for a number. The automatic value lies below the stepper's range,
+// so a value under the range reads as automatic and one in it as a number.
+private struct AutomaticNumberControl: View {
+    let automatic: SettingsRow.AutomaticNumber
     let range: ClosedRange<Double>
     let step: Double
+    let unit: String
     let get: () -> Double
     let set: (Double) -> Void
     @State
     private var value: Double
 
-    init(range: ClosedRange<Double>, step: Double, get: @escaping () -> Double, set: @escaping (Double) -> Void) {
+    init(
+        automatic: SettingsRow.AutomaticNumber,
+        range: ClosedRange<Double>,
+        step: Double,
+        unit: String,
+        get: @escaping () -> Double,
+        set: @escaping (Double) -> Void
+    ) {
+        self.automatic = automatic
         self.range = range
         self.step = step
+        self.unit = unit
         self.get = get
         self.set = set
         _value = State(initialValue: get())
     }
 
+    private var isCustom: Bool { value >= range.lowerBound }
+
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
             MenuControl(
-                options: ["Font Default", "Custom"],
-                get: { value > 0 ? 1 : 0 },
+                options: [automatic.automaticLabel, "Custom"],
+                get: { isCustom ? 1 : 0 },
                 set: { selection in
-                    value = selection == 1 ? 100 : 0
+                    value = selection == 1 ? automatic.customValue : automatic.automaticValue
                     set(value)
                 }
             )
-            if value > 0 {
+            if isCustom {
                 Stepper(
                     value: Binding(
                         get: { value },
@@ -549,7 +572,7 @@ private struct FontWidthControl: View {
                     in: range,
                     step: step
                 ) {
-                    Text(value.formatted(.number.precision(.fractionLength(0...1))) + " %").monospacedDigit()
+                    Text(value.formatted(.number.precision(.fractionLength(0...2))) + " " + unit).monospacedDigit()
                 }
                 .fixedSize()
             }

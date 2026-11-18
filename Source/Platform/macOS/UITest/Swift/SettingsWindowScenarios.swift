@@ -580,7 +580,7 @@ enum SettingsWindowScenarios {
                 for (rowID, owner) in [
                     ("text.brighten_bold", "font-rendering"), ("underline.links", "mouse"), ("clipboard.serving", "security"),
                     ("appearance.shade_blocks", "font-rendering"), ("underline.thickness", "fonts"), ("underline.skip_ink", "fonts"),
-                    ("underline.skip_ink_pad", "fonts"), ("underline.follows_ink", "fonts"),
+                    ("underline.skip_ink_pad", "fonts"), ("underline.follows_ink", "fonts"), ("underline.curly", "fonts"),
                 ] {
                     t.expect(hits.contains { $0.rowID == rowID && $0.categoryID == owner }, desc: rowID + " belongs to " + owner)
                 }

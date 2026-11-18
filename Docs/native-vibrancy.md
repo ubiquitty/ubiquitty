@@ -25,7 +25,7 @@ and [Oklab](https://bottosson.github.io/posts/oklab/), with 8-bit rounding.
 The default terminal font is SF Mono when available, otherwise bundled JetBrains
 Mono, at 12 pt.
 
-Wide Glyph Scale defaults to 1.2. The underline Skip-Ink Gap defaults to 1.75 pt.
+Wide Glyph Scale defaults to 1.2. The underline Skip-Ink Gap defaults to 1.0 pt.
 
 Background Blur and Background Vibrancy default on. Background opacity defaults
 to 100%, where neither effect runs; lowering opacity activates them.

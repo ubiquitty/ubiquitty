@@ -1126,11 +1126,15 @@ function showSettings() {
         'font.character_spacing': ['Character spacing', 'Extra space between terminal columns.'],
         'font.weight': ['Regular weight', '0 uses the font’s own weight.'],
         'font.bold_weight': ['Bold weight', '0 uses the font’s own bold face.'],
-        'underline.thickness': ['Thickness', 'Multiplier of the font’s underline thickness.'],
-        'underline.offset': ['Offset', 'Move the underline below its default position.'],
+        'underline.thickness': ['Thickness', 'Multiplier of the underline’s weight. 1.0 matches the font’s own underscore.'],
+        'underline.offset': ['Offset', 'Move the underline from its automatic position. 0 is automatic.'],
         'underline.skip_ink': ['Skip descenders', 'Leave a gap where the underline meets a glyph.'],
         'underline.follows_ink': ['Follow glyph ink', 'Use glyph bounds for underline placement.'],
-        'underline.skip_ink_pad': ['Gap around ink', 'Space around the skipped part of a glyph.'],
+        'underline.skip_ink_pad': [
+            'Gap around ink',
+            'Space around the skipped part of a glyph. Leave empty to match the underline’s weight.',
+        ],
+        'underline.curly': ['Curly underlines', 'Shape of the wavy underline programs use, such as for spelling errors.'],
         'underline.links': ['Underline links', 'Mark detected links in terminal text.'],
     };
     const preferenceRows = (prefix) =>
@@ -1140,12 +1144,17 @@ function showSettings() {
                 const [label, help] = labels[item.key];
                 const value = settings.preferences?.[item.key] ?? item.value;
                 const id = `setting-${item.key.replace('.', '-')}`;
-                const input =
-                    typeof value === 'boolean'
-                        ? `<input id="${id}" data-preference="${item.key}" type="checkbox" ${value ? 'checked' : ''}>`
-                        : typeof value === 'number'
-                          ? `<input id="${id}" data-preference="${item.key}" type="number" min="${item.min}" max="${item.max}" step="${item.step}" value="${value}"><span class="muted">${escape(item.unit === 'pt' ? 'px' : item.unit)}</span>`
-                          : `<input id="${id}" data-preference="${item.key}" type="text" maxlength="256" spellcheck="false" value="${escape(value)}">`;
+                // A default outside the range a person picks from is the
+                // setting's automatic value, which the field shows as empty.
+                const isAutomatic =
+                    typeof item.default === 'number' && (item.default < item.min || item.default > item.max);
+                const input = item.options
+                    ? `<select id="${id}" data-preference="${item.key}">${item.options.map((option) => `<option value="${escape(option.token)}"${option.token === value ? ' selected' : ''}>${escape(option.label)}</option>`).join('')}</select>`
+                    : typeof value === 'boolean'
+                      ? `<input id="${id}" data-preference="${item.key}" type="checkbox" ${value ? 'checked' : ''}>`
+                      : typeof value === 'number'
+                        ? `<input id="${id}" data-preference="${item.key}" type="number" min="${item.min}" max="${item.max}" step="${item.step}" value="${isAutomatic && value === item.default ? '' : value}"${isAutomatic ? ` data-automatic="${item.default}" placeholder="Automatic"` : ''}><span class="muted">${escape(item.unit === 'pt' ? 'px' : item.unit)}</span>`
+                        : `<input id="${id}" data-preference="${item.key}" type="text" maxlength="256" spellcheck="false" value="${escape(value)}">`;
                 return `<div class="field"><label for="${id}">${label}<small>${help}</small></label><div class="control">${input}</div></div>`;
             })
             .join('');
@@ -1210,7 +1219,9 @@ function showSettings() {
                 input.type === 'checkbox'
                     ? input.checked
                     : input.type === 'number'
-                      ? Number(input.value)
+                      ? input.value === '' && input.dataset.automatic !== undefined
+                          ? Number(input.dataset.automatic)
+                          : Number(input.value)
                       : input.value.trim();
         }
         root.querySelector('#custom-font-row').hidden = family.value !== 'custom';

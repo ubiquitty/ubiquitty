@@ -137,7 +137,22 @@ struct SettingsRow: Identifiable {
     enum Presentation {
         case standard
         case fontFamily
-        case fontWidth
+        /// A stepper whose setting has an automatic value below the range a
+        /// person picks from, offered as a choice between that and a number.
+        case automaticNumber(AutomaticNumber)
+    }
+
+    /// How an automatic-or-number row names and seeds its two choices.
+    ///
+    /// The automatic value lies below the stepper's range, so the row reads a
+    /// value under the range as automatic and anything in it as a number.
+    struct AutomaticNumber {
+        /// The first choice's name, such as "Font Default".
+        let automaticLabel: String
+        /// The value the row writes for the automatic choice.
+        let automaticValue: Double
+        /// The number the stepper starts from when a person picks Custom.
+        let customValue: Double
     }
 
     /// A nonlocalized setting address, independent of its label and category.

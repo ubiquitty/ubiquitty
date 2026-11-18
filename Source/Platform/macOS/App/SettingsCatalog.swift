@@ -855,7 +855,7 @@ enum SettingsCatalog {
                             get: { app?.settingsFontWidth() ?? 0 },
                             set: { app?.settingsSetFontWidth($0) }
                         ),
-                        presentation: .fontWidth
+                        presentation: .automaticNumber(.init(automaticLabel: "Font Default", automaticValue: 0, customValue: 100))
                     ),
                 ]
             ),
@@ -927,7 +927,7 @@ enum SettingsCatalog {
                     SettingsRow(
                         id: "underline.thickness",
                         "Thickness",
-                        detail: "Scale the underline weight the font provides.",
+                        detail: "Scale the underline’s weight. At 1.0, it matches the weight of the font’s own underscore.",
                         control: stepper(
                             bounds("underline", "thickness"),
                             get: { settingDouble(.UnderlineThickness) },
@@ -937,11 +937,23 @@ enum SettingsCatalog {
                     SettingsRow(
                         id: "underline.offset",
                         "Offset",
-                        detail: "Move the underline this many points below the baseline. Negative values raise it.",
+                        detail:
+                            "Move the underline this many points from where it’s placed automatically, a clear gap below the baseline. 0 is automatic; negative values raise it.",
                         control: stepper(
                             bounds("underline", "offset"),
                             get: { settingDouble(.UnderlineOffset) },
                             set: { app?.settingsSetUnderlineOffset($0) }
+                        )
+                    ),
+                    SettingsRow(
+                        id: "underline.curly",
+                        "Curly Underlines",
+                        detail:
+                            "Choose the shape of the wavy underline programs use, such as for spelling errors. Compact is a short, tight curl; Medium draws one wave per letter; Wide draws one wave per letter with a deeper swing.",
+                        control: .segmented(
+                            options: options("underline", "curly"),
+                            get: { settingTermIndex(.UnderlineCurly, fallback: 1) },
+                            set: { app?.settingsSetCurlyUnderlineShape($0) }
                         )
                     ),
                     SettingsRow(
@@ -965,12 +977,14 @@ enum SettingsCatalog {
                     SettingsRow(
                         id: "underline.skip_ink_pad",
                         "Skip-Ink Gap",
-                        detail: "Set the space cleared around descenders where they cross the underline.",
+                        detail:
+                            "Set the space cleared around descenders where they cross the underline. Automatic matches the underline’s weight, so the space grows with the font.",
                         control: stepper(
                             bounds("underline", "skip_ink_pad"),
                             get: { settingDouble(.UnderlineSkipInkPad) },
                             set: { app?.settingsSetUnderlineSkipInkPad($0) }
-                        )
+                        ),
+                        presentation: .automaticNumber(.init(automaticLabel: "Automatic", automaticValue: -1, customValue: 1))
                     ),
                 ]
             ),

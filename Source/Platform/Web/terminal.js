@@ -14,7 +14,7 @@
 import createModule from './ubiquitty.js';
 import { loadTerminalFonts, prepareFont } from './fonts.js';
 import { RichTextRenderer } from './rich-text.js';
-import { WebGLRenderer, assertInstanceStrides } from './webgl.js';
+import { WebGLRenderer, assertInstanceStrides, DECORATION_INSTANCE_STRIDE } from './webgl.js';
 import { placePicture as placeTerminalPicture, viewportPoint } from './picture.js';
 import { renderOutlineRows } from './outline.js';
 
@@ -1566,7 +1566,7 @@ async function main(module) {
     renderer.drawFrame({
       cellBytes: module.HEAPU8.subarray(cellBase, cellBase + count * 64),
       cellCount: count,
-      decorationBytes: decorationCount > 0 ? module.HEAPU8.subarray(decorationBase, decorationBase + decorationCount * 160) : null,
+      decorationBytes: decorationCount > 0 ? module.HEAPU8.subarray(decorationBase, decorationBase + decorationCount * DECORATION_INSTANCE_STRIDE) : null,
       decorationCount,
       overlayBytes: overlayCount > 0 ? module.HEAPU8.subarray(overlayBase, overlayBase + overlayCount * 112) : null,
       overlayCount,

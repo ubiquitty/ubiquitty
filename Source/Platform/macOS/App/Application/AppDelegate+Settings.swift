@@ -462,9 +462,18 @@ extension UBAppDelegate {
 
     func settingsSetUnderlineSkipInk(_ isOn: Bool) { setSetting(.UnderlineSkipInk, bool: isOn) }
     func settingsSetUnderlineFollowsInk(_ isOn: Bool) { setSetting(.UnderlineFollowsInk, bool: isOn) }
+    /// 0 compact, 1 medium, 2 wide.
+    func settingsSetCurlyUnderlineShape(_ shape: Int) { setSetting(.UnderlineCurly, termIndex: shape) }
     func settingsSetBrailleGrid(_ isOn: Bool) { setSetting(.FontBrailleGrid, bool: isOn) }
 
+    /// A negative clearance is automatic, the underline's own weight, which
+    /// the file states by leaving the key out; a number is points, clamped to
+    /// the stepper's range, and 0 keeps no clearance.
     func settingsSetUnderlineSkipInkPad(_ points: Double) {
+        guard points >= 0 else {
+            removeSetting(.UnderlineSkipInkPad)
+            return
+        }
         setSetting(.UnderlineSkipInkPad, double: Ubiquitty.Preferences.Schema.clampToRange(points, "underline", "skip_ink_pad"))
     }
 

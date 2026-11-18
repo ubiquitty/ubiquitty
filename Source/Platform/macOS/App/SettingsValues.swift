@@ -144,6 +144,20 @@ func setSetting(_ key: PreferencesKey, termIndex: Int) -> Bool {
     return setSetting(key, text: tokens[termIndex])
 }
 
+/// Removes one preference from the document, so it reads as its default.
+///
+/// For a setting whose default is a behavior rather than a number a person
+/// could type, such as an automatic clearance: leaving the key out is how
+/// the file states it.
+///
+/// - Parameter key: The preference.
+/// - Returns: Whether the configuration took the removal.
+@discardableResult
+func removeSetting(_ key: PreferencesKey) -> Bool {
+    let descriptor = Ubiquitty.Preferences.descriptorFor(key).pointee
+    return removeSectionSetting(String(cString: descriptor.section), String(cString: descriptor.key))
+}
+
 /// A string as a TOML basic-string literal.
 func tomlQuoted(_ text: String) -> std.string {
     text.withCString { Ubiquitty.Preferences.tomlString(std.string_view($0)) }
@@ -161,7 +175,8 @@ func setSectionSetting(_ section: String, _ key: String, toml: std.string) -> Bo
     Ubiquitty.Preferences.configureOwnSectionKey(std.string(section), std.string(key), toml).value != nil
 }
 
-/// Removes one entry of a table no `Key` names.
+/// Removes one entry by its section and name: an entry of a table no `Key`
+/// names, or a preference ``removeSetting(_:)`` has looked up.
 ///
 /// - Returns: Whether the configuration took the removal.
 @discardableResult

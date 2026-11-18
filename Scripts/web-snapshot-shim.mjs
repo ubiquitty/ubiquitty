@@ -143,7 +143,7 @@ const applicable = new Set([
   // are listed because this set is "keys that reach the render", not "keys this
   // file threads by hand" — and the four that Core now answers are the first
   // members of the first kind.
-  'underline.thickness', 'underline.offset', 'underline.skip_ink', 'underline.skip_ink_pad',
+  'underline.thickness', 'underline.offset', 'underline.skip_ink', 'underline.skip_ink_pad', 'underline.curly',
   'underline.links', 'underline.link_style', 'underline.link_style_per_kind',
   'font.braille_grid', 'font.braille_style', 'selection.style',
   'appearance.shade_blocks',

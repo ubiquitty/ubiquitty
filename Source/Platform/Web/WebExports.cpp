@@ -26,6 +26,7 @@
 #include "Core/Preferences/EffectiveValue.h"
 #include "Core/Preferences/Schema.h"
 #include "Core/Preferences/SnapshotConfigurationFlags.h"
+#include "Core/Preferences/Vocabulary.h"
 #include "Core/Protocol/Sync/NativeAttachment.h"
 #include "Core/Protocol/Sync/WireVersion.h"
 #include "Core/Runtime/SessionListWords.h"
@@ -212,6 +213,7 @@ constexpr Ubiquitty::Preferences::Key webRenderingKeys[] = {
     Ubiquitty::Preferences::Key::UnderlineSkipInk,
     Ubiquitty::Preferences::Key::UnderlineFollowsInk,
     Ubiquitty::Preferences::Key::UnderlineSkipInkPad,
+    Ubiquitty::Preferences::Key::UnderlineCurly,
     Ubiquitty::Preferences::Key::UnderlineLinks,
 };
 
@@ -229,6 +231,26 @@ Ubiquitty::Codec::JSON::Value preferenceJSON(const Ubiquitty::Preferences::Value
     default:
         return Value::string(value.text);
     }
+}
+
+/// Whether a number lies outside the range a person picks from and is the
+/// key's own default: an automatic value, such as an unset skip-ink
+/// clearance, which a reset writes back as the sentinel it reads as.
+///
+/// - Parameters:
+///   - key: The preference.
+///   - range: Its schema range.
+///   - number: The number the page sent.
+/// - Returns: Whether the number is that out-of-range default.
+bool isAutomaticDefault(Ubiquitty::Preferences::Key key, const Ubiquitty::Preferences::Schema::NumericRange& range, double number)
+{
+    if (number >= range.minimum && number <= range.maximum)
+        return false;
+    const std::optional<Ubiquitty::Preferences::Value> fallback = Ubiquitty::Preferences::effectiveValue(key, {});
+    if (!fallback)
+        return false;
+    const double automatic = fallback->kind == Ubiquitty::Preferences::SerializeKind::Int ? static_cast<double>(fallback->integer) : fallback->number;
+    return number == automatic;
 }
 }
 
@@ -727,9 +749,12 @@ UBIQUITTY_WEB_EXPORT int ubiquittyWebSetRenderingPreferences(const char* json)
             value.boolean = raw.asBool();
         else if (value.kind == Preferences::SerializeKind::String && raw.isString() && raw.asString().size() <= 256 && raw.asString().find_first_of("\r\n") == std::string::npos)
             value.text = raw.asString();
+        // A closed vocabulary takes only its own canonical tokens.
+        else if (value.kind == Preferences::SerializeKind::EnumToken && raw.isString() && Preferences::vocabularyIndexOf(*key, raw.asString().c_str()) >= 0)
+            value.text = raw.asString();
         else if ((value.kind == Preferences::SerializeKind::Double || value.kind == Preferences::SerializeKind::Int) && raw.isNumber() && std::isfinite(raw.asNumber())) {
             const auto* range = Preferences::Schema::rangeFor(descriptor->section, descriptor->key);
-            if (!range || raw.asNumber() < range->minimum || raw.asNumber() > range->maximum)
+            if (!range || ((raw.asNumber() < range->minimum || raw.asNumber() > range->maximum) && !isAutomaticDefault(*key, *range, raw.asNumber())))
                 return 0;
             value.number = raw.asNumber();
             value.integer = static_cast<long long>(value.number);
@@ -772,6 +797,19 @@ UBIQUITTY_WEB_EXPORT const char* ubiquittyWebSettingsCatalogJSON()
             entry.set("max", Value::number(range->maximum));
             entry.set("step", Value::number(range->step));
             entry.set("unit", Value::string(range->unit));
+        }
+        // A closed vocabulary's terms, so the page offers the tokens the parser
+        // accepts under the labels every other arm shows.
+        const auto terms = Ubiquitty::Preferences::vocabularyFor(key);
+        if (!terms.empty()) {
+            Value options = Value::array();
+            for (const auto& term : terms) {
+                Value option = Value::object();
+                option.set("token", Value::string(term.token));
+                option.set("label", Value::string(term.label));
+                options.push(std::move(option));
+            }
+            entry.set("options", std::move(options));
         }
         rendering.push(std::move(entry));
     }

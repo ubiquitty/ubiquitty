@@ -11,14 +11,16 @@ The rule is where the second render differs from the third. The cursor is
 hidden in all three: it is solid like ink, and no rule taps it. The first
 render says what the arm did.
 
-The cut's halo is the setting's skip_ink_pad across and half of it upward,
-each less a pixel for the soft edge of the disc. Two kinds of mismatch are
-reported per case and arm:
-  crossing  a rule pixel stands with solid ink inside its halo: ink at or
-            above it, in its own line (ink below the band is the next
-            line's, which the rule never taps);
-  gap       a rule column is dropped with no ink, faint or solid, within the
-            pad and a pixel of it.
+The cut is Core's contact rule (Core/Rendering/SkipInk.h): a rule pixel is cut
+where solid ink touches it — in its own row or the row beside it — within the
+setting's skip_ink_pad across, and each row of the rule is judged on its own.
+Ink with background between it and the rule, the bowl of a p above the line,
+leaves the rule whole. Two kinds of mismatch are reported per case and arm:
+  crossing  a rule pixel stands with solid ink touching it within the pad,
+            in its own line (ink below the band is the next line's, which
+            the rule never taps);
+  gap       a rule column is dropped with no ink, faint or solid, touching
+            the band within the pad and a pixel of it.
 
 A table of every case with an underline, per arm, is printed; the exit status
 is the number of rows with a mismatch, capped at 1.
@@ -159,25 +161,25 @@ def measure(asIs, whole, inkOnly, width, height, padInPixels, skipsInk=True):
                 key = bytes(pixel(inkOnly, x, row))
                 counts[key] = counts.get(key, 0) + 1
         ground = max(counts, key=counts.get)
-        # The cut's halo, less a pixel for the edge of its disc: the pad
-        # across, half of it upward. Ink below the band belongs to the next
-        # line, whose glyphs the rule never taps. A rule pixel drawn with solid
-        # ink inside that halo crosses it; faint ink (an antialiased fringe)
-        # within the pad and a pixel excuses a gap.
-        reachAcross = max(padInPixels - 1.0, 0.0)
-        reachUp = max(math.ceil(padInPixels * 0.5) - 1, 0)
-        solid = {(x, row) for row in range(max(top - reachUp, 0), bottom) for x in range(width)
+        # Core's contact rule: solid ink (half coverage or more) in a rule
+        # pixel's own row or the row beside it, with the pixel's centre closer
+        # to the ink's edge than the pad, cuts the pixel; a whole ink pixel's
+        # edge is half a pixel from its centre. Ink below the band belongs to the
+        # next line, whose glyphs the rule never taps, so the row under the
+        # band does not count against a pixel standing; faint ink (an
+        # antialiased fringe) touching the band within the pad and a pixel
+        # excuses a gap.
+        across = math.ceil(padInPixels + 0.5) - 1
+        solid = {(x, row) for row in range(max(top - 1, 0), bottom) for x in range(width)
                  if differs(pixel(inkOnly, x, row), ground, 128)}
         faintInk = set()
         for x in range(width):
-            for row in range(max(top - max(reachUp, 1), 0), min(bottom + 1, height)):
+            for row in range(max(top - 1, 0), min(bottom + 1, height)):
                 if differs(pixel(inkOnly, x, row), ground, 40):
                     faintInk.add(x)
 
         def crossesInk(x, row):
-            for inkRow in range(max(row - reachUp, 0), row + 1):
-                rise = (row - inkRow) / reachUp if reachUp else 0.0
-                across = int(reachAcross * math.sqrt(max(1.0 - rise * rise, 0.0)))
+            for inkRow in range(max(row - 1, 0), min(row + 1, bottom - 1) + 1):
                 if any((inkX, inkRow) in solid for inkX in range(x - across, x + across + 1)):
                     return True
             return False
@@ -185,8 +187,8 @@ def measure(asIs, whole, inkOnly, width, height, padInPixels, skipsInk=True):
         for x in ruleColumns:
             columns += 1
             absent = not any(differs(pixel(asIs, x, row), pixel(inkOnly, x, row), 24) for row in range(top, bottom))
-            # Drawn is nearer the whole rule than the ink alone: a pixel the
-            # halo's soft edge half cut is not a rule standing on ink.
+            # Drawn is nearer the whole rule than the ink alone: a pixel an
+            # antialiased glyph edge half covers is not a rule standing on ink.
             crossed = any(rule[row][x] and distance(pixel(asIs, x, row), pixel(inkOnly, x, row))
                           > distance(pixel(asIs, x, row), pixel(whole, x, row)) and crossesInk(x, row)
                           for row in range(top, bottom))
@@ -231,10 +233,20 @@ def selfTest():
     striped = frame({p for p in thickRule if abs(p[0] - 9) > 2 or p[1] == 3}, ink)
     if measure(striped, thickWhole, inkOnly, width, height, 4)[1] == 0:
         failures.append("a rule row left standing against ink inside a cut measured clean")
+    # A bowl ending two rows above the rule, background between: the rule
+    # stands whole beneath it, and a cut there is a stray gap.
+    bowl = {(x, row) for x in range(7, 12) for row in range(0, 3)}
+    bowlWhole = frame(ruleRow, bowl)
+    bowlInk = frame(set(), bowl)
+    if measure(bowlWhole, bowlWhole, bowlInk, width, height, 1)[1:] != (0, 0):
+        failures.append("a rule left whole under a bowl that does not touch it measured as a mismatch")
+    bowlCut = frame({p for p in ruleRow if not 7 <= p[0] <= 11}, bowl)
+    if measure(bowlCut, bowlWhole, bowlInk, width, height, 1)[2] == 0:
+        failures.append("a rule cut under a bowl that does not touch it measured clean")
     if failures:
         print(f"measure-skip-ink: self-test FAILED — {len(failures)} finding(s): {'; '.join(failures)}")
         return 1
-    print("measure-skip-ink: self-test ok (a correct skip is clean; a crossing, a stray gap and a row left standing are found)")
+    print("measure-skip-ink: self-test ok (a correct skip is clean; a crossing, a stray gap, a row left standing and a cut under a bowl that does not touch the rule are found)")
     return 0
 
 
@@ -267,7 +279,7 @@ def main():
             tier = "unifont" if "unifont" in regression.identifier else "native"
             base = run.json.loads(run.json.dumps({k: v for k, v in case.items() if k not in ("config",)}))
             settings = base.get("settings") or {}
-            pad = float((settings.get("underline") or {}).get("skip_ink_pad", 1.75))
+            pad = float((settings.get("underline") or {}).get("skip_ink_pad", 1.0))
             skipsInk = bool((settings.get("underline") or {}).get("skip_ink", True))
             fontText = (run.unifont_font_text() if tier == "unifont"
                         else run.native_profile_text(base["native"]))

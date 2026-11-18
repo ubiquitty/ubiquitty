@@ -1,0 +1,122 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Underline GPU parity</title>
+<style>
+body { background: #222; color: white; font: 14px monospace; }
+#verdict { max-height: 8rem; overflow: auto; white-space: pre-wrap; }
+figure { display: inline-block; margin: 8px; vertical-align: top; }
+canvas { image-rendering: pixelated; }
+</style>
+<pre id="verdict">running</pre>
+<script type="module">
+import { WebGLRenderer, DECORATION_INSTANCE_STRIDE } from './webgl.js';
+import createModule from './ubiquitty.js';
+
+// Core decides where glyph ink cuts an underline and sends the pieces left
+// standing (Core/Rendering/SkipInk.h); the GL decoration pass draws them with
+// no glyph to sample. Drawn here and by the CPU raster from one build, the two
+// must cut in the same places: a piece drawn from the wrong offset, a pattern
+// laid out from the piece instead of its rule, or a cut the pass reopens moves
+// a rule pixel onto background, an error the size of the rule's contrast. The
+// tolerance only absorbs blend rounding on a pattern's antialiased edge, where
+// the CPU mixes integer bytes at the bitmap tier's 51 levels and GL blends in
+// floating point.
+try {
+  const module = await createModule();
+  const call = (name, result = 'number', parameters = []) => module.cwrap(`ubiquittyWeb${name}`, result, parameters);
+  const optional = name => module[`_ubiquittyWeb${name}`]?.() || 0;
+  const text = 'gjpqy #漢 ok';
+  const patterns = [
+    ['single', `\x1b[4:1m${text}\x1b[0m`],
+    ['double', `\x1b[4:2m${text}\x1b[0m`],
+    ['curly', `\x1b[4:3m${text}\x1b[0m`],
+    ['dotted', `\x1b[4:4m${text}\x1b[0m`],
+    ['dashed', `\x1b[4:5m${text}\x1b[0m`],
+    ['colored', `\x1b[4:1;58;2;255;64;64m${text}\x1b[0m`],
+  ];
+  const tolerance = 8;
+  const results = [];
+  for (const family of ['', 'monospace']) {
+    module.ubiquittyFontFamily = family;
+    for (const fontSize of [13, 20]) {
+      for (const [name, pattern] of patterns) {
+        call('Create', null, ['number', 'number', 'number'])(3, 20, 1);
+        call('SetFontSize', null, ['number'])(fontSize);
+        call('SetFocus', null, ['number'])(1);
+        const feed = '\x1b[?25l\x1b]10;#ffffff\x07\x1b]11;#000000\x07\x1b[37;40m\r\n ' + pattern;
+        call('Feed', null, ['string', 'number'])(feed, new TextEncoder().encode(feed).length);
+        const base = call('Render')();
+        const width = call('ImageWidth')(), height = call('ImageHeight')();
+        const cpu = module.HEAPU8.slice(base, base + width * height * 4);
+        if (!call('BuildFrame')()) throw new Error('Frame withheld');
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.title = `${family || 'bitmap'} ${fontSize} ${name}`;
+        const figure = document.createElement('figure');
+        const label = document.createElement('figcaption');
+        label.textContent = canvas.title;
+        figure.append(label, canvas);
+        document.body.appendChild(figure);
+        const renderer = new WebGLRenderer(canvas);
+        const gl = canvas.getContext('webgl2');
+        const upload = (prefix, method) => {
+          const pointer = call(`${prefix}AtlasPixels`)();
+          const width = call(`${prefix}AtlasWidth`)(), height = call(`${prefix}AtlasHeight`)();
+          if (pointer && width && height)
+            renderer[method](module.HEAPU8.subarray(pointer, pointer + width * height), width, height);
+        };
+        upload('', 'uploadAtlas'); upload('Wide', 'uploadWideAtlas');
+        const bytes = (name, count, stride) => {
+          if (!count) return null;
+          const pointer = call(name)();
+          return module.HEAPU8.subarray(pointer, pointer + count * stride);
+        };
+        const cellCount = call('CellInstanceCount')(), wideGlyphCount = call('WideGlyphInstanceCount')();
+        const overlayCount = call('OverlayInstanceCount')(), boxFillCount = optional('BoxFillInstanceCount');
+        const decorationCount = call('DecorationInstanceCount')();
+        renderer.drawFrame({
+          cellBytes: bytes('CellInstances', cellCount, 64), cellCount,
+          wideGlyphBytes: bytes('WideGlyphInstances', wideGlyphCount, 64), wideGlyphCount,
+          overlayBytes: bytes('OverlayInstances', overlayCount, 112), overlayCount,
+          boxFillBytes: bytes('BoxFillInstances', boxFillCount, 112), boxFillCount,
+          decorationBytes: bytes('DecorationInstances', decorationCount, DECORATION_INSTANCE_STRIDE), decorationCount,
+          isBitmapFace: Boolean(optional('FrameUsesBitmapFace')),
+          colorGlyphCount: 0, proportionalGlyphCount: 0, proportionalStripCount: 0, ligatureGlyphCount: 0,
+          cursorTier: {
+            cellCount: call('CursorTierCellCount')(),
+            boxFillCount: optional('CursorTierBoxFillCount'),
+            wideGlyphCount: call('CursorTierWideGlyphCount')(),
+            decorationCount: call('CursorTierDecorationCount')(),
+          },
+          cellWidth: call('CellWidth')(), cellHeight: call('CellHeight')(), width, height,
+        });
+        const gpu = new Uint8Array(cpu.length);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, gpu);
+        let differing = 0, maximumError = 0, first = null;
+        for (let y = 0; y < height; ++y) {
+          for (let x = 0; x < width; ++x) {
+            const a = (y * width + x) * 4, b = ((height - y - 1) * width + x) * 4;
+            let error = 0;
+            for (let channel = 0; channel < 4; ++channel)
+              error = Math.max(error, Math.abs(cpu[a + channel] - gpu[b + channel]));
+            maximumError = Math.max(maximumError, error);
+            if (error > tolerance) {
+              ++differing;
+              first ??= [x, y];
+            }
+          }
+        }
+        const error = gl.getError();
+        results.push({ family, fontSize, name, decorationCount, differing, maximumError, first, error });
+      }
+    }
+  }
+  document.getElementById('verdict').textContent = JSON.stringify({
+    verdict: results.length === 24 && results.every(result => result.decorationCount > 0 && result.differing === 0 && result.error === 0) ? 'MATCH' : 'DIFFER', results,
+  });
+} catch (error) {
+  document.getElementById('verdict').textContent = `ERROR ${String(error).replaceAll('\n', ' ')}`;
+}
+</script>
