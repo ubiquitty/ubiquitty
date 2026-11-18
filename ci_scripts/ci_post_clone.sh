@@ -78,7 +78,14 @@ else
     git fetch --quiet --tags \
         || fail "could not fetch tags; without them the build reads its version from VERSION"
 fi
-say "version $("$root/Scripts/build-version.sh" version) ($("$root/Scripts/build-version.sh" identity))"
+# build-version.sh is Core's, in the submodule this checkout carries, and reads
+# this tree's tags through UBQ_VERSION_TREE. Each answer is assigned before it
+# is printed, so a failure stops the script instead of printing an empty version.
+# shellcheck source=Scripts/library-scripts.sh
+. "$root/Scripts/library-scripts.sh"
+version="$(UBQ_VERSION_TREE="$root" "$CORE_ROOT/Scripts/build-version.sh" version)"
+identity="$(UBQ_VERSION_TREE="$root" "$CORE_ROOT/Scripts/build-version.sh" identity)"
+say "version $version ($identity)"
 
 export UBQ_BUILD_ROOT="$root/build/xcode-cloud"
 generation=(--ios-only)
