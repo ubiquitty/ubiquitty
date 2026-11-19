@@ -14,8 +14,9 @@ using Presentation::ChromeGround;
 namespace {
 
 constexpr const char* styleSheetKey = "ubiquitty-chrome-style-sheet";
-// The status mark's size in the header, matching the tab bar's indicator.
-constexpr int statusPixelSize = 12;
+// The status mark's size in the header: a header bar's symbolic size, beside
+// New Tab's. A tab's indicator is smaller, inside the tab's smaller label.
+constexpr int statusPixelSize = 16;
 
 // The chrome's few rules of its own; every colour is libadwaita's.
 constexpr const char* styleSheet = R"css(
@@ -30,8 +31,8 @@ window.csd {
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
 }
-/* A tab's status indicator, at the size of the header's mark: the tab's
-   label is the larger signal, the indicator a glance beside it. */
+/* A tab's status indicator, below the header's: the tab's label is the
+   larger signal, the indicator a glance beside it. */
 tabbar tab .tab-indicator {
     min-width: 20px;
     min-height: 20px;
