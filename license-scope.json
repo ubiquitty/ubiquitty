@@ -324,6 +324,7 @@
         "Tests/Snapshots/approved.tsv",
         "Tests/Snapshots/exempt-linux.txt",
         "Tests/Snapshots/exempt-web.txt",
+        "Tests/Snapshots/known-failing-ios.txt",
         "Tests/Snapshots/known-failing-linux.txt",
         "Tests/Snapshots/known-failing-web.txt",
         "Tests/selection-bounds-callers.txt",
