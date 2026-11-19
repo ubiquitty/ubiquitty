@@ -167,7 +167,7 @@ enum SessionLayout {
     ///   - groups: The windows the quit kept.
     ///   - reason: Why the quit kept them. An update relaunch's is recorded
     ///     with the layout, which is what lets the launch the update opens
-    ///     restore it with session persistence off (`takeLayoutForLaunch`).
+    ///     restore it with session persistence off (`layoutForLaunch`).
     static func saveCurrentLayout(_ groups: [LayoutGroup], keptFor reason: Ubiquitty.Session.QuitReason = .Ordinary) {
         var kept = allSessions().filter { $0.identifier != currentIdentifier }
         if !groups.isEmpty {
@@ -186,38 +186,45 @@ enum SessionLayout {
         allSessions().first { $0.identifier == currentIdentifier }?.groups
     }
 
-    /// The reserved current session's groups if this launch restores them,
-    /// taking them from the store as it does.
+    /// Reads this launch's arrangement.
     ///
-    /// Whether a launch restores them is Core's, asked of why the quit kept
-    /// them (`Session::isSessionKeptByQuit`): every launch with session
-    /// persistence on, and with it off only an update relaunch's.
-    ///
-    /// The update relaunch's mark is one-shot, and this is the launch that
-    /// spends it. It records one quit's promise, that the updater kept these
-    /// sessions for the copy it opens next, and that launch keeps the promise
-    /// by restoring them. Left in place, the mark would reopen the same
-    /// arrangement at every launch after it, with persistence off, long after
-    /// the person had closed those windows and ended their sessions. So the
-    /// store gives the mark up before anything is restored, and a launch that
-    /// fails part way does not repeat the restore at the next. With
-    /// persistence off the arrangement goes with the mark: no quit since has
-    /// replaced it, and a launch after persistence is turned on would reopen
-    /// it. With persistence on it stays, as every quit leaves it.
+    /// Core restores the arrangement on every launch with persistence on,
+    /// and after an update with persistence off. The update mark remains
+    /// until the app has restored every tab and split.
     ///
     /// - Parameter values: The preferences in effect.
-    /// - Returns: The groups to restore, or nil when this launch restores
-    ///   none.
-    static func takeLayoutForLaunch(_ values: Ubiquitty.Preferences.Values) -> [LayoutGroup]? {
-        let sessions = allSessions()
-        guard let current = sessions.first(where: { $0.identifier == currentIdentifier }) else { return nil }
-        let isRestored = Ubiquitty.Session.isSessionKeptByQuit(values, current.keptFor)
-        if current.keptFor == .UpdateRelaunch {
-            current.keptFor = .Ordinary
-            let isKeptByPersistence = Ubiquitty.Session.isSessionKeptByQuit(values, .Ordinary)
-            try? save(isKeptByPersistence ? sessions : sessions.filter { $0 !== current })
+    /// - Returns: The arrangement to restore, or nil when this launch restores none.
+    static func layoutForLaunch(_ values: Ubiquitty.Preferences.Values) -> LayoutSession? {
+        guard let current = allSessions().first(where: { $0.identifier == currentIdentifier }),
+            Ubiquitty.Session.isSessionKeptByQuit(values, current.keptFor)
+        else { return nil }
+        return current
+    }
+
+    /// A normal quit must keep an update's retryable arrangement even if
+    /// ordinary session persistence is enabled.
+    static func saveQuitLayout(_ groups: [LayoutGroup], keptFor reason: Ubiquitty.Session.QuitReason) {
+        if reason == .Ordinary, allSessions().contains(where: { $0.identifier == currentIdentifier && $0.keptFor == .UpdateRelaunch }) {
+            return
         }
-        return isRestored ? current.groups : nil
+        saveCurrentLayout(groups, keptFor: reason)
+    }
+
+    /// Spends an update's one-shot mark only after a complete restore.
+    ///
+    /// A newer capture can replace the record while the app waits to attach.
+    static func finishLaunchRestore(_ restored: LayoutSession, succeeded: Bool, values: Ubiquitty.Preferences.Values) {
+        guard succeeded, restored.keptFor == .UpdateRelaunch else { return }
+        let sessions = allSessions()
+        guard let current = sessions.first(where: { $0.identifier == currentIdentifier }), current.keptFor == .UpdateRelaunch,
+            NSArray(array: jsonArray(of: current.groups)).isEqual(to: jsonArray(of: restored.groups))
+        else { return }
+        if Ubiquitty.Session.isSessionKeptByQuit(values, .Ordinary) {
+            current.keptFor = .Ordinary
+            try? save(sessions)
+        } else {
+            try? save(sessions.filter { $0 !== current })
+        }
     }
 
     /// Every persisted session except the reserved current one: the workspaces the

@@ -510,17 +510,20 @@ final class TerminalWindows: NSObject {
     /// The arrangement this launch restores, opening.
     ///
     /// Core decides whether a launch restores the arrangement the last quit
-    /// kept (`Session::isSessionKeptByQuit`, asked of the reason it was kept
-    /// for), and the store gives it up once (`SessionLayout.takeLayoutForLaunch`).
+    /// kept. The store spends the update mark only after every part restores.
     ///
     /// - Returns: The restore in flight, answering whether every tab opened,
     ///   or nil when this launch restores nothing.
     @discardableResult
     static func restoreLaunchArrangement() -> Task<Bool, Never>? {
-        guard let groups = SessionLayout.takeLayoutForLaunch(Ubiquitty.Preferences.values().pointee), !groups.isEmpty else {
+        guard let layout = SessionLayout.layoutForLaunch(Ubiquitty.Preferences.values().pointee), !layout.groups.isEmpty else {
             return nil
         }
-        return Task { @MainActor in await restoreArrangementGroups(groups) }
+        return Task { @MainActor in
+            let restored = await restoreArrangementGroups(layout.groups)
+            SessionLayout.finishLaunchRestore(layout, succeeded: restored, values: Ubiquitty.Preferences.values().pointee)
+            return restored
+        }
     }
 
     /// Opens each available tab before applying its group's device-local placement.
@@ -540,10 +543,12 @@ final class TerminalWindows: NSObject {
             var windows: [NSWindow] = []
             var selectedIndex = 0
             for (index, tab) in group.tabs.enumerated() {
-                guard !Task.isCancelled, let window = await openRestoredTab(tab, existingControllers: existingControllers) else {
+                guard !Task.isCancelled, let result = await openRestoredTab(tab, existingControllers: existingControllers) else {
                     didRestoreAll = false
                     continue
                 }
+                let window = result.window
+                didRestoreAll = didRestoreAll && result.isComplete
                 let windowIndex = windows.firstIndex(where: { $0 === window }) ?? windows.count
                 if index == group.activeTab { selectedIndex = windowIndex }
                 if windowIndex == windows.count { windows.append(window) }
@@ -589,8 +594,11 @@ final class TerminalWindows: NSObject {
     /// - Parameters:
     ///   - tab: The saved tab and its presentation.
     ///   - existingControllers: The controllers that predate the whole restore operation.
-    /// - Returns: The restored window, or nil when its reference cannot be opened.
-    private static func openRestoredTab(_ tab: LayoutTab, existingControllers: Set<ObjectIdentifier>) async -> NSWindow? {
+    /// - Returns: The restored window and whether every pane opened. Nil when the reference cannot be opened.
+    private static func openRestoredTab(
+        _ tab: LayoutTab,
+        existingControllers: Set<ObjectIdentifier>
+    ) async -> (window: NSWindow, isComplete: Bool)? {
         let presentationText = tab.paneLayout ?? ""
         var presentation = SavedTerminalPresentation.decoded(presentationText)
         if presentationText.hasPrefix(SavedTerminalPresentation.prefix), presentation == nil {
@@ -648,6 +656,10 @@ final class TerminalWindows: NSObject {
         let plan = Ubiquitty.Session.planRestoredTab(stored, quotedBinary)
 
         let openBefore = existingControllers
+        let hostLabel = String(plan.hostLabel)
+        let isUpdateAdoption =
+            plan.action == .Reattach && hostLabel == TerminalWindowController.thisMacHostKey
+            && !stored.socketName.empty() && tab.reclaimSessionIDsAfterUpdate.contains(plan.sessionID)
         let opened: TerminalWindowController?
         if let tmux = presentation?.tmuxWindow {
             opened = await openRestoredTmuxWindow(tmux)
@@ -656,11 +668,15 @@ final class TerminalWindows: NSObject {
             // A tab re-homed to this Mac's daemon goes back under the key the
             // This Mac row dials, so it is placed on this machine as it was
             // before the restart rather than on a remote host called "local".
-            let hostLabel = String(plan.hostLabel)
             // A handed-over split is regrouped over the connection the window
             // attaches through, which the daemon admits only from a local
             // stream: the bridge, not the QUIC carrier.
             let isHandedOverSplit = presentation?.handedOverSplit != nil
+            var workspaceID = presentation?.liveWorkspace?.workspaceID ?? 0
+            // Older update captures wrote no workspace ID for newly adopted
+            // local panes. Each starts in its own workspace with the same ID
+            // as its session. Keep the saved daemon instance and socket pin.
+            if workspaceID == 0, isUpdateAdoption { workspaceID = plan.sessionID }
             opened = TerminalWindowController.spawnRemoteWindow(
                 shellCommand: String(plan.bridgeCommand),
                 hostLabel: hostLabel,
@@ -670,8 +686,9 @@ final class TerminalWindows: NSObject {
                 deployBinaries: [:],
                 reattachSessionID: plan.sessionID,
                 workspaceName: "",
+                reattachPolicy: isUpdateAdoption ? .attachOnly : .attachOrCreate,
                 hostKey: hostLabel == TerminalWindowController.thisMacHostKey ? hostLabel : "",
-                workspaceID: presentation?.liveWorkspace?.workspaceID ?? 0,
+                workspaceID: workspaceID,
                 daemonSocketName: String(stored.socketName),
                 daemonInstanceID: presentation?.liveWorkspace?.daemonInstanceID ?? 0
             )
@@ -708,19 +725,22 @@ final class TerminalWindows: NSObject {
             }
         }
         dress(opened)
-        if plan.action == .Reattach, !(await isRestoredWindowReady(opened)) {
+        let expectedSession = isUpdateAdoption ? plan.sessionID : 0
+        if plan.action == .Reattach, !(await isRestoredWindowReady(opened, expectedSession: expectedSession)) {
             if !openBefore.contains(ObjectIdentifier(opened)) { opened.window?.close() }
             presentUnavailableSession(
                 title: "This hosted session couldn’t be restored.",
-                detail: "The saved session on \(String(plan.hostLabel)) is unavailable."
+                detail: "The saved session on \(hostLabel) is unavailable."
             )
             return nil
         }
+        var isComplete = true
         if plan.action == .Reattach, let split = presentation?.handedOverSplit {
             if let whole = await regroupHandedOverSplit(split, in: opened) {
                 if whole !== opened { dress(whole) }
                 opened = whole
             } else {
+                isComplete = false
                 // The tab keeps its place in its window with the pane it has.
                 let alert = NSAlert()
                 alert.messageText = "This split couldn’t be restored whole."
@@ -732,7 +752,8 @@ final class TerminalWindows: NSObject {
         if let tmux = presentation?.tmuxWindow, !openBefore.contains(ObjectIdentifier(opened)) {
             opened.focusRestoredHostedPane(tmux.focusedPaneID)
         }
-        return opened.window
+        guard let window = opened.window else { return nil }
+        return (window, isComplete)
     }
 
     /// Puts a split a quit handed over back together on the local daemon,
@@ -757,15 +778,19 @@ final class TerminalWindows: NSObject {
         _ split: SavedTerminalPresentation.HandedOverSplit,
         in controller: TerminalWindowController
     ) async -> TerminalWindowController? {
+        guard let surface = controller.remoteSurface else { return nil }
+        let daemonInstanceID = surface.drive.remoteDaemonInstanceID
+        guard daemonInstanceID != 0 else { return nil }
         let showingEveryPane = {
             TerminalWindowController.spawnedControllers.first { candidate in
                 !candidate.isWindowClosed
                     && Set(candidate.projectedSurfaces.map(\.remoteSessionID)).isSuperset(of: split.sessions)
-                    && candidate.projectedSurfaces.allSatisfy { $0.drive.remoteState == .Connected }
+                    && candidate.projectedSurfaces.allSatisfy {
+                        $0.drive.remoteState == .Connected && $0.drive.remoteDaemonInstanceID == daemonInstanceID
+                    }
             }
         }
         if let whole = showingEveryPane() { return whole }
-        guard let surface = controller.remoteSurface else { return nil }
         var request = Ubiquitty.Session.SharedWorkspace()
         guard Ubiquitty.Session.deserializeWorkspaceText(std.string(split.arrangement), &request.arrangement) else { return nil }
         for session in split.sessions {
@@ -791,13 +816,18 @@ final class TerminalWindows: NSObject {
 
     /// Waits for an actual connection before reporting a saved session as restored.
     ///
-    /// - Parameter controller: The window opening the saved reference.
+    /// - Parameters:
+    ///   - controller: The window opening the saved reference.
+    ///   - expectedSession: An adopted session that must appear in the window, or zero.
     /// - Returns: Whether the saved session became available before cancellation or timeout.
-    private static func isRestoredWindowReady(_ controller: TerminalWindowController) async -> Bool {
+    private static func isRestoredWindowReady(_ controller: TerminalWindowController, expectedSession: UInt32) async -> Bool {
         for _ in 0..<300 {
             if Task.isCancelled { return false }
             switch controller.arrangementReadiness {
-            case .ready: return true
+            case .ready:
+                if expectedSession == 0 || controller.projectedSurfaces.contains(where: { $0.remoteSessionID == expectedSession }) {
+                    return true
+                }
             case .unavailable: return false
             case .waiting: break
             }
@@ -1012,7 +1042,7 @@ final class TerminalWindows: NSObject {
             reattachCommittedLocalAdoptions()
             return cancelQuitForUnresolvedHandoff(present: present)
         }
-        if persistsSession { SessionLayout.saveCurrentLayout(groups, keptFor: reason) }
+        if persistsSession { SessionLayout.saveQuitLayout(groups, keptFor: reason) }
         // Each remote window stores its newest picture and tells its host it
         // is going, so the next launch resumes the attachment.
         RemoteSessionLifecycle.shared.suspendForTermination()

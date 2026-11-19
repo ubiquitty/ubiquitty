@@ -204,24 +204,34 @@ enum SessionLayoutStoreScenarios {
     private static func checkUpdateRelaunchMarkIsSpentOnce(_ t: UBUITestContext) {
         let saved = String(Ubiquitty.Preferences.liveDocument().pointee)
         defer { t.restoreConfiguration(saved) }
-        func launch(persistence isOn: Bool) -> [LayoutGroup]? {
+        func launch(persistence isOn: Bool) -> LayoutSession? {
             t.restoreConfiguration(saved)
             t.configureAppending("[experimental]\nsession_persistence = \(isOn)\n")
-            return SessionLayout.takeLayoutForLaunch(Ubiquitty.Preferences.values().pointee)
+            return SessionLayout.layoutForLaunch(Ubiquitty.Preferences.values().pointee)
+        }
+        func finish(_ layout: LayoutSession?, succeeded: Bool) {
+            if let layout {
+                SessionLayout.finishLaunchRestore(layout, succeeded: succeeded, values: Ubiquitty.Preferences.values().pointee)
+            }
         }
         let back = group(frame: NSRect(x: 40, y: 80, width: 900, height: 600), paneLayout: nil)
         let windowed = group(frame: NSRect(x: 60, y: 90, width: 700, height: 500), paneLayout: nil)
 
-        // Persistence off: only the launch after the update restores it, and
-        // it takes the arrangement with the mark.
+        // Even with persistence off, a partial restore and subsequent normal
+        // quit must leave the update's live references and arrangement intact.
         SessionLayout.saveCurrentLayout([back, windowed], keptFor: .UpdateRelaunch)
         t.expect(
             SessionLayout.allSessions().first?.keptFor == .UpdateRelaunch,
             desc: "the update relaunch's mark is stored with the arrangement"
         )
         let restored = launch(persistence: false)
-        t.expect(restored?.count ?? 0, equals: 2, desc: "the launch after the update restores both windows with persistence off")
-        t.expect(SessionLayout.currentLayout() == nil, desc: "with persistence off the launch takes the arrangement with the mark")
+        t.expect(restored?.groups.count ?? 0, equals: 2, desc: "the launch after the update can restore both windows with persistence off")
+        finish(restored, succeeded: false)
+        SessionLayout.saveQuitLayout([windowed], keptFor: .Ordinary)
+        let retry = launch(persistence: false)
+        t.expect(retry?.groups.count ?? 0, equals: 2, desc: "failure and a normal quit leave the full update arrangement retryable")
+        finish(retry, succeeded: true)
+        t.expect(SessionLayout.currentLayout() == nil, desc: "success spends the arrangement with the mark when persistence is off")
         t.expect(launch(persistence: false) == nil, desc: "the launch after that restores nothing")
 
         // An ordinary quit's arrangement is restored only with persistence
@@ -233,11 +243,19 @@ enum SessionLayoutStoreScenarios {
         // Persistence on: the mark goes, the arrangement stays, as every
         // persistent quit leaves it.
         SessionLayout.saveCurrentLayout([windowed], keptFor: .UpdateRelaunch)
-        t.expect(launch(persistence: true)?.count ?? 0, equals: 1, desc: "with persistence on the launch after the update restores it")
+        let persistent = launch(persistence: true)
+        t.expect(persistent?.groups.count ?? 0, equals: 1, desc: "with persistence on the launch after the update restores it")
+        finish(persistent, succeeded: true)
         t.expect(
             SessionLayout.allSessions().first?.keptFor == .Ordinary && SessionLayout.currentLayout()?.count == 1,
             desc: "and spends the mark, keeping the arrangement persistence keeps"
         )
         t.expect(launch(persistence: false) == nil, desc: "so a later launch with persistence off restores nothing")
+
+        SessionLayout.saveCurrentLayout([windowed], keptFor: .UpdateRelaunch)
+        let older = launch(persistence: false)
+        SessionLayout.saveCurrentLayout([back, windowed], keptFor: .UpdateRelaunch)
+        finish(older, succeeded: true)
+        t.expect(launch(persistence: false)?.groups.count ?? 0, equals: 2, desc: "completion cannot clear a newer capture")
     }
 }
