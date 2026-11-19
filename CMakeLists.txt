@@ -1758,6 +1758,10 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     target_link_libraries(ubiquitty-linux PRIVATE PkgConfig::GTK4 PkgConfig::PANGOCAIRO Vulkan::Vulkan
         PkgConfig::FREETYPE PkgConfig::FONTCONFIG PkgConfig::HARFBUZZ)
     target_link_options(ubiquitty-linux PRIVATE "LINKER:--wrap=sqrtf")
+    # GCC LTO loses the assembler's versioned alias when it inlines the wrapper.
+    # Keep this ABI boundary in its own object; the renderer still uses LTO.
+    set_source_files_properties(Source/Platform/Linux/LibmCompatibility.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-lto")
     # forkpty lives in libutil on Linux/glibc (PTYStream.cpp).
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(ubiquitty-linux PRIVATE util)
