@@ -6,6 +6,7 @@
 #include "Core/Preferences/Preferences.h"
 #include "Platform/Linux/GTK/GObjectPointer.h"
 #include "Platform/Linux/GTK/ProcessIconLoader.h"
+#include "Platform/Linux/GTK/StatusMarkView.h"
 #include "Platform/Linux/GTK/TabStrip.h"
 #include "Platform/Linux/GTK/WindowTitleView.h"
 #include "Platform/Linux/Presentation/ChromeContent.h"
@@ -23,8 +24,9 @@ namespace Ubiquitty::Linux::GTK {
 
 /// A terminal window's GNOME chrome, built from libadwaita as GNOME's own
 /// terminals build theirs: a raised top bar holding the header (new tab at the
-/// start, the two-line title, the primary menu and the window controls at the
-/// end), the tab bar, and the find bar, over the window's content.
+/// start, the two-line title, the focused program's status mark, the primary
+/// menu and the window controls at the end), the tab bar, and the find bar,
+/// over the window's content.
 ///
 /// Every control names a window action (`Presentation::ChromeActions`); the
 /// chrome holds no callback into the window that owns it.
@@ -105,6 +107,7 @@ private:
     GtkWidget* m_toasts = nullptr; // owned by m_root
     AdwToast* m_shownToast = nullptr; // weak: cleared when the toast goes
     WindowTitleView m_title;
+    StatusMarkView m_status;
     TabStrip m_tabs;
     Preferences::TitlebarStyle m_style = Preferences::TitlebarStyle::Native;
     std::uint32_t m_themeBackgroundRGB = Presentation::ChromeGround::lightHeaderRGB;

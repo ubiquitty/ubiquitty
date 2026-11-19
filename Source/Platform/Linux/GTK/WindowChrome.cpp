@@ -14,6 +14,8 @@ using Presentation::ChromeGround;
 namespace {
 
 constexpr const char* styleSheetKey = "ubiquitty-chrome-style-sheet";
+// A header icon's size, as libadwaita draws its buttons' symbolic icons.
+constexpr int statusPixelSize = 16;
 
 // The chrome's few rules of its own; every colour is libadwaita's.
 constexpr const char* styleSheet = R"css(
@@ -72,6 +74,7 @@ WindowChrome::WindowChrome(GtkWidget* content, GtkWidget* searchBar)
     , m_menuButton(gtk_menu_button_new())
     , m_toasts(adw_toast_overlay_new())
     , m_title(m_icons)
+    , m_status(statusPixelSize)
     , m_tabs(m_icons)
 {
     AdwToolbarView* toolbar = ADW_TOOLBAR_VIEW(m_root.get());
@@ -94,6 +97,10 @@ WindowChrome::WindowChrome(GtkWidget* content, GtkWidget* searchBar)
     if (GtkWidget* button = gtk_widget_get_first_child(m_menuButton))
         gtk_widget_set_focusable(button, FALSE);
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), m_menuButton);
+    // The focused program's status, at the header's end beside the menu; the
+    // title keeps what the program is and where.
+    gtk_widget_set_margin_end(m_status.widget(), 6);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), m_status.widget());
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), m_title.widget());
 
     adw_toolbar_view_add_top_bar(toolbar, header);
@@ -185,6 +192,7 @@ void WindowChrome::showTitle(const Presentation::WindowTitleContent& content, co
     m_shownContent = content;
     m_shownMarks = marks;
     m_title.show(content, marks, ground());
+    m_status.show(marks.shownSymbol());
 }
 
 void WindowChrome::showTabs(std::span<const Presentation::TabItem> tabs)

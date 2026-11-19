@@ -16,7 +16,6 @@ using Presentation::WindowTitleContent;
 namespace {
 
 constexpr int iconPixelSize = 16;
-constexpr int statusPixelSize = 12;
 
 GtkWidget* makeLabel(const char* styleClass, PangoEllipsizeMode ellipsize)
 {
@@ -40,13 +39,9 @@ void setText(GtkWidget* label, const std::string& text)
 WindowTitleView::WindowTitleView(ProcessIconLoader& icons)
     : m_icons(icons)
     , m_root(adoptSunk(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0)))
-    , m_status(statusPixelSize)
     , m_icon(gtk_image_new())
     , m_title(makeLabel("title", PANGO_ELLIPSIZE_END))
-    , m_subtitleRow(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4))
-    , m_directory(makeLabel("subtitle", PANGO_ELLIPSIZE_START))
-    , m_separator(makeLabel("subtitle", PANGO_ELLIPSIZE_NONE))
-    , m_statusText(makeLabel("subtitle", PANGO_ELLIPSIZE_END))
+    , m_subtitle(makeLabel("subtitle", PANGO_ELLIPSIZE_START))
 {
     GtkWidget* root = m_root.get();
     gtk_widget_add_css_class(root, "ubiquitty-window-title");
@@ -63,16 +58,9 @@ WindowTitleView::WindowTitleView(ProcessIconLoader& icons)
     gtk_widget_set_halign(titleRow, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(titleRow), m_icon);
     gtk_box_append(GTK_BOX(titleRow), m_title);
-    gtk_widget_set_halign(m_subtitleRow, GTK_ALIGN_CENTER);
-    // GNOME's separator between the parts of a title: a spaced em dash.
-    gtk_label_set_text(GTK_LABEL(m_separator), "—");
-    gtk_accessible_update_state(GTK_ACCESSIBLE(m_separator), GTK_ACCESSIBLE_STATE_HIDDEN, TRUE, -1);
-    gtk_box_append(GTK_BOX(m_subtitleRow), m_directory);
-    gtk_box_append(GTK_BOX(m_subtitleRow), m_separator);
-    gtk_box_append(GTK_BOX(m_subtitleRow), m_status.widget());
-    gtk_box_append(GTK_BOX(m_subtitleRow), m_statusText);
+    gtk_widget_set_halign(m_subtitle, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(root), titleRow);
-    gtk_box_append(GTK_BOX(root), m_subtitleRow);
+    gtk_box_append(GTK_BOX(root), m_subtitle);
 }
 
 void WindowTitleView::showIcon(const PaneMarks& marks, const ChromeGround& ground)
@@ -98,13 +86,9 @@ void WindowTitleView::show(const WindowTitleContent& content, const PaneMarks& m
 {
     showIcon(marks, ground);
     gtk_label_set_text(GTK_LABEL(m_title), content.title.c_str());
-    setText(m_directory, content.directory);
-    setText(m_statusText, content.status);
-    const std::optional<Presentation::StatusSymbol> symbol = marks.shownSymbol();
-    m_status.show(symbol);
-    const bool hasStatus = symbol || !content.status.empty();
-    gtk_widget_set_visible(m_separator, !content.directory.empty() && hasStatus);
-    gtk_widget_set_visible(m_subtitleRow, !content.directory.empty() || hasStatus);
+    // A path keeps its end, where the folder's own name is; words keep their start.
+    gtk_label_set_ellipsize(GTK_LABEL(m_subtitle), content.isSubtitleDirectory() ? PANGO_ELLIPSIZE_START : PANGO_ELLIPSIZE_END);
+    setText(m_subtitle, content.subtitle());
 
     // Full text on hover: either line may be ellipsized.
     std::string tooltip = content.title;

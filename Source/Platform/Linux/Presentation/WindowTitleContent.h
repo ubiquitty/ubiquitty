@@ -24,6 +24,14 @@ struct WindowTitleContent {
     /// composition leaves status out.
     std::string status;
 
+    /// What the subtitle shows: the program's status when it said something,
+    /// else the directory. One line under the title has room for one of them,
+    /// and the program's words are the newer news.
+    [[nodiscard]] const std::string& subtitle() const { return status.empty() ? directory : status; }
+
+    /// Whether the subtitle shows the directory, which elides from its start.
+    [[nodiscard]] bool isSubtitleDirectory() const { return status.empty(); }
+
     bool operator==(const WindowTitleContent&) const = default;
 };
 

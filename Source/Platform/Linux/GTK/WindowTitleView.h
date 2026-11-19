@@ -5,7 +5,6 @@
 
 #include "Platform/Linux/GTK/GObjectPointer.h"
 #include "Platform/Linux/GTK/ProcessIconLoader.h"
-#include "Platform/Linux/GTK/StatusMarkView.h"
 #include "Platform/Linux/Presentation/ChromeContent.h"
 #include "Platform/Linux/Presentation/ChromeGround.h"
 #include "Platform/Linux/Presentation/WindowTitleContent.h"
@@ -16,8 +15,9 @@ namespace Ubiquitty::Linux::GTK {
 
 /// The header bar's title widget, laid out as libadwaita's two-line window
 /// title: the program's icon and a bold title on the first line, and under it
-/// a smaller subtitle holding the working directory, then the program's status
-/// mark and whatever the program itself said about its work.
+/// a smaller subtitle with what the program said about its work, or the
+/// working directory when it said nothing. The status mark is the header's,
+/// by its menu.
 class WindowTitleView final {
 public:
     /// Builds the title widget.
@@ -34,7 +34,7 @@ public:
     ///
     /// - Parameters:
     ///   - content: The two lines.
-    ///   - marks: The pane's program icon and status.
+    ///   - marks: The pane's program, whose icon leads the title.
     ///   - ground: The ground the icon is drawn on.
     void show(const Presentation::WindowTitleContent& content, const Presentation::PaneMarks& marks, const Presentation::ChromeGround& ground);
 
@@ -48,13 +48,9 @@ private:
 
     ProcessIconLoader& m_icons;
     GObjectPointer<GtkWidget> m_root;
-    StatusMarkView m_status;
     GtkWidget* m_icon = nullptr; // owned by m_root
     GtkWidget* m_title = nullptr; // owned by m_root
-    GtkWidget* m_subtitleRow = nullptr; // owned by m_root
-    GtkWidget* m_directory = nullptr; // owned by m_root
-    GtkWidget* m_separator = nullptr; // owned by m_root
-    GtkWidget* m_statusText = nullptr; // owned by m_root
+    GtkWidget* m_subtitle = nullptr; // owned by m_root
 };
 
 } // namespace Ubiquitty::Linux::GTK

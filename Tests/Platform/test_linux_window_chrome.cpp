@@ -101,6 +101,18 @@ TEST(anEndedSessionShowsNoStatus)
     CHECK(content.status.empty());
 }
 
+TEST(theSubtitleShowsTheProgramsWordsElseTheFolder)
+{
+    const WindowTitleContent working = windowTitleContent(agentPane(), viewer(), showing(true, true, false, true));
+    CHECK_MSG(working.subtitle() == "Claude Code: Working", working.subtitle().c_str());
+    CHECK(!working.isSubtitleDirectory());
+    App::PaneTitleFacts quiet = agentPane();
+    quiet.programStatus.clear();
+    const WindowTitleContent atRest = windowTitleContent(quiet, viewer(), showing(true, true, false, true));
+    CHECK_MSG(atRest.subtitle() == "~/src/proj", atRest.subtitle().c_str());
+    CHECK(atRest.isSubtitleDirectory());
+}
+
 TEST(everyStatusKindButNoneDrawsAMark)
 {
     CHECK(!statusSymbol(App::StatusKind::None, OSC::ProgramBlockKind::None));
