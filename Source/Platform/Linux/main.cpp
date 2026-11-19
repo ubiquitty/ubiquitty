@@ -2743,7 +2743,11 @@ void beginPaneIngest(LinuxPane& pane)
     // the adaptive driver a rate before the ingest thread starts: without it,
     // its conservative unknown-rate answer requests a frame on every tick
     // even after output stops. The tick replaces this fallback with GTK's rate.
-    pane.session->setPresentationFrameIntervalSeconds(cursorPresentationInterval(pane.picture));
+    const double presentationInterval = cursorPresentationInterval(pane.picture);
+    pane.session->setPresentationFrameIntervalSeconds(presentationInterval);
+    // The same rate paces what the drain publishes and delivers: a capture or
+    // a hop to this thread that the display cannot show is work for nothing.
+    pane.session->setSyncPublishRefreshSeconds(presentationInterval);
     // The drain's screen-change rate decides between continuous and
     // on-demand presentation; the tick reads the recommendation.
     pane.session->setAdaptivePresentation(Ubiquitty::Runtime::AdaptiveDrive::On);
@@ -3860,13 +3864,18 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     // for nothing under it. The focused pane arrives with the tick's own hold,
     // which this frame ends at the handoff: one announced wait per frame
     // rather than one per reader, since each is a donation the parser pays.
+    //
+    // A frame the tick's own check already declined asks for no hold at all:
+    // a hold is a wait the parser pays, and there is nothing to read under it.
+    if (pane.isFrameDeclined)
+        return false;
     std::optional<Ubiquitty::Runtime::TerminalSession::ModelReadScope> ownHold;
     if (!outerHold && pane.session)
         ownHold.emplace(*pane.session);
     auto* const hold = outerHold ? outerHold : &ownHold;
     Ubiquitty::Runtime::FrameDemand demand;
     demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
-    if (pane.isFrameDeclined || (!pane.pendingCapture && pane.session->liveReadDecline(*term, demand).decline != Ubiquitty::Runtime::FrameDecline::None))
+    if (!pane.pendingCapture && pane.session->liveReadDecline(*term, demand).decline != Ubiquitty::Runtime::FrameDecline::None)
         return false;
     const int frameViewOffset = paneFrameViewOffset(pane, *term);
     std::unique_ptr<std::vector<uint8_t>> frameBuffer = app().framePool.take();
@@ -7605,8 +7614,10 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         // warrants a vblank frame. FrameDriver's interval is atomic because
         // the ingest thread reads it while the main thread updates it here.
         const double frameInterval = cursorPresentationInterval(pane.picture);
-        if (frameInterval != pane.session->presentationFrameIntervalSeconds())
+        if (frameInterval != pane.session->presentationFrameIntervalSeconds()) {
             pane.session->setPresentationFrameIntervalSeconds(frameInterval);
+            pane.session->setSyncPublishRefreshSeconds(frameInterval);
+        }
         if (pane.session->isPresentationRecommendedContinuous())
             requestRepaint();
     });
