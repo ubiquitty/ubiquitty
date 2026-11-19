@@ -151,10 +151,12 @@ public:
 
     /// Whether a stacked cluster's windows can be drawn: the page's face
     /// stands its baseline where the metrics put it, so the slot's baseline is
-    /// known. The bundled fallback keeps its cells.
+    /// known, and the bundled Unifont fallback stacks a cluster it draws in
+    /// its own grid and draws that stack's windows.
     ///
-    /// - Returns: True when the page's face is in use.
-    [[nodiscard]] bool drawsClusterWindows() const override { return m_isAvailable; }
+    /// - Returns: True when the page's face is in use or the fallback draws
+    ///   windows.
+    [[nodiscard]] bool drawsClusterWindows() const override { return m_isAvailable || m_fallback.drawsClusterWindows(); }
 
     /// Draws a window of a cluster's uncut drawing (Rendering::GlyphRasterizer).
     ///
@@ -162,7 +164,9 @@ public:
     /// baseline moved up by the window's offset, through the same draw and
     /// the same fit its own slot takes. A cluster the page's face would
     /// draw as a pictograph is declined: that draw lifts it to fit the canvas,
-    /// and a window's canvas is not the slot it would fit.
+    /// and a window's canvas is not the slot it would fit. A cluster whose
+    /// slot the fallback drew — no page face, no family for it, or a draw the
+    /// page refused — takes its window from the fallback's drawing too.
     ///
     /// - Parameters:
     ///   - codePoints: The cluster's Unicode scalars.

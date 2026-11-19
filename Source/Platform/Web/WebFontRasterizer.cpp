@@ -1246,13 +1246,23 @@ bool WebFontRasterizer::rasterizeClusterWindow(const std::uint32_t* codePoints, 
     double phaseInPixels, Rendering::ClusterRasterBounds bounds, int slotWidth, int slotHeight, int rowOffsetInPixels, int windowHeight,
     std::uint8_t* coverageOut)
 {
-    if (!m_isAvailable || !codePoints || count <= 0 || count > clusterPoolMaximumCodePoints || slotWidth <= 0 || slotHeight <= 0
-        || windowHeight <= 0 || !coverageOut)
+    if (!codePoints || count <= 0 || count > clusterPoolMaximumCodePoints || slotWidth <= 0 || slotHeight <= 0 || windowHeight <= 0 || !coverageOut)
         return false;
+    // The fallback's window, for a cluster whose slot the fallback drew: the
+    // bundled Unifont stacks its marks in its own grid and cuts the window
+    // from that drawing.
+    const auto fallback = [&] {
+        return m_fallback.rasterizeClusterWindow(codePoints, count, face, weight, phaseInPixels, bounds, slotWidth, slotHeight, rowOffsetInPixels,
+            windowHeight, coverageOut);
+    };
+    if (!m_isAvailable)
+        return fallback();
     const auto cluster = std::span(codePoints, static_cast<std::size_t>(count));
     const std::string family = familyForCluster(codePoints, count, face, weight, Rendering::Font::Presentation::Text);
     const auto base = codePoints[Unicode::clusterBaseIndex(cluster)];
-    if (family.empty() || Unicode::isExtendedPictographic(base))
+    if (family.empty())
+        return fallback();
+    if (Unicode::isExtendedPictographic(base))
         return false;
     // The slot's baseline, as `rasterizeCluster` places it, moved up by the
     // rows the window starts below the slot's top.
@@ -1273,12 +1283,14 @@ bool WebFontRasterizer::rasterizeClusterWindow(const std::uint32_t* codePoints, 
             const double penX = phaseInPixels * fit.scaleX + fit.translationX;
             return webFontDrawClusterInCell(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face), phaseInPixels,
                        bounds.left, bounds.width, fit.scaleX, 1, penX, baseline, slotWidth, windowHeight, false, coverageOut)
-                != 0;
+                != 0
+                || fallback();
         }
     }
     return webFontDrawCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face) ? 1 : 0, baseline, slotWidth,
                windowHeight, 0, coverageOut)
-        != 0;
+        != 0
+        || fallback();
 }
 
 bool WebFontRasterizer::rasterizeColorCluster(const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut)
