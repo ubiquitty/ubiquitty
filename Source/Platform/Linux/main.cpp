@@ -197,6 +197,7 @@
 #include "Platform/Linux/PointerLock.h"
 #include "Platform/Linux/Presentation/ChromeContent.h"
 #include "Platform/Linux/Presentation/PaneGeometry.h"
+#include "Platform/Linux/Presentation/SelectionColor.h"
 #include "Platform/Linux/Presentation/StatusSymbol.h"
 #include "Platform/Linux/Presentation/WindowTitleContent.h"
 #include "Platform/Linux/Raster.h"
@@ -474,6 +475,8 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     Ubiquitty::Screen::HistoryFacts captureViewHistory;
     bool isCaptureViewOffsetHeld = false;
     bool isCaptureFocused = true;
+    // The selection colour the registered capture geometry carries.
+    Ubiquitty::Rendering::Vec4 captureSelectionColor {};
     bool isFrameDeclined = false;
     // The pointer-lock mode (private 7403) as the last delivery published it.
     // The verdict is asked on an edge of it, not on every delivery: a flood
@@ -1301,6 +1304,8 @@ void switchToTab(TabID tab);
 std::string buildTabLabel(LinuxPane& pane, int index);
 void switchTabRelative(int delta);
 void rebuildTabStrip();
+Ubiquitty::Rendering::Vec4 paneSelectionColor(const Ubiquitty::Terminal& terminal, Ubiquitty::Linux::Presentation::SelectionFocus focus);
+Ubiquitty::Linux::Presentation::SelectionFocus selectionFocus(bool isFocusedInActiveWindow); // bool-ok: converts the frame's one focus fact into the policy's enum
 void installTabActions();
 Ubiquitty::Linux::Presentation::PaneMarks paneMarks(LinuxPane& pane);
 void updateWindowTitle();
@@ -3911,6 +3916,8 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
                                                                     .isProgramViewport = isProgramViewport,
                                                                     .shouldFollowCursor = shouldFollowCursor,
                                                                 });
+    const bool isPaneFocused = &pane == activePane() && app().window && gtk_window_is_active(GTK_WINDOW(app().window));
+    app().rasterContext.setFrameSelectionColor(paneSelectionColor(*term, selectionFocus(isPaneFocused)));
     const auto frameGeometry = app().rasterContext.frameCaptureGeometry(framePresentation.rasterOrigin, framePresentation.rasterSize);
     app().rasterContext.setFrameHoverLink(pane.hoveredLink);
     app().rasterContext.setBeamChrome(&chrome);
@@ -7432,6 +7439,31 @@ void publishAccessibleTerminalNow()
         { logicalCellWidth() * presentation.placement.scale, logicalCellHeight() * presentation.placement.scale });
 }
 
+Ubiquitty::Linux::Presentation::SelectionFocus selectionFocus(bool isFocusedInActiveWindow) // bool-ok: converts the frame's one focus fact into the policy's enum
+{
+    return isFocusedInActiveWindow ? Ubiquitty::Linux::Presentation::SelectionFocus::Focused : Ubiquitty::Linux::Presentation::SelectionFocus::Unfocused;
+}
+
+bool isSameColor(const Ubiquitty::Rendering::Vec4& left, const Ubiquitty::Rendering::Vec4& right)
+{
+    return left.x == right.x && left.y == right.y && left.z == right.z && left.w == right.w;
+}
+
+// The colour GNOME selects text in, for one pane: the desktop's accent while
+// the pane holds the keyboard in an active window, the view's grey otherwise,
+// as libadwaita and GNOME's text views draw it. The terminal's own default
+// background is the ground both are mixed against. The caller holds the model.
+Ubiquitty::Rendering::Vec4 paneSelectionColor(const Ubiquitty::Terminal& terminal, Ubiquitty::Linux::Presentation::SelectionFocus focus)
+{
+    const auto channel = [](std::uint16_t value) { return static_cast<float>(Ubiquitty::channel16To8(value)) / 255.0f; };
+    const Ubiquitty::PaletteRGB background = terminal.palette.defaultBackground;
+    const Ubiquitty::Rendering::Vec4 ground { channel(background.red), channel(background.green), channel(background.blue), 1.0f };
+    GdkRGBA accent { 0.21f, 0.52f, 0.89f, 1.0f };
+    adw_accent_color_to_rgba(adw_style_manager_get_accent_color(adw_style_manager_get_default()), &accent);
+    return Ubiquitty::Linux::Presentation::desktopSelectionColor(ground,
+        { static_cast<float>(accent.red), static_cast<float>(accent.green), static_cast<float>(accent.blue), 1.0f }, focus);
+}
+
 // Keep frames admitted at parser boundaries instead of looking for the same
 // boundary again after the parser has already started the next redraw.
 void preparePaneFrame(LinuxPane& pane)
@@ -7445,15 +7477,19 @@ void preparePaneFrame(LinuxPane& pane)
     const int cellHeight = app().rasterContext.cellHeight();
     const bool isFocused = &pane == activePane() && app().window && gtk_window_is_active(GTK_WINDOW(app().window));
     bool canUseBoundaryFrames = app().isVulkanReady;
+    Ubiquitty::Rendering::Vec4 selectionColor {};
     {
         const auto hold = holdPaneModel(pane);
         const auto* terminal = pane.session->terminal();
+        if (terminal)
+            selectionColor = paneSelectionColor(*terminal, selectionFocus(isFocused));
         canUseBoundaryFrames = canUseBoundaryFrames && terminal && !terminal->isTekModeActive
             && terminal->richTextBlocks.blocks(Ubiquitty::RichText::activeScreen(*terminal)).empty()
             && pane.richTextFrame.richTextQuads().empty();
     }
     const auto authored = paneGeometry(pane, { hoverSnapshot.columns, hoverSnapshot.rows });
-    if (app().isVulkanReady && (!pane.captureConfiguration || *pane.captureConfiguration != configuration || pane.captureCellWidth != cellWidth || pane.captureCellHeight != cellHeight || pane.isCaptureFocused != isFocused || pane.captureRasterOrigin.x != authored.rasterOrigin.x || pane.captureRasterOrigin.y != authored.rasterOrigin.y || pane.captureRasterSize.width != authored.rasterSize.width || pane.captureRasterSize.height != authored.rasterSize.height)) {
+    if (app().isVulkanReady && (!pane.captureConfiguration || *pane.captureConfiguration != configuration || pane.captureCellWidth != cellWidth || pane.captureCellHeight != cellHeight || pane.isCaptureFocused != isFocused || !isSameColor(pane.captureSelectionColor, selectionColor) || pane.captureRasterOrigin.x != authored.rasterOrigin.x || pane.captureRasterOrigin.y != authored.rasterOrigin.y || pane.captureRasterSize.width != authored.rasterSize.width || pane.captureRasterSize.height != authored.rasterSize.height)) {
+        app().rasterContext.setFrameSelectionColor(selectionColor);
         auto geometry = app().rasterContext.frameCaptureGeometry(authored.rasterOrigin, authored.rasterSize);
         geometry.isFocused = isFocused;
         pane.session->setSyncFrameCaptureGeometry(geometry);
@@ -7463,6 +7499,7 @@ void preparePaneFrame(LinuxPane& pane)
         pane.captureRasterOrigin = authored.rasterOrigin;
         pane.captureRasterSize = authored.rasterSize;
         pane.isCaptureFocused = isFocused;
+        pane.captureSelectionColor = selectionColor;
         pane.captureViewOffset = -1;
     }
     pane.session->setSyncFramePresentation(canUseBoundaryFrames
@@ -9051,6 +9088,12 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
     // The desktop's light or dark style, as libadwaita reads it from the
     // settings portal: the reader who follows it gets the theme for it.
     windowSignalConnectObject(adw_style_manager_get_default(), "notify::dark", G_CALLBACK(onSystemAppearanceChanged), app().window, G_CONNECT_DEFAULT);
+    // A new accent recolours the focused selection: every pane's next frame
+    // re-registers its capture geometry with it.
+    windowSignalConnectObject(adw_style_manager_get_default(), "notify::accent-color", G_CALLBACK(+[](AdwStyleManager*, GParamSpec*, gpointer) {
+        requestRepaint();
+    }),
+        app().window, G_CONNECT_DEFAULT);
 
     GtkEventController* keys = gtk_event_controller_key_new();
     // Capture phase: the terminal sees a key before a focused chrome widget

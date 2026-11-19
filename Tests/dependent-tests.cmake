@@ -36,6 +36,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(test_linux_desktop_integration_EXTRA_SOURCES
         ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/DesktopIntegration.cpp
         ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/Updater.cpp)
+    list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_selection_color.cpp)
+    set(test_linux_selection_color_EXTRA_SOURCES ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/Presentation/SelectionColor.cpp)
     list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_window_chrome.cpp)
     set(test_linux_window_chrome_EXTRA_SOURCES
         ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/Presentation/StatusSymbol.cpp

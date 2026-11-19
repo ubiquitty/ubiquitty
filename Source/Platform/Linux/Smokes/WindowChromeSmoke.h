@@ -414,6 +414,36 @@ int smokeWindowChrome(const char* outputDirectory)
                 "the split divides the width evenly");
         }
         checkFrame(app().window, "split", "the split window produces a rendered frame");
+        // The selection is GNOME's: the focused pane of an active window
+        // reports the accent, anything else the view's neutral grey, and the
+        // frame just drawn carries whichever this window's state calls for.
+        {
+            const auto hold = holdPaneModel(*added);
+            const Ubiquitty::Terminal& terminal = *added->session->terminal();
+            const auto unfocused = paneSelectionColor(terminal, Ubiquitty::Linux::Presentation::SelectionFocus::Unfocused);
+            const auto focused = paneSelectionColor(terminal, Ubiquitty::Linux::Presentation::SelectionFocus::Focused);
+            check(std::abs(unfocused.x - unfocused.y) < 0.02f && std::abs(unfocused.y - unfocused.z) < 0.03f,
+                "an unfocused selection is the desktop neutral gray");
+            check(std::abs(focused.x - unfocused.x) + std::abs(focused.z - unfocused.z) > 0.02f, "a focused selection takes the accent");
+        }
+        // Per pane, as GNOME draws a widget without the keyboard: the split's
+        // other pane registers its frames' selection in the grey whatever the
+        // window's state, and the focused pane in what that state calls for.
+        {
+            const auto colorFor = [](LinuxPane& pane, Ubiquitty::Linux::Presentation::SelectionFocus focus) {
+                const auto hold = holdPaneModel(pane);
+                return paneSelectionColor(*pane.session->terminal(), focus);
+            };
+            if (app().isVulkanReady) {
+                preparePaneFrame(*original);
+                check(isSameColor(original->captureSelectionColor, colorFor(*original, Ubiquitty::Linux::Presentation::SelectionFocus::Unfocused)),
+                    "the unfocused pane of a split frames its selection in gray");
+                preparePaneFrame(*added);
+                const bool isActive = gtk_window_is_active(GTK_WINDOW(app().window));
+                check(isSameColor(added->captureSelectionColor, colorFor(*added, selectionFocus(isActive))),
+                    "the focused pane frames its selection for the window state");
+            }
+        }
         // Only the focused pane's cursor is live; the other's is steady.
         if (original && added && original->session->terminal()) {
             const auto hold = holdPaneModel(*original);

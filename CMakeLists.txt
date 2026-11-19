@@ -1696,6 +1696,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         Source/Platform/Linux/GTK/WindowChrome.cpp
         Source/Platform/Linux/GTK/WindowTitleView.cpp
         Source/Platform/Linux/Presentation/PaneGeometry.cpp
+        Source/Platform/Linux/Presentation/SelectionColor.cpp
         Source/Platform/Linux/Presentation/StatusSymbol.cpp
         Source/Platform/Linux/Presentation/WindowTitleContent.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Accessibility.cpp
