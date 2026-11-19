@@ -36,6 +36,11 @@ public:
     // The running AppImage's path, read from the kernel's mount table; empty
     // when no mount backs the verified AppDir.
     static std::string appImagePath();
+    /// The AppDir this process runs from, derived from the kernel-verified
+    /// `/proc/self/exe` rather than from `$APPDIR`.
+    ///
+    /// - Returns: The directory, or empty when this is not a packaged AppImage.
+    static std::string appDirectory();
 
     // Check for a newer release without downloading it (a small zsync metadata
     // fetch). Blocks briefly on the network. Maps appimageupdatetool's

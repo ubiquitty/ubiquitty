@@ -1681,11 +1681,13 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         # Linux frontend (GTK4 shell + Vulkan renderer + the local PAL)
         Source/Platform/Linux/main.cpp
         Source/Platform/Linux/LibmCompatibility.cpp
+        Source/Platform/Linux/DesktopIntegration.cpp
         Source/Platform/Linux/Smokes/PaddingSmoke.cpp
         Source/Platform/Linux/Smokes/SkipInkSmoke.cpp
         Source/Platform/Linux/Input/LinkInteraction.cpp
         Source/Platform/Linux/Input/LinkTarget.cpp
         Source/Platform/Linux/GTK/ApplicationIcon.cpp
+        Source/Platform/Linux/GTK/DesktopIntegrationHook.cpp
         Source/Platform/Linux/GTK/Alerts.cpp
         Source/Platform/Linux/GTK/ProcessIconLoader.cpp
         Source/Platform/Linux/GTK/StatusMarkView.cpp

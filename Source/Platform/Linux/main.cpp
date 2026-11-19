@@ -185,6 +185,7 @@
 #include "Platform/Linux/FreeTypeRasterizer.h"
 #include "Platform/Linux/GTK/Alerts.h"
 #include "Platform/Linux/GTK/ApplicationIcon.h"
+#include "Platform/Linux/GTK/DesktopIntegrationHook.h"
 #include "Platform/Linux/GTK/WindowAppearance.h"
 #include "Platform/Linux/GTK/WindowChrome.h"
 #include "Platform/Linux/Input/LinkInteraction.h"
@@ -9109,6 +9110,8 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
 
     gtk_window_set_decorated(GTK_WINDOW(app().window), !UBIQUITTY_LINUX_CHROMELESS);
     gtk_window_present(GTK_WINDOW(app().window));
+    // An AppImage run lists itself among the desktop's apps, with its icon.
+    Ubiquitty::Linux::GTK::integrateWithDesktop(app().window);
 }
 
 // Activations from app actions and the desktop open a normal login window;

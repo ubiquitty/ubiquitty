@@ -254,6 +254,11 @@ bool Updater::isAppImage()
     return !verifiedAppDir().empty();
 }
 
+std::string Updater::appDirectory()
+{
+    return verifiedAppDir();
+}
+
 std::string Updater::appImagePath()
 {
     // The kernel's answer, not the environment's. $APPIMAGE is set by the
