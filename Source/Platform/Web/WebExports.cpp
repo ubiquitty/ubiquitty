@@ -214,6 +214,7 @@ constexpr Ubiquitty::Preferences::Key webRenderingKeys[] = {
     Ubiquitty::Preferences::Key::UnderlineFollowsInk,
     Ubiquitty::Preferences::Key::UnderlineSkipInkPad,
     Ubiquitty::Preferences::Key::UnderlineCurly,
+    Ubiquitty::Preferences::Key::UnderlineMetrics,
     Ubiquitty::Preferences::Key::UnderlineLinks,
 };
 

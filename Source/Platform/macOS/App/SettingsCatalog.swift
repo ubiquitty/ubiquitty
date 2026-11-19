@@ -957,6 +957,17 @@ enum SettingsCatalog {
                         )
                     ),
                     SettingsRow(
+                        id: "underline.metrics",
+                        "Underline Metrics",
+                        detail:
+                            "Choose where the underline’s position and weight come from. Ubiquitty draws it at the weight of the font’s own underscore, a clear gap below the text or lower where the font asks for more room; Font draws the underline the font declares, where TextEdit draws it.",
+                        control: .segmented(
+                            options: options("underline", "metrics"),
+                            get: { settingTermIndex(.UnderlineMetrics, fallback: 0) },
+                            set: { app?.settingsSetUnderlineMetrics($0) }
+                        )
+                    ),
+                    SettingsRow(
                         id: "underline.follows_ink",
                         "Follow Ink",
                         detail: "Extend a word’s underline to where the ink of its outer letters ends, past the cell.",

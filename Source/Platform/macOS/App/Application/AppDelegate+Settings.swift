@@ -464,6 +464,10 @@ extension UBAppDelegate {
     func settingsSetUnderlineFollowsInk(_ isOn: Bool) { setSetting(.UnderlineFollowsInk, bool: isOn) }
     /// 0 compact, 1 medium, 2 wide.
     func settingsSetCurlyUnderlineShape(_ shape: Int) { setSetting(.UnderlineCurly, termIndex: shape) }
+    /// Writes `[underline] metrics` by the term's place in its vocabulary.
+    ///
+    /// - Parameter metrics: 0 for Ubiquitty's own rule, 1 for the font's.
+    func settingsSetUnderlineMetrics(_ metrics: Int) { setSetting(.UnderlineMetrics, termIndex: metrics) }
     func settingsSetBrailleGrid(_ isOn: Bool) { setSetting(.FontBrailleGrid, bool: isOn) }
 
     /// A negative clearance is automatic, the underline's own weight, which

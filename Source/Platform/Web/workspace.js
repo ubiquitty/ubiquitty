@@ -1135,6 +1135,10 @@ function showSettings() {
             'Space around the skipped part of a glyph. Leave empty to match the underline’s weight.',
         ],
         'underline.curly': ['Curly underlines', 'Shape of the wavy underline programs use, such as for spelling errors.'],
+        'underline.metrics': [
+            'Underline metrics',
+            'Where the underline’s position and weight come from. Font needs the font’s declared underline, which a browser does not report, so the web draws Ubiquitty’s.',
+        ],
         'underline.links': ['Underline links', 'Mark detected links in terminal text.'],
     };
     const preferenceRows = (prefix) =>

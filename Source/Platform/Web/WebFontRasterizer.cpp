@@ -826,9 +826,10 @@ WebFontRasterizer::WebFontRasterizer(GlyphRasterizer& fallback, int pixelSize, i
     m_face.lineGapTopInPixels = layout.lineGapTop;
     // The face rule policy (RuleGeometry.h) with what the browser can tell
     // this arm: the weight its underscore draws at on the canvas, read by
-    // Core's rule, and the descent. No declared underline weight reaches a
-    // canvas, so a face whose underscore draws nothing keeps the size-only
-    // stroke.
+    // Core's rule, and the descent. No declared underline weight or position
+    // reaches a canvas, so a face whose underscore draws nothing keeps the
+    // size-only stroke, and `[underline] metrics = "font"` draws Ubiquitty's
+    // rule here.
     Rendering::RuleFaceMetrics faceRules;
     faceRules.underscoreWeight = Rendering::underscoreWeight(*this, static_cast<int>(std::ceil(m_metrics.cellWidth)), static_cast<int>(std::ceil(m_metrics.cellHeight)));
     faceRules.descent = static_cast<float>(descent);
@@ -837,6 +838,8 @@ WebFontRasterizer::WebFontRasterizer(GlyphRasterizer& fallback, int pixelSize, i
     m_metrics.underlineThickness = rules.underlineThickness;
     m_metrics.underlineCurlyThickness = rules.curlyThickness;
     m_metrics.strikeThickness = rules.strikeThickness;
+    m_metrics.fontUnderlineTop = rules.fontUnderlineTop;
+    m_metrics.fontUnderlineThickness = rules.fontUnderlineThickness;
     // A straight rule rises off the baseline by half a device pixel per 12 of
     // type, which is what macOS draws (FontGeometry.swift: 0.5 * deviceScale *
     // fontSize / 12, with its font size in points and this one already in device
