@@ -20,12 +20,15 @@ int smokeStatusTitle()
     (void)Ubiquitty::Preferences::configure("[title]\ntab_dimensions = false\ntab_program_status = true\n", Ubiquitty::Preferences::ParseMode::Strict);
     Ubiquitty::processBytes(terminal, "\x1b]2;Build\x07\x1b]21337;indicator=#5f87ff;status=Waiting\x07");
     bool didPass = buildTabLabel(*activePane(), 0).find("Waiting") != std::string::npos;
+    // An unheard bell is the tab's mark, not text in its label: the label
+    // stays the program's, and the marks the header and the tab draw carry it.
     activePane()->hasUnheardBell = true;
-    didPass = didPass && buildTabLabel(*activePane(), 0).starts_with("🔔 ");
+    didPass = didPass && !buildTabLabel(*activePane(), 0).starts_with("🔔");
+    didPass = didPass && paneMarks(*activePane()).hasUnheardBell;
     (void)Ubiquitty::Preferences::configure("[title]\ntab_dimensions = false\ntab_program_status = false\n", Ubiquitty::Preferences::ParseMode::Strict);
     didPass = didPass && buildTabLabel(*activePane(), 0).find("Waiting") == std::string::npos;
     onFocusEnter(nullptr, nullptr);
-    didPass = didPass && !activePane()->hasUnheardBell && !buildTabLabel(*activePane(), 0).starts_with("🔔 ");
+    didPass = didPass && !activePane()->hasUnheardBell && !paneMarks(*activePane()).hasUnheardBell;
     g_print("smoke-status-title: %s\n", didPass ? "PASS" : "FAIL");
     return didPass ? 0 : 1;
 }
