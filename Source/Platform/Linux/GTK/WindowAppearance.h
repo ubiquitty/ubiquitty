@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "Core/Preferences/Preferences.h"
+
 #include <gtk/gtk.h>
 
 #include <memory>
@@ -12,7 +14,7 @@ namespace Ubiquitty::Themes {
 struct Theme;
 }
 
-namespace Ubiquitty::Linux::Presentation {
+namespace Ubiquitty::Linux::GTK {
 
 /// Owns the GTK styles that present one window's terminal palette.
 ///
@@ -34,7 +36,9 @@ public:
     ///   - paneContainer: The pane container, or null before panes are mounted.
     ///   - theme: The resolved palette selected by the shared theme policy.
     ///   - backgroundOpacity: The grid's opacity; translucency exposes its backdrop.
-    void apply(GtkWidget* window, GtkWidget* paneContainer, const Themes::Theme& theme, double backgroundOpacity);
+    ///   - titlebarStyle: Whether the titlebar wears the palette or the toolkit's colours.
+    void apply(GtkWidget* window, GtkWidget* paneContainer, const Themes::Theme& theme, double backgroundOpacity,
+        Preferences::TitlebarStyle titlebarStyle);
 
     /// Removes the display provider while preserving the controller's scope identity.
     void reset();
@@ -63,4 +67,4 @@ private:
     std::string m_scopeClass;
 };
 
-} // namespace Ubiquitty::Linux::Presentation
+} // namespace Ubiquitty::Linux::GTK

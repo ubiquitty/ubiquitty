@@ -32,6 +32,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_link_interaction.cpp)
     list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_link_target.cpp)
     list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_pane_geometry.cpp)
+    list(APPEND UBQ_DEPENDENT_TESTS Platform/test_linux_window_chrome.cpp)
+    set(test_linux_window_chrome_EXTRA_SOURCES
+        ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/Presentation/StatusSymbol.cpp
+        ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/Presentation/WindowTitleContent.cpp)
     set(test_linux_pane_geometry_EXTRA_SOURCES
         ${CMAKE_SOURCE_DIR}/Source/Platform/Linux/Presentation/PaneGeometry.cpp
         ${UBIQUITTY_CORE_SOURCE_DIR}/Source/Core/Rendering/PaddingGeometry.cpp)

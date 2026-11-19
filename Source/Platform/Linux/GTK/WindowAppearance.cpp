@@ -1,14 +1,23 @@
 // Copyright (C) 2026 Stanislav Yaglo
 // SPDX-License-Identifier: Apache-2.0
 
-#include "Platform/Linux/Presentation/WindowAppearance.h"
+#include "Platform/Linux/GTK/WindowAppearance.h"
 
+#include "Core/Themes/Contrast.h"
 #include "Core/Themes/Themes.h"
+#include "Platform/Linux/Presentation/ChromeGround.h"
 
 #include <array>
 #include <cstdint>
 
-namespace Ubiquitty::Linux::Presentation {
+namespace Ubiquitty::Linux::GTK {
+
+namespace {
+
+// WCAG 2's minimum for body text, which a title is.
+constexpr double minimumHeaderContrast = 4.5;
+
+} // namespace
 
 void WindowAppearance::ObjectRelease::operator()(gpointer object) const
 {
@@ -42,7 +51,8 @@ GdkRGBA WindowAppearance::nativeLinkColor()
     return color;
 }
 
-void WindowAppearance::apply(GtkWidget* window, GtkWidget* paneContainer, const Themes::Theme& theme, double backgroundOpacity)
+void WindowAppearance::apply(GtkWidget* window, GtkWidget* paneContainer, const Themes::Theme& theme, double backgroundOpacity,
+    Preferences::TitlebarStyle titlebarStyle)
 {
     if (!window)
         return;
@@ -78,19 +88,28 @@ void WindowAppearance::apply(GtkWidget* window, GtkWidget* paneContainer, const 
     const std::string backdrop = isTranslucent ? "transparent" : background.data();
     const std::string ink = foreground.data();
     const std::string scope = "." + m_scopeClass;
-    const std::string tabs = scope + " .ubiquitty-tabs";
-    const std::string header = scope + " headerbar.ubiquitty-titlebar";
-    const std::string css = (isTranslucent ? scope + ", " + scope + " * { background-color: transparent; }" : std::string {})
+    // A themed chrome sets libadwaita's header ground: a shade off the
+    // terminal's, so the raised top bar reads as a bar over it. It takes the
+    // terminal's ink only where that ink reads on it. Everything else — menus, dialogs, buttons — stays the system's.
+    const auto packed = [](const ColorRGBA& color) {
+        return (std::uint32_t { color.red } << 16) | (std::uint32_t { color.green } << 8) | color.blue;
+    };
+    const bool isInkReadable = Themes::Contrast::wcagContrastRatio(packed(foregroundColor), packed(backgroundColor)) >= minimumHeaderContrast;
+    const std::string headerGround = isInkReadable ? "mix(" + std::string(background.data()) + ", " + ink + ", 0.04)" : std::string(background.data());
+    // An ink that does not read is replaced by libadwaita's own for a ground
+    // of that polarity, whatever style the desktop is in.
+    const bool isGroundDark = Presentation::ChromeGround::fromBackground(packed(backgroundColor)).isDark;
+    const std::string headerInk = isInkReadable ? ink : (isGroundDark ? "#ffffff" : "rgb(0 0 6 / 80%)");
+    const std::string themedChrome = titlebarStyle == Preferences::TitlebarStyle::Themed
+        ? scope + " { --headerbar-bg-color: " + headerGround + "; --headerbar-backdrop-color: var(--headerbar-bg-color);"
+            + " --headerbar-fg-color: " + headerInk + "; --headerbar-border-color: " + headerInk + "; }"
+        : std::string {};
+    // Translucency exposes the compositor through the window's own ground and
+    // the pane area, not through the chrome or its menus.
+    const std::string css = (isTranslucent ? scope + " { background-color: transparent; }" : std::string {})
         + scope + ".ubiquitty-themed-bg, " + scope + " .ubiquitty-themed-bg { background-color: " + backdrop + "; }"
-        + header + " { background: " + backdrop + "; color: " + ink + "; box-shadow: none; border: none; }"
-        + header + " button { color: " + ink + "; }"
-        + tabs + " { background: " + backdrop + "; color: " + ink + "; padding: 4px 8px; border-bottom: 1px solid alpha(" + ink + ", 0.12); }"
-        + tabs + " button { background: transparent; color: inherit; box-shadow: none; border: 1px solid transparent; border-radius: 6px; padding: 4px 10px; min-height: 26px; }"
-        + tabs + " button:hover { background: alpha(" + ink + ", 0.08); }"
-        + tabs + " button:checked { background: alpha(" + ink + ", 0.12); border-bottom-color: " + ink + "; }"
-        + tabs + " button:focus-visible { outline: 2px solid " + ink + "; outline-offset: -2px; }"
-        + tabs + " popover contents { background: " + backdrop + "; color: " + ink + "; }";
+        + themedChrome;
     gtk_css_provider_load_from_string(m_provider.get(), css.c_str());
 }
 
-} // namespace Ubiquitty::Linux::Presentation
+} // namespace Ubiquitty::Linux::GTK

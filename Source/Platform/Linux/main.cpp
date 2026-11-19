@@ -172,6 +172,8 @@
 #include "Core/Screen/CommandBlocks.h"
 #include "Core/Screen/Marks.h"
 #include "Core/Screen/Scrollback.h"
+#include "Core/Themes/ThemeApply.h"
+#include "Core/Title/ProcessIcons.h"
 #include "Platform/Linux/AccessibleTerminal.h"
 #include "Platform/Linux/BitmapFace.h"
 #include "Platform/Linux/BundledFontDirectory.h"
@@ -181,6 +183,10 @@
 #include "Platform/Linux/FontRouting.h"
 #include "Platform/Linux/FontSizing.h"
 #include "Platform/Linux/FreeTypeRasterizer.h"
+#include "Platform/Linux/GTK/Alerts.h"
+#include "Platform/Linux/GTK/ApplicationIcon.h"
+#include "Platform/Linux/GTK/WindowAppearance.h"
+#include "Platform/Linux/GTK/WindowChrome.h"
 #include "Platform/Linux/Input/LinkInteraction.h"
 #include "Platform/Linux/Input/LinkTarget.h"
 #include "Platform/Linux/OmarchyAccent.h"
@@ -188,8 +194,10 @@
 #include "Platform/Linux/PaneViewport.h"
 #include "Platform/Linux/PangoRichText.h"
 #include "Platform/Linux/PointerLock.h"
+#include "Platform/Linux/Presentation/ChromeContent.h"
 #include "Platform/Linux/Presentation/PaneGeometry.h"
-#include "Platform/Linux/Presentation/WindowAppearance.h"
+#include "Platform/Linux/Presentation/StatusSymbol.h"
+#include "Platform/Linux/Presentation/WindowTitleContent.h"
 #include "Platform/Linux/Raster.h"
 #include "Platform/Linux/SharedFontResources.h"
 #include "Platform/Linux/Smokes/PaddingSmoke.h"
@@ -328,6 +336,7 @@
 #include <sys/vfs.h>
 #include <unistd.h>
 
+#include <adwaita.h>
 #include <gdk/gdkkeysyms.h>
 #include <glib-unix.h>
 #include <gtk/gtk.h>
@@ -500,6 +509,10 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     double cursorPresentationBypassUntil = 0;
     std::uint32_t lastScrollIndicatorTick = 0;
     Ubiquitty::Linux::Presentation::PaneGeometry presentation;
+    // The picture's last laid-out size, in device pixels. An unmounted picture
+    // (a background tab's) reports none, and a frame drawn for it then must
+    // still be drawn at the size it will be shown at.
+    Ubiquitty::FloatSize lastViewport {};
     // The layout belongs to the frame this pane presents, not the renderer's
     // last pane. Row vectors retain capacity and only shaped rows hold extents.
     std::vector<std::vector<Ubiquitty::Rendering::LetterExtent>> presentedLetters;
@@ -736,11 +749,16 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
     // ---- window + chrome ----
     GtkApplication* application = nullptr; // the bell notification is sent through it
     GtkWidget* window = nullptr;
-    Ubiquitty::Linux::Presentation::WindowAppearance windowAppearance;
+    Ubiquitty::Linux::GTK::WindowAppearance windowAppearance;
     std::optional<std::uint32_t> omarchyAccent;
     GtkWidget* paneContainer = nullptr; // holds the active tab's pane widget tree (one leaf, or GtkPaned)
-    GtkWidget* tabStrip = nullptr;
-    GtkWidget* menuButton = nullptr;
+    // The header bar and tab bar; absent in a chromeless build.
+    std::unique_ptr<Ubiquitty::Linux::GTK::WindowChrome> chrome;
+    // The terminal's context menu, parented to the window; unparented with it.
+    GtkWidget* contextMenu = nullptr;
+    // Set once the reader has agreed to end what the window runs, so the
+    // close that answer starts is not asked about again.
+    bool isCloseConfirmed = false;
     GtkWidget* scrollIndicator = nullptr;
     guint scrollIndicatorSource = 0;
     GtkWidget* progressBar = nullptr; // GtkDrawingArea, can't-target so input passes through
@@ -1282,6 +1300,8 @@ void switchToTab(TabID tab);
 std::string buildTabLabel(LinuxPane& pane, int index);
 void switchTabRelative(int delta);
 void rebuildTabStrip();
+void installTabActions();
+Ubiquitty::Linux::Presentation::PaneMarks paneMarks(LinuxPane& pane);
 void updateWindowTitle();
 const Ubiquitty::Preferences::Values& loadPreferences();
 Ubiquitty::App::PaneTitleFacts paneTitleFacts(LinuxPane& pane, const Ubiquitty::Preferences::Effective::TitleComposition& composition);
@@ -1289,6 +1309,11 @@ Ubiquitty::App::TitleViewerFacts titleViewerFacts(std::string fallbackName);
 void rebuildPaneTree();
 void splitFocusedPaneUX(Panes::Orientation orientation);
 void closeFocusedPaneUX();
+void newWindow();
+void pasteTextUX(std::string_view text);
+void closeFocusedPaneNow();
+void closeTabUX(TabID tab);
+void confirmClose(Ubiquitty::Session::CloseScope scope, const std::vector<PaneID>& panes, std::function<void()> proceed);
 void moveFocusUX(Panes::Direction direction);
 
 // Pointer lock (DECSET 7403), forward-declared for onKeyPressed / onKeyReleased
@@ -1771,6 +1796,7 @@ void pasteClipboard(GdkClipboard* clipboard, Ubiquitty::ClipboardBuffer buffer)
 // Forward decl: the key handler (Ctrl+Shift+C) copies before the selection
 // section that defines it.
 bool copySelectionToClipboard();
+void copySelectionUX();
 void selectAll(); // Ctrl+Shift+A — select the whole buffer (defined below)
 bool openLinkAtCell(int row, int column, GdkModifierType state, int pressCount); // the press handler's link fallback (defined below)
 
@@ -1814,18 +1840,45 @@ Ubiquitty::Rendering::EdgeInsets paneInsets(const LinuxPane& pane, float scale)
 {
     if (pane.session && pane.session->readSnapshot().isEdgeToEdge)
         return {};
-    const auto padding = loadPreferences().resolvedPadding();
+    const Ubiquitty::Preferences::Values& config = loadPreferences();
+    auto padding = config.resolvedPadding();
+    // Core's desktop default leaves the top edge bare because a solid title bar
+    // separates the text from it. libadwaita's raised top bar casts a shadow
+    // over the content instead, so an unstated top edge takes the inset a window
+    // without a title bar gets.
+    if (app().chrome && !config.paddingTop.has_value())
+        padding.top = Ubiquitty::Preferences::Effective::titlelessPaddingTop(config);
     return { static_cast<float>(padding.left) * scale, static_cast<float>(padding.right) * scale,
         static_cast<float>(padding.top) * scale, static_cast<float>(padding.bottom) * scale };
 }
 
-Ubiquitty::Linux::Presentation::PaneGeometry paneGeometry(const LinuxPane& pane, Ubiquitty::GridSize grid,
+// The size a pane's frame is drawn at, in device pixels: its picture's
+// allocation, else the last one it had, else the pane area's. A background
+// tab's picture is unmounted and reports 0x0, and a frame drawn for it at that
+// size has no room for its padding — shown when the tab is switched to, it
+// puts the grid at the pane's edge until the next frame moves it into place.
+Ubiquitty::FloatSize paneViewport(LinuxPane& pane)
+{
+    const auto deviceSize = [](GtkWidget* widget) {
+        return Ubiquitty::FloatSize { static_cast<float>(gtk_widget_get_width(widget) * app().scale),
+            static_cast<float>(gtk_widget_get_height(widget) * app().scale) };
+    };
+    if (pane.picture) {
+        const Ubiquitty::FloatSize allocated = deviceSize(pane.picture);
+        if (allocated.width > 0 && allocated.height > 0) {
+            pane.lastViewport = allocated;
+            return allocated;
+        }
+    }
+    if (pane.lastViewport.width > 0 && pane.lastViewport.height > 0)
+        return pane.lastViewport;
+    return app().paneContainer ? deviceSize(app().paneContainer) : Ubiquitty::FloatSize {};
+}
+
+Ubiquitty::Linux::Presentation::PaneGeometry paneGeometry(LinuxPane& pane, Ubiquitty::GridSize grid,
     Ubiquitty::Rendering::RemoteViewportRequest request = {})
 {
-    const Ubiquitty::FloatSize viewport {
-        static_cast<float>(pane.picture ? gtk_widget_get_width(pane.picture) * app().scale : 0),
-        static_cast<float>(pane.picture ? gtk_widget_get_height(pane.picture) * app().scale : 0),
-    };
+    const Ubiquitty::FloatSize viewport = paneViewport(pane);
     return Ubiquitty::Linux::Presentation::PaneGeometry::resolve(viewport, paneInsets(pane, static_cast<float>(app().scale)),
         { static_cast<float>(app().rasterContext.cellWidth()), static_cast<float>(app().rasterContext.cellHeight()) }, grid, request);
 }
@@ -2369,6 +2422,31 @@ Ubiquitty::App::TitleViewerFacts titleViewerFacts(std::string fallbackName)
     return viewer;
 }
 
+// What a pane shows beside its title in the header and its tab: the program
+// it runs, by Core's process-icon catalog, and the status that program
+// reported, as Core's roll-up kinds it.
+Ubiquitty::Linux::Presentation::PaneMarks paneMarks(LinuxPane& pane)
+{
+    Ubiquitty::Linux::Presentation::PaneMarks marks;
+    marks.hasUnheardBell = pane.hasUnheardBell;
+    std::uint8_t reportedProcessIcon = 0;
+    if (Ubiquitty::Terminal* term = pane.session->terminal()) {
+        const auto hold = holdPaneModel(pane);
+        if (const auto* record = term->programStatus.primary()) {
+            Ubiquitty::App::PaneStatusFacts facts;
+            facts.programState = record->state;
+            marks.status = Ubiquitty::Linux::Presentation::statusSymbol(Ubiquitty::App::paneStatusKind(facts),
+                record->state == Ubiquitty::OSC::ProgramState::Blocked ? record->kind : Ubiquitty::OSC::ProgramBlockKind::None);
+        }
+        reportedProcessIcon = Ubiquitty::Title::processIconOrdinal(Ubiquitty::Title::processIconReported(term->programStatus));
+    }
+    if (Ubiquitty::Preferences::Effective::processIcons(loadPreferences())) {
+        marks.processIconKey = pane.session->processIconKey(reportedProcessIcon);
+        marks.processIconTitle = Ubiquitty::Title::processIconTitle(marks.processIconKey);
+    }
+    return marks;
+}
+
 // The window title, composed by Core from the active pane's facts under the
 // reader's window composition. set_title only on an actual change (the
 // periodic refresh + the OSC path both call this).
@@ -2379,7 +2457,10 @@ void updateWindowTitle()
     if (!activePane()->session->terminal())
         return;
     const Ubiquitty::Preferences::Effective::TitleComposition composition = Ubiquitty::Preferences::Effective::windowTitleComposition(loadPreferences());
-    std::string title = Ubiquitty::App::composeTitle(paneTitleFacts(*activePane(), composition), titleViewerFacts("Ubiquitty (Linux)"), composition, Ubiquitty::Session::TitleSurface::Window).title;
+    const Ubiquitty::App::PaneTitleFacts facts = paneTitleFacts(*activePane(), composition);
+    if (app().chrome)
+        app().chrome->showTitle(Ubiquitty::Linux::Presentation::windowTitleContent(facts, titleViewerFacts("Ubiquitty"), composition), paneMarks(*activePane()));
+    std::string title = Ubiquitty::App::composeTitle(facts, titleViewerFacts("Ubiquitty (Linux)"), composition, Ubiquitty::Session::TitleSurface::Window).title;
     if (activePane()->hasUnheardBell) {
         title = "🔔 " + title;
     }
@@ -2712,8 +2793,67 @@ void closeWindowApp(App& owner)
     owner.configurationSubscription.reset();
 }
 
+// A callback that runs in this window's scope later — after a dialog is
+// answered — and not at all once the window's state has gone. A closing window
+// still hears it, so a question it asked on Core's behalf is still answered.
+std::function<void()> inThisWindow(std::function<void()> body)
+{
+    return [owner = app().weak_from_this(), body = std::move(body)] {
+        const std::shared_ptr<App> window = owner.lock();
+        if (!window)
+            return;
+        AppScope scope(*window);
+        body();
+    };
+}
+
+// Ends panes after asking, when any of them runs a job the reader would miss:
+// the question and what it lists are Core's (`Session::closeConfirmationTitle`
+// and `closeConfirmationBody`), the same macOS asks. Panes that run nothing
+// end without a question. The panes are named by identifier, since the
+// answer may come after some of them have ended on their own.
+void confirmClose(Ubiquitty::Session::CloseScope scope, const std::vector<PaneID>& panes, std::function<void()> proceed)
+{
+    std::vector<std::string> names;
+    bool isSafe = true;
+    for (const PaneID id : panes) {
+        if (app().model->isPaneSafeToClose(id))
+            continue;
+        isSafe = false;
+        if (LinuxPane* pane = paneForID(id)) {
+            for (std::string& name : pane->session->runningProcessNamesForClose())
+                names.push_back(std::move(name));
+        }
+    }
+    if (isSafe || !app().window) {
+        proceed();
+        return;
+    }
+    if (Ubiquitty::Linux::GTK::isShowingDialog(app().window))
+        return; // one question at a time
+    Ubiquitty::Linux::GTK::ask(app().window,
+        { .heading = Ubiquitty::Session::closeConfirmationTitle(scope),
+            .body = Ubiquitty::Session::closeConfirmationBody(scope, names),
+            .acceptLabel = "_Terminate",
+            .acceptStyle = Ubiquitty::Linux::GTK::AcceptStyle::Destructive },
+        inThisWindow(std::move(proceed)));
+}
+
 gboolean onWindowCloseRequested(GtkWindow*, gpointer)
 {
+    // A window whose panes run a job asks first, as macOS does: what ends is
+    // Core's to say. The answer closes the window again, confirmed.
+    if (!app().isCloseConfirmed && !app().model->isSurfaceSafeToClose(app().model->activeSurface())) {
+        std::vector<PaneID> panes;
+        for (const auto& pane : app().panes)
+            panes.push_back(paneIDForPane(pane.get()));
+        confirmClose(Ubiquitty::Session::CloseScope::Window, panes, [] {
+            app().isCloseConfirmed = true;
+            if (app().window)
+                gtk_window_close(GTK_WINDOW(app().window));
+        });
+        return TRUE;
+    }
     closeWindowApp(app());
     return FALSE;
 }
@@ -2721,6 +2861,10 @@ gboolean onWindowCloseRequested(GtkWindow*, gpointer)
 void onWindowUnrealized(GtkWidget* widget, gpointer)
 {
     auto retained = app().shared_from_this();
+    if (retained->contextMenu) {
+        gtk_widget_unparent(retained->contextMenu);
+        retained->contextMenu = nullptr;
+    }
     closeWindowApp(*retained);
     retained->window = nullptr;
     retained->paneContainer = nullptr;
@@ -2797,11 +2941,24 @@ void noteCursorInput(LinuxPane& pane, double nowSeconds = static_cast<double>(g_
     pane.cursorPresentationBypassUntil = nowSeconds + Ubiquitty::Rendering::cursorPresentationInputBypassSeconds;
 }
 
+// One pane's cursor. Only the focused pane's is live: every other pane of a
+// split draws its cursor unfocused and steady, as an inactive window does, so
+// the one that takes the keys is the one that blinks.
+Ubiquitty::Linux::CursorOverlay resolvePaneCursorOverlay(const LinuxPane& pane, const Ubiquitty::Terminal* term)
+{
+    Ubiquitty::Linux::CursorOverlay cursor = resolveCursorOverlay(term);
+    if (&pane != activePane()) {
+        cursor.focused = false;
+        cursor.blinkAlpha = 1.0f;
+    }
+    return cursor;
+}
+
 Ubiquitty::Linux::CursorOverlay resolvePresentedCursorOverlay(LinuxPane& pane, double nowSeconds, double intervalSeconds)
 {
     const Ubiquitty::Terminal* term = pane.session ? pane.session->terminal() : nullptr;
     const auto hold = holdPaneModel(pane);
-    Ubiquitty::Linux::CursorOverlay cursor = resolveCursorOverlay(term);
+    Ubiquitty::Linux::CursorOverlay cursor = resolvePaneCursorOverlay(pane, term);
     Ubiquitty::Linux::CursorOverlay candidate = cursor;
     candidate.visible = true;
     Ubiquitty::Rendering::CursorPresentation::Frame frame;
@@ -2922,7 +3079,7 @@ void refreshOmarchyAccent(int index)
 
 void refreshNativeLinkAccentColor()
 {
-    const GdkRGBA nativeColor = Ubiquitty::Linux::Presentation::WindowAppearance::nativeLinkColor();
+    const GdkRGBA nativeColor = Ubiquitty::Linux::GTK::WindowAppearance::nativeLinkColor();
     const Ubiquitty::Rendering::Vec4 color { nativeColor.red, nativeColor.green, nativeColor.blue, nativeColor.alpha };
     const auto& previous = app().rasterContext.frameLinkAccentColor();
     if (previous.x == color.x && previous.y == color.y && previous.z == color.z && previous.w == color.w)
@@ -2939,6 +3096,33 @@ void refreshNativeLinkAccentColor()
     requestRepaint();
 }
 
+// The theme a configuration selects: the one for the desktop's light or dark
+// style when the reader follows it (`[appearance] follow_system`, with its
+// `system_light_theme` and `system_dark_theme`), else the configured one.
+// libadwaita's style manager is the system's style because this frontend never
+// forces a colour scheme on it.
+// Whether the theme follows the desktop's light or dark style. Set, the switch
+// decides; unset, it follows only while no theme is named, so a theme a
+// configuration names — Omarchy's, say — is kept as this frontend always kept it.
+bool doesThemeFollowSystem(const Ubiquitty::Preferences::Values& config)
+{
+    if (config.followSystemAppearance.has_value())
+        return *config.followSystemAppearance;
+    return Ubiquitty::Preferences::Effective::followSystemAppearance(config) && Ubiquitty::Runtime::configuredThemeIndex(config) < 0;
+}
+
+int selectedThemeIndex(const Ubiquitty::Preferences::Values& config)
+{
+    if (doesThemeFollowSystem(config)) {
+        adw_init();
+        const bool isDark = adw_style_manager_get_dark(adw_style_manager_get_default());
+        const int index = Ubiquitty::Themes::resolvedAutomaticThemeIndex(isDark ? Ubiquitty::Themes::AutomaticAppearance::Dark : Ubiquitty::Themes::AutomaticAppearance::Light);
+        if (index >= 0)
+            return index;
+    }
+    return Ubiquitty::Runtime::launchThemeIndex(config);
+}
+
 void applyChromeTheme(int index)
 {
     refreshOmarchyAccent(index);
@@ -2946,7 +3130,12 @@ void applyChromeTheme(int index)
     if (!theme || !app().window)
         return;
     refreshNativeLinkAccentColor();
-    app().windowAppearance.apply(app().window, app().paneContainer, *theme, app().rasterContext.backgroundOpacity());
+    const Ubiquitty::Preferences::TitlebarStyle titlebarStyle = Ubiquitty::Preferences::Effective::titlebarStyle(loadPreferences());
+    app().windowAppearance.apply(app().window, app().paneContainer, *theme, app().rasterContext.backgroundOpacity(), titlebarStyle);
+    if (app().chrome) {
+        const auto& ground = theme->defaultBackground;
+        app().chrome->setStyle(titlebarStyle, (std::uint32_t { ground.red } << 16) | (std::uint32_t { ground.green } << 8) | ground.blue);
+    }
 }
 
 // Apply a theme to every pane, not just the focused one. Each pane owns its own
@@ -2975,6 +3164,25 @@ void applyThemeToAllPanes(int index)
             pane->isFrameDeclined = false;
         }
     }
+}
+
+// The desktop switched between its light and dark style.
+void onSystemAppearanceChanged(AdwStyleManager*, GParamSpec*, gpointer)
+{
+    // A stock chrome's ground follows the system style.
+    if (app().chrome)
+        app().chrome->refreshGround();
+    const Ubiquitty::Preferences::Values& config = loadPreferences();
+    if (!doesThemeFollowSystem(config))
+        return;
+    const int index = selectedThemeIndex(config);
+    const auto* theme = Ubiquitty::Themes::get(index);
+    if (!theme || index == app().liveThemeIndex)
+        return;
+    // Recorded as the configuration's choice, so the next reload keeps it.
+    app().configuredThemeName = theme->name;
+    applyThemeToAllPanes(index);
+    rebuildTabStrip();
 }
 
 // Actions Beam offers, derived from Core's named-action catalog rather than
@@ -3638,7 +3846,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     std::vector<uint8_t>& rgba = *frameBuffer;
     int width = 0, height = 0;
     const double nowSeconds = static_cast<double>(g_get_monotonic_time()) / 1e6;
-    Ubiquitty::Linux::CursorOverlay cursor = pane.pendingCapture ? resolveCursorOverlay(term)
+    Ubiquitty::Linux::CursorOverlay cursor = pane.pendingCapture ? resolvePaneCursorOverlay(pane, term)
                                                                  : resolvePresentedCursorOverlay(pane, nowSeconds, cursorPresentationInterval(picture));
     if (pane.pendingCapture) {
         pane.pendingCapture->setCursorMixAlpha(cursor.blinkAlpha);
@@ -4360,6 +4568,41 @@ void pasteText(std::string_view text)
     armPTYWriteDrain(activePane());
 }
 
+// A paste the reader asked for. One that would type more lines than the
+// reader allows (`[paste] confirm_multiline`, Core's line count) is shown
+// first and sent only if they agree, as macOS asks; the pane it was asked for
+// gets it, or nothing if that pane has gone.
+void pasteTextUX(std::string_view text)
+{
+    if (text.empty())
+        return;
+    const Ubiquitty::Preferences::Values& config = loadPreferences();
+    const int lines = Ubiquitty::Input::pasteLineCount(text);
+    if (!app().window || !Ubiquitty::Preferences::Effective::confirmMultilinePaste(config)
+        || lines <= Ubiquitty::Preferences::Effective::confirmMultilinePasteThreshold(config)) {
+        pasteText(text);
+        return;
+    }
+    if (Ubiquitty::Linux::GTK::isShowingDialog(app().window))
+        return;
+    // The preview is bounded; the paste is not.
+    constexpr std::size_t previewBytes = 16 * 1024;
+    std::string preview(Ubiquitty::Title::titleBytePrefix(text, previewBytes));
+    if (preview.size() < text.size())
+        preview += "\n… (preview truncated)";
+    const PaneID pane = paneIDForPane(activePane());
+    Ubiquitty::Linux::GTK::ask(app().window,
+        { .heading = "Paste " + std::to_string(lines) + " Lines?",
+            .body = "Pasting multiple lines may run several shell commands.",
+            .acceptLabel = "_Paste",
+            .acceptStyle = Ubiquitty::Linux::GTK::AcceptStyle::Destructive,
+            .preview = std::move(preview) },
+        inThisWindow([pane, payload = std::string(text)] {
+            if (paneIDForPane(activePane()) == pane)
+                pasteText(payload);
+        }));
+}
+
 // File drop.
 
 // Assemble dropped file paths into ready-to-paste shell arguments: each path
@@ -4426,7 +4669,7 @@ void onClipboardPasted(GObject* source, GAsyncResult* result, gpointer)
     char* text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), result, nullptr);
     if (text) {
         if (app().window && activePane())
-            pasteText(text);
+            pasteTextUX(text);
         g_free(text);
     }
 }
@@ -4493,7 +4736,7 @@ void hideSearchBar()
         session->clearScrollbackSearch();
     requestRepaint();
     if (app().window)
-        gtk_widget_grab_focus(app().window);
+        gtk_window_set_focus(GTK_WINDOW(app().window), nullptr); // the terminal has the keys while nothing else does
 }
 
 void onSearchStop(GtkSearchEntry*, gpointer) { hideSearchBar(); }
@@ -4825,7 +5068,7 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
         break;
 
     case ActionKind::Copy:
-        copySelectionToClipboard();
+        copySelectionUX();
         break;
     case ActionKind::Paste:
         if (app().window)
@@ -4922,7 +5165,7 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
             // thing that reads it, and resolving [appearance] here keeps the
             // theme hookup in one place instead of two that must agree.
             if (app().liveThemeIndex < 0)
-                app().liveThemeIndex = Ubiquitty::Runtime::launchThemeIndex(Ubiquitty::Preferences::values());
+                app().liveThemeIndex = selectedThemeIndex(Ubiquitty::Preferences::values());
             const auto hold = holdPaneModel(*activePane());
             fillBeamScopes(activePane()->session->terminal());
         }
@@ -4930,9 +5173,11 @@ void executeBindingAction(const Ubiquitty::Input::BindingAction& action)
         requestRepaint();
         break;
 
-    // No multi-window or named-command frontend dispatch on Linux yet; left
-    // cleanly unhandled rather than inventing a half-feature (matches macOS).
     case ActionKind::NewWindow:
+        newWindow();
+        break;
+    // No named-command frontend dispatch on Linux yet; left cleanly unhandled
+    // rather than inventing a half-feature (matches macOS).
     case ActionKind::Named:
         break;
     }
@@ -5157,7 +5402,7 @@ void applyLiveConfiguration()
     applyProcessConfiguration(config);
     applyPerTerminalConfiguration(config);
     applyWindowGlobalRenderSettings(config);
-    const int configuredTheme = Ubiquitty::Runtime::launchThemeIndex(config);
+    const int configuredTheme = selectedThemeIndex(config);
     const auto* configuredPalette = Ubiquitty::Themes::get(configuredTheme);
     const std::string configuredName = configuredPalette ? configuredPalette->name : "";
     const bool didConfiguredThemeChange = !app().configuredThemeName || *app().configuredThemeName != configuredName;
@@ -5294,10 +5539,15 @@ void runBeamAction(const Ubiquitty::CommandPalette::BeamAction& action)
 bool doesMenuOwnKeys()
 {
     GtkWidget* focus = app().window ? gtk_window_get_focus(GTK_WINDOW(app().window)) : nullptr;
-    if (app().menuButton) {
-        GtkPopover* popover = gtk_menu_button_get_popover(GTK_MENU_BUTTON(app().menuButton));
-        if ((popover && gtk_widget_get_visible(GTK_WIDGET(popover))) || focus == app().menuButton
-            || (focus && gtk_widget_is_ancestor(focus, app().menuButton)))
+    // An open dialog — a close confirmation, say — answers its own keys: the
+    // terminal's capture-phase handler would otherwise take Return from it.
+    if (Ubiquitty::Linux::GTK::isShowingDialog(app().window))
+        return true;
+    if (app().chrome) {
+        GtkWidget* menuButton = GTK_WIDGET(app().chrome->menuButton());
+        GtkPopover* popover = gtk_menu_button_get_popover(GTK_MENU_BUTTON(menuButton));
+        if ((popover && gtk_widget_get_visible(GTK_WIDGET(popover))) || focus == menuButton
+            || (focus && gtk_widget_is_ancestor(focus, menuButton)))
             return true;
     }
     return false;
@@ -5396,7 +5646,7 @@ gboolean onKeyPressed(GtkEventControllerKey* controller, guint keyval, guint key
     // Ctrl+Shift+C copies the current selection (the de-facto terminal copy
     // accelerator; plain Ctrl+C stays SIGINT). Consumed here, never sent to the PTY.
     if ((state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK) && (keyval == GDK_KEY_C || keyval == GDK_KEY_c)) {
-        copySelectionToClipboard();
+        copySelectionUX();
         return GDK_EVENT_STOP;
     }
 
@@ -6613,6 +6863,15 @@ bool copySelectionToClipboard()
     return true;
 }
 
+// A copy the reader asked for — the Copy action, Ctrl+Shift+C — says so with
+// a toast, as GNOME apps confirm a copy. Copy-on-select does not: it would
+// toast on every drag.
+void copySelectionUX()
+{
+    if (copySelectionToClipboard() && app().chrome)
+        app().chrome->showToast("Copied to clipboard");
+}
+
 // Select All (Ctrl+Shift+A, macOS Edit > Select All / Cmd-A parity): the
 // facade marks the whole buffer selected — oldest scrollback row through the
 // live screen's last cell, the screen alone on the alternate screen. The copy
@@ -7583,75 +7842,61 @@ bool launchShell()
 std::string buildTabLabel(LinuxPane& pane, int index)
 {
     const Ubiquitty::Preferences::Effective::TitleComposition composition = Ubiquitty::Preferences::Effective::tabTitleComposition(loadPreferences());
-    std::string label = Ubiquitty::App::composeTitle(paneTitleFacts(pane, composition), titleViewerFacts("Tab " + std::to_string(index + 1)), composition, Ubiquitty::Session::TitleSurface::Tab).title;
-    if (pane.hasUnheardBell) {
-        label = "🔔 " + label;
-    }
-    return label;
+    return Ubiquitty::App::composeTitle(paneTitleFacts(pane, composition), titleViewerFacts("Tab " + std::to_string(index + 1)), composition, Ubiquitty::Session::TitleSurface::Tab).title;
 }
 
-void onTabButtonClicked(GtkToggleButton* button, gpointer)
-{
-    const TabID tab = static_cast<TabID>(GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(button), "ubiquitty-tab-id")));
-    switchToTab(tab);
-}
-
-void onNewTabClicked(GtkButton*, gpointer) { newTab(); }
-
-// The model owns tab identity and selection. The label can elide on screen;
-// the tooltip retains the complete title. Keep each surviving button alive:
-// a title refresh can run while GTK is delivering focus to that button.
+// The model owns tab identity and selection; the chrome's tab bar shows them
+// and keeps each tab's widgets across refreshes, so a title refresh never
+// takes focus or a press from a tab.
 void rebuildTabStrip()
 {
-    if (!app().tabStrip)
+    if (!app().chrome)
         return;
     const SurfaceID surface = app().model->activeSurface();
     const int tabCount = app().model->tabCount(surface);
-    for (GtkWidget* child = gtk_widget_get_first_child(app().tabStrip); child;) {
-        GtkWidget* next = gtk_widget_get_next_sibling(child);
-        const TabID tab = static_cast<TabID>(GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(child), "ubiquitty-tab-id")));
-        bool isPresent = false;
-        for (int i = 0; i < tabCount; ++i)
-            isPresent |= app().model->tabAt(surface, i) == tab;
-        if (!isPresent)
-            gtk_box_remove(GTK_BOX(app().tabStrip), child);
-        child = next;
-    }
-    if (tabCount <= 0)
-        return;
     const TabID activeTab = app().model->activeTab(surface);
-    GtkWidget* group = nullptr;
-    GtkWidget* previous = nullptr;
+    std::vector<Ubiquitty::Linux::Presentation::TabItem> tabs;
+    tabs.reserve(static_cast<std::size_t>(std::max(tabCount, 0)));
     for (int i = 0; i < tabCount; ++i) {
         const TabID tab = app().model->tabAt(surface, i);
         const Panes::Tree* tree = app().model->paneTree(surface, tab);
         const PaneID paneID = tree != nullptr ? static_cast<PaneID>(tree->focusedPaneID()) : invalidPane;
         LinuxPane* pane = paneForID(paneID);
-        const std::string label = pane != nullptr ? buildTabLabel(*pane, i) : ("Tab " + std::to_string(i + 1));
-        GtkWidget* button = gtk_widget_get_first_child(app().tabStrip);
-        while (button && static_cast<TabID>(GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(button), "ubiquitty-tab-id"))) != tab)
-            button = gtk_widget_get_next_sibling(button);
-        if (!button) {
-            button = gtk_toggle_button_new();
-            gtk_widget_set_focus_on_click(button, FALSE);
-            if (group)
-                gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(button), GTK_TOGGLE_BUTTON(group));
-            g_object_set_data(G_OBJECT(button), "ubiquitty-tab-id", GUINT_TO_POINTER(tab));
-            // Programmatic selection emits toggled, not clicked.
-            windowSignalConnect(button, "clicked", G_CALLBACK(onTabButtonClicked), nullptr);
-            gtk_box_append(GTK_BOX(app().tabStrip), button);
-        }
-        gtk_button_set_label(GTK_BUTTON(button), label.c_str());
-        gtk_widget_set_tooltip_text(button, label.c_str());
-        GtkWidget* text = gtk_button_get_child(GTK_BUTTON(button));
-        gtk_label_set_ellipsize(GTK_LABEL(text), PANGO_ELLIPSIZE_MIDDLE);
-        gtk_label_set_max_width_chars(GTK_LABEL(text), 28);
-        if (!group)
-            group = button;
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(button), tab == activeTab);
-        gtk_box_reorder_child_after(GTK_BOX(app().tabStrip), button, previous);
-        previous = button;
+        tabs.push_back({
+            .identifier = static_cast<std::uint32_t>(tab),
+            .label = pane != nullptr ? buildTabLabel(*pane, i) : ("Tab " + std::to_string(i + 1)),
+            .isActive = tab == activeTab,
+            .marks = pane != nullptr ? paneMarks(*pane) : Ubiquitty::Linux::Presentation::PaneMarks {},
+        });
     }
+    app().chrome->showTabs(tabs);
+    // The tab buttons are checked by the action's state.
+    if (GAction* action = g_action_map_lookup_action(G_ACTION_MAP(app().window), "active-tab"))
+        g_simple_action_set_state(G_SIMPLE_ACTION(action), g_variant_new_uint32(static_cast<std::uint32_t>(activeTab)));
+}
+
+// The tab bar's actions: selecting a tab and closing one, each naming the tab
+// by its model identifier.
+void installTabActions()
+{
+    GSimpleAction* activeTab = g_simple_action_new_stateful("active-tab", G_VARIANT_TYPE_UINT32,
+        g_variant_new_uint32(static_cast<std::uint32_t>(app().model->activeTab(app().model->activeSurface()))));
+    windowSignalConnect(activeTab, "change-state", G_CALLBACK(+[](GSimpleAction*, GVariant* value, gpointer) {
+        switchToTab(static_cast<TabID>(g_variant_get_uint32(value)));
+        // Re-assert the model's selection: a refused switch leaves it unchanged.
+        rebuildTabStrip();
+    }),
+        nullptr);
+    g_action_map_add_action(G_ACTION_MAP(app().window), G_ACTION(activeTab));
+    g_object_unref(activeTab);
+
+    GSimpleAction* closeTab = g_simple_action_new("close-tab", G_VARIANT_TYPE_UINT32);
+    windowSignalConnect(closeTab, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant* value, gpointer) {
+        closeTabUX(static_cast<TabID>(g_variant_get_uint32(value)));
+    }),
+        nullptr);
+    g_action_map_add_action(G_ACTION_MAP(app().window), G_ACTION(closeTab));
+    g_object_unref(closeTab);
 }
 
 // Make paneID's tab the active one: re-point activePane(), drop stale per-window
@@ -7913,7 +8158,51 @@ void splitFocusedPaneUX(Panes::Orientation orientation)
 // Close the focused pane. A multi-pane tab collapses one split level (focus moves to
 // a neighbor leaf); the tab's last pane escalates to closePaneTab (close the tab, or
 // the window on the last tab).
+// Closes a tab the reader asked to close, asking first if it runs a job. The
+// last tab is the window, and is asked about as one.
+void closeTabUX(TabID tab)
+{
+    const SurfaceID surface = app().model->activeSurface();
+    const Panes::Tree* tree = app().model->paneTree(surface, tab);
+    if (!tree)
+        return;
+    std::vector<PaneID> panes;
+    for (const auto& pane : app().panes) {
+        const PaneID id = paneIDForPane(pane.get());
+        if (tree->holdsPane(static_cast<int>(id)))
+            panes.push_back(id);
+    }
+    const bool isLastTab = app().model->tabCount(surface) <= 1;
+    confirmClose(isLastTab ? Ubiquitty::Session::CloseScope::Window : Ubiquitty::Session::CloseScope::Tab, panes, [tab, isLastTab] {
+        const Panes::Tree* closing = app().model->paneTree(app().model->activeSurface(), tab);
+        if (!closing)
+            return; // it ended on its own while the question was open
+        if (isLastTab)
+            app().isCloseConfirmed = true;
+        closePaneTab(paneForID(static_cast<PaneID>(closing->focusedPaneID())));
+    });
+}
+
+// Closes the focused pane the reader asked to close, asking first if it runs a
+// job; a lone pane is its tab.
 void closeFocusedPaneUX()
+{
+    const SurfaceID surface = app().model->activeSurface();
+    const Panes::Tree* tree = app().model->paneTree(surface);
+    if (!tree || tree->paneCount() <= 1) {
+        closeTabUX(app().model->activeTab(surface));
+        return;
+    }
+    const PaneID pane = paneIDForPane(activePane());
+    confirmClose(Ubiquitty::Session::CloseScope::Pane, { pane }, [pane] {
+        // The answer may come after focus has moved: the pane asked about is
+        // the one closed, and only while it still is the focused one.
+        if (paneIDForPane(activePane()) == pane)
+            closeFocusedPaneNow();
+    });
+}
+
+void closeFocusedPaneNow()
 {
     const SurfaceID surface = app().model->activeSurface();
     const Panes::Tree* tree = app().model->paneTree(surface);
@@ -7983,12 +8272,8 @@ void onUpdateApplyExited(GPid processID, gint status, gpointer)
     showUpdateResult(Ubiquitty::Linux::Updater::statusForApplyExit(status));
 }
 
-void onUpdateNowChosen(GObject* source, GAsyncResult* result, gpointer)
+void updateNow()
 {
-    // Buttons: { "Later"=0, "Update Now"=1 }.
-    const int index = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, nullptr);
-    if (index != 1)
-        return;
     // Watched, not fired and forgotten. The tool writes over the file this
     // process is running from, so a refusal or a failed download leaves the old
     // version in place and looks exactly like a success from here.
@@ -8033,19 +8318,19 @@ const char* updateResultHeading(Ubiquitty::Linux::Updater::Status status)
 void showUpdateResult(Ubiquitty::Linux::Updater::Status status)
 {
     using S = Ubiquitty::Linux::Updater::Status;
-    GtkWindow* parent = (app().window != nullptr) ? GTK_WINDOW(app().window) : nullptr;
-    GtkAlertDialog* dialog = gtk_alert_dialog_new("%s", updateResultHeading(status));
-    gtk_alert_dialog_set_detail(dialog, Ubiquitty::Linux::Updater::statusString(status));
+    if (!app().window)
+        return;
     if (status == S::UpdateAvailable) {
-        const char* buttons[] = { "Later", "Update Now", nullptr };
-        gtk_alert_dialog_set_buttons(dialog, buttons);
-        gtk_alert_dialog_set_default_button(dialog, 1);
-        gtk_alert_dialog_set_cancel_button(dialog, 0);
-        gtk_alert_dialog_choose(dialog, parent, nullptr, onWindowAsyncReady, windowAsyncData(onUpdateNowChosen, nullptr));
+        Ubiquitty::Linux::GTK::ask(app().window,
+            { .heading = updateResultHeading(status),
+                .body = Ubiquitty::Linux::Updater::statusString(status),
+                .acceptLabel = "_Update Now",
+                .declineLabel = "_Later",
+                .isAcceptTheDefault = true },
+            inThisWindow(updateNow));
     } else {
-        gtk_alert_dialog_show(dialog, parent);
+        Ubiquitty::Linux::GTK::tell(app().window, updateResultHeading(status), Ubiquitty::Linux::Updater::statusString(status));
     }
-    g_object_unref(dialog);
 }
 
 void onUpdateCheckExited(GPid processID, gint status, gpointer)
@@ -8086,33 +8371,78 @@ void onCheckUpdateAction(GSimpleAction*, GVariant*, gpointer)
 
 void onAboutAction(GSimpleAction*, GVariant*, gpointer)
 {
-    gtk_show_about_dialog(app().window ? GTK_WINDOW(app().window) : nullptr,
-        "program-name", "Ubiquitty",
-        "version", Ubiquitty::Protocol::Sync::appVersionWithIdentity().c_str(),
-        "comments", "A terminal emulator and persistent multiplexer",
-        "website", "https://ubiquitty.org",
-        "website-label", "ubiquitty.org",
-        "copyright", "Copyright © 2026 Stanislav Yaglo",
-        "license-type", GTK_LICENSE_APACHE_2_0,
-        "logo-icon-name", "org.ubiquitty.linux",
-        "modal", TRUE,
-        nullptr);
+    if (!app().window)
+        return;
+    // libadwaita's About dialog, as every GNOME app shows its own.
+    AdwDialog* about = adw_about_dialog_new();
+    AdwAboutDialog* dialog = ADW_ABOUT_DIALOG(about);
+    adw_about_dialog_set_application_name(dialog, "Ubiquitty");
+    adw_about_dialog_set_application_icon(dialog, Ubiquitty::Linux::GTK::applicationIconName);
+    adw_about_dialog_set_version(dialog, Ubiquitty::Protocol::Sync::appVersionWithIdentity().c_str());
+    adw_about_dialog_set_comments(dialog, "A terminal emulator and persistent multiplexer");
+    adw_about_dialog_set_developer_name(dialog, "Stanislav Yaglo");
+    adw_about_dialog_set_website(dialog, "https://ubiquitty.org");
+    adw_about_dialog_set_copyright(dialog, "Copyright © 2026 Stanislav Yaglo");
+    adw_about_dialog_set_license_type(dialog, GTK_LICENSE_APACHE_2_0);
+    adw_dialog_present(about, app().window);
 }
 
-void onSecondaryPress(GtkGestureClick* gesture, gint, gdouble, gdouble, gpointer)
+// A new window of its own: the activation the desktop sends opens the same.
+void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runtime::LaunchRequest> request, std::string directory, std::string windowApplicationID);
+
+void newWindow()
 {
-    if (!app().menuButton)
+    if (app().application)
+        openWindowApp(app().application, std::nullopt, {}, {});
+}
+
+// A secondary click on the terminal opens its context menu where it was made.
+// Copy is offered only while something is selected.
+void onSecondaryPress(GtkGestureClick* gesture, gint, gdouble x, gdouble y, gpointer)
+{
+    if (!app().contextMenu || !app().window)
         return;
-    gtk_menu_button_popup(GTK_MENU_BUTTON(app().menuButton));
+    if (GAction* copy = g_action_map_lookup_action(G_ACTION_MAP(app().window), "copy"))
+        g_simple_action_set_enabled(G_SIMPLE_ACTION(copy), !selectionText().empty());
+    const GdkRectangle point { static_cast<int>(x), static_cast<int>(y), 1, 1 };
+    gtk_popover_set_pointing_to(GTK_POPOVER(app().contextMenu), &point);
+    gtk_popover_popup(GTK_POPOVER(app().contextMenu));
     gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
 }
 
-// The visible menu button and the context menu share the application's actions.
-void installUpdateMenu(GtkApplication*)
+// One menu item, with the built-in chord it answers to shown beside it. The
+// chord is shown only: the terminal's key handler owns the keyboard.
+void appendMenuItem(GMenu* menu, const char* label, const char* action, const char* shownAccelerator = nullptr)
+{
+    GMenuItem* item = g_menu_item_new(label, action);
+    if (shownAccelerator)
+        g_menu_item_set_attribute(item, "accel", "s", shownAccelerator);
+    g_menu_append_item(menu, item);
+    g_object_unref(item);
+}
+
+void appendMenuSection(GMenu* menu, GMenu* section)
+{
+    g_menu_append_section(menu, nullptr, G_MENU_MODEL(section));
+    g_object_unref(section);
+}
+
+// The window's actions and the two menus that show them: the primary menu, laid
+// out as the GNOME HIG lays one out (new things, the window's own commands, then
+// the application's), and the terminal's context menu.
+void installWindowMenus(GtkApplication*)
 {
     static const GActionEntry entries[] = {
+        { "new-window", +[](GSimpleAction*, GVariant*, gpointer) { newWindow(); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
         { "new-tab", +[](GSimpleAction*, GVariant*, gpointer) { newTab(); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
+        { "split-right", +[](GSimpleAction*, GVariant*, gpointer) { splitFocusedPaneUX(Panes::Orientation::Vertical); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
+        { "split-down", +[](GSimpleAction*, GVariant*, gpointer) { splitFocusedPaneUX(Panes::Orientation::Horizontal); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
         { "close-pane", +[](GSimpleAction*, GVariant*, gpointer) { closeFocusedPaneUX(); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
+        { "copy", +[](GSimpleAction*, GVariant*, gpointer) { copySelectionUX(); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
+        { "paste", +[](GSimpleAction*, GVariant*, gpointer) {
+             if (app().window)
+                 pasteClipboard(gtk_widget_get_clipboard(app().window), Ubiquitty::ClipboardBuffer::Clipboard); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
+        { "select-all", +[](GSimpleAction*, GVariant*, gpointer) { selectAll(); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
         { "find", +[](GSimpleAction*, GVariant*, gpointer) { showSearchBar(); }, nullptr, nullptr, nullptr, { 0, 0, 0 } },
         { "check-update", onCheckUpdateAction, nullptr, nullptr, nullptr, { 0, 0, 0 } },
         { "about", onAboutAction, nullptr, nullptr, nullptr, { 0, 0, 0 } },
@@ -8123,31 +8453,63 @@ void installUpdateMenu(GtkApplication*)
         g_action_map_add_action(G_ACTION_MAP(app().window), G_ACTION(action));
         g_object_unref(action);
     }
-    GMenu* menu = g_menu_new();
-    GMenu* session = g_menu_new();
-    g_menu_append(session, "New Tab", "win.new-tab");
-    g_menu_append(session, "Close Pane", "win.close-pane");
-    g_menu_append(session, "Find…", "win.find");
-    g_menu_append_section(menu, nullptr, G_MENU_MODEL(session));
-    g_object_unref(session);
+    installTabActions();
+
+    GMenu* primary = g_menu_new();
+    GMenu* create = g_menu_new();
+    appendMenuItem(create, "_New Window", "win.new-window");
+    appendMenuItem(create, "New _Tab", "win.new-tab", "<Control><Shift>t");
+    appendMenuSection(primary, create);
+    GMenu* panes = g_menu_new();
+    appendMenuItem(panes, "Split _Right", "win.split-right", "<Control><Shift>e");
+    appendMenuItem(panes, "Split _Down", "win.split-down", "<Control><Shift>d");
+    appendMenuItem(panes, "C_lose Pane", "win.close-pane", "<Control><Shift>w");
+    appendMenuSection(primary, panes);
+    GMenu* find = g_menu_new();
+    appendMenuItem(find, "_Find…", "win.find", "<Control><Shift>f");
+    appendMenuSection(primary, find);
     GMenu* application = g_menu_new();
-    g_menu_append(application, "Check for Updates…", "win.check-update");
-    g_menu_append(application, "About Ubiquitty", "win.about");
-    g_menu_append_section(menu, nullptr, G_MENU_MODEL(application));
-    g_object_unref(application);
-    if (app().menuButton) {
-        gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(app().menuButton), G_MENU_MODEL(menu));
-        windowSignalConnect(gtk_menu_button_get_popover(GTK_MENU_BUTTON(app().menuButton)), "closed",
-            G_CALLBACK(+[](GtkPopover*, gpointer) {
-                GtkWidget* target = app().searchBar && gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(app().searchBar))
-                    ? app().searchEntry
-                    : app().focusedPicture;
-                if (target)
-                    gtk_widget_grab_focus(target);
-            }),
-            nullptr);
+    appendMenuItem(application, "Check for _Updates…", "win.check-update");
+    appendMenuItem(application, "_About Ubiquitty", "win.about");
+    appendMenuSection(primary, application);
+
+    GMenu* context = g_menu_new();
+    GMenu* edit = g_menu_new();
+    appendMenuItem(edit, "_Copy", "win.copy", "<Control><Shift>c");
+    appendMenuItem(edit, "_Paste", "win.paste", "<Control><Shift>v");
+    appendMenuItem(edit, "Select _All", "win.select-all", "<Control><Shift>a");
+    appendMenuSection(context, edit);
+    GMenu* contextPanes = g_menu_new();
+    appendMenuItem(contextPanes, "Split _Right", "win.split-right", "<Control><Shift>e");
+    appendMenuItem(contextPanes, "Split _Down", "win.split-down", "<Control><Shift>d");
+    appendMenuSection(context, contextPanes);
+    GMenu* contextFind = g_menu_new();
+    appendMenuItem(contextFind, "_Find…", "win.find", "<Control><Shift>f");
+    appendMenuSection(context, contextFind);
+    GMenu* contextClose = g_menu_new();
+    appendMenuItem(contextClose, "C_lose Pane", "win.close-pane", "<Control><Shift>w");
+    appendMenuSection(context, contextClose);
+
+    // A closed menu gives the keyboard back to the find bar when it is open,
+    // and to the terminal otherwise.
+    const auto refocus = G_CALLBACK(+[](GtkPopover*, gpointer) {
+        if (app().searchBar && gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(app().searchBar)))
+            gtk_widget_grab_focus(app().searchEntry);
+        else if (app().window)
+            gtk_window_set_focus(GTK_WINDOW(app().window), nullptr); // the terminal has the keys while nothing else does
+    });
+    if (app().chrome) {
+        app().chrome->setMenuModel(G_MENU_MODEL(primary));
+        windowSignalConnect(gtk_menu_button_get_popover(app().chrome->menuButton()), "closed", refocus, nullptr);
     }
-    g_object_unref(menu);
+    g_object_unref(primary);
+
+    app().contextMenu = gtk_popover_menu_new_from_model(G_MENU_MODEL(context));
+    g_object_unref(context);
+    gtk_popover_set_has_arrow(GTK_POPOVER(app().contextMenu), FALSE);
+    gtk_widget_set_halign(app().contextMenu, GTK_ALIGN_START);
+    gtk_widget_set_parent(app().contextMenu, app().window);
+    windowSignalConnect(app().contextMenu, "closed", refocus, nullptr);
 
     GtkGesture* click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
@@ -8314,11 +8676,9 @@ void onClipboardReadForOSC52(GObject* source, GAsyncResult* result, gpointer use
 }
 
 // The user answered the read-confirmation dialog. index: { "Deny"=0, "Allow"=1 }.
-void onClipboardReadChosen(GObject* source, GAsyncResult* result, gpointer userData)
+void clipboardReadAnswered(PendingClipboardRead* pending, bool isAllowed) // bool-ok: the reader's one answer
 {
-    auto* pending = static_cast<PendingClipboardRead*>(userData);
-    const int index = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, nullptr);
-    if (index == 1 && app().window) {
+    if (isAllowed && app().window) {
         if (pending->buffer == Ubiquitty::ClipboardBuffer::Clipboard || pending->buffer == Ubiquitty::ClipboardBuffer::Primary)
             gdk_clipboard_read_text_async(pending->buffer == Ubiquitty::ClipboardBuffer::Primary
                     ? gtk_widget_get_primary_clipboard(app().window)
@@ -8372,14 +8732,15 @@ void beginClipboardRead(PendingClipboardRead* pending)
             approveInternalBufferRead(pending);
         return;
     }
-    GtkAlertDialog* dialog = gtk_alert_dialog_new("Allow Clipboard Access?");
-    gtk_alert_dialog_set_detail(dialog, "A program in the terminal wants to read the clipboard.");
-    const char* buttons[] = { "Deny", "Allow", nullptr };
-    gtk_alert_dialog_set_buttons(dialog, buttons);
-    gtk_alert_dialog_set_default_button(dialog, 0);
-    gtk_alert_dialog_set_cancel_button(dialog, 0);
-    gtk_alert_dialog_choose(dialog, GTK_WINDOW(app().window), nullptr, onWindowAsyncReady, windowAsyncData(onClipboardReadChosen, pending, discardPendingClipboardRead));
-    g_object_unref(dialog);
+    // Deny is the default and what Escape picks: the program asked, the reader
+    // did not, and a dismissed question gives nothing away.
+    Ubiquitty::Linux::GTK::ask(app().window,
+        { .heading = "Allow Clipboard Access?",
+            .body = "A program in the terminal wants to read the clipboard.",
+            .acceptLabel = "_Allow",
+            .declineLabel = "_Deny" },
+        inThisWindow([pending] { clipboardReadAnswered(pending, true); }),
+        inThisWindow([pending] { clipboardReadAnswered(pending, false); }));
 }
 
 struct PendingClipboardPost {
@@ -8490,7 +8851,7 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
     // remote attach that themes itself the way a tmux session does — owns its
     // palette. A blanket re-apply here would take it back.
     {
-        const int launchTheme = Ubiquitty::Runtime::launchThemeIndex(config);
+        const int launchTheme = selectedThemeIndex(config);
         if (launchTheme >= 0) {
             app().liveThemeIndex = launchTheme;
             app().liveThemeName = Ubiquitty::Themes::get(launchTheme)->name;
@@ -8506,7 +8867,10 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
     app().isVulkanReady = app().vulkan.init();
     if (!app().isVulkanReady)
         g_printerr("ubiquitty-linux: Vulkan init failed — falling back to the CPU renderer\n");
-    app().window = gtk_application_window_new(gtkApplication);
+    // libadwaita styles every window this process opens; adw_init is idempotent.
+    adw_init();
+    Ubiquitty::Linux::GTK::registerApplicationIcon(gdk_display_get_default());
+    app().window = adw_application_window_new(gtkApplication);
     g_object_set_data(G_OBJECT(app().window), "ubiquitty-window-state", &app());
     windowLifecycleSignalConnect(app().window, "close-request", G_CALLBACK(onWindowCloseRequested), nullptr);
     windowLifecycleSignalConnect(app().window, "unrealize", G_CALLBACK(onWindowUnrealized), nullptr);
@@ -8563,6 +8927,9 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
             if (name == "gtk-theme-name" || name == "gtk-application-prefer-dark-theme") {
                 windowIdleAddFull(G_PRIORITY_DEFAULT_IDLE, +[](gpointer) -> gboolean {
                     refreshNativeLinkAccentColor();
+                    // A stock titlebar's ground follows the toolkit theme.
+                    if (app().chrome)
+                        app().chrome->refreshGround();
                     return G_SOURCE_REMOVE;
                 }, nullptr, nullptr);
             }
@@ -8593,30 +8960,12 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
     windowSignalConnect(app().searchEntry, "previous-match", G_CALLBACK(onSearchPrevious), nullptr);
     windowSignalConnect(app().searchEntry, "stop-search", G_CALLBACK(onSearchStop), nullptr);
 
-    app().tabStrip = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    GtkWidget* tabScroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tabScroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(tabScroll), app().tabStrip);
-    gtk_widget_set_hexpand(tabScroll, TRUE);
-    GtkWidget* tabBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_widget_add_css_class(tabBar, "ubiquitty-tabs");
-    gtk_box_append(GTK_BOX(tabBar), tabScroll);
-    GtkWidget* plus = gtk_button_new_from_icon_name("list-add-symbolic");
-    gtk_widget_set_tooltip_text(plus, "New Tab (Ctrl+Shift+T)");
-    gtk_accessible_update_property(GTK_ACCESSIBLE(plus), GTK_ACCESSIBLE_PROPERTY_LABEL, "New Tab", -1);
-    gtk_widget_set_focus_on_click(plus, FALSE);
-    windowSignalConnect(plus, "clicked", G_CALLBACK(onNewTabClicked), nullptr);
-    gtk_box_append(GTK_BOX(tabBar), plus);
-    app().menuButton = gtk_menu_button_new();
-    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(app().menuButton), "open-menu-symbolic");
-    gtk_widget_set_tooltip_text(app().menuButton, "Menu");
-    gtk_accessible_update_property(GTK_ACCESSIBLE(app().menuButton), GTK_ACCESSIBLE_PROPERTY_LABEL, "Menu", -1);
-    gtk_box_append(GTK_BOX(tabBar), app().menuButton);
     rebuildTabStrip();
     GtkWidget* layout = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_append(GTK_BOX(layout), app().searchBar);
-    gtk_box_append(GTK_BOX(layout), tabBar);
-    gtk_widget_set_visible(tabBar, !UBIQUITTY_LINUX_CHROMELESS);
+    // The find bar sits in the chrome's top bar, under the tabs; a chromeless
+    // window keeps it over the panes.
+    if (UBIQUITTY_LINUX_CHROMELESS)
+        gtk_box_append(GTK_BOX(layout), app().searchBar);
     // The pane area sits under a GtkOverlay so the OSC 9;4 progress bars draw
     // above the grid texture without disturbing the per-pane picture mounting
     // (the macOS per-pane bars are likewise overlaid siblings). One full-area
@@ -8657,19 +9006,25 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
     // Under the panes, hidden until the configuration has a line to show; the
     // startup configure above has already left one if the file holds an error.
     gtk_box_append(GTK_BOX(layout), makeConfigurationBar());
-    gtk_window_set_child(GTK_WINDOW(app().window), layout);
+    // GNOME's chrome, from libadwaita: the header, the tabs and the find bar in
+    // a raised top bar over the panes. A chromeless build draws none of it.
+    if (UBIQUITTY_LINUX_CHROMELESS) {
+        adw_application_window_set_content(ADW_APPLICATION_WINDOW(app().window), layout);
+    } else {
+        app().chrome = std::make_unique<Ubiquitty::Linux::GTK::WindowChrome>(layout, app().searchBar);
+        app().chrome->attach(GTK_WINDOW(app().window));
+        adw_application_window_set_content(ADW_APPLICATION_WINDOW(app().window), app().chrome->widget());
+    }
 
     // Window transparency for background_opacity < 1: the rendered texture already
     // carries the background alpha, so the window + its widgets just need a transparent
     // background-color for the compositor to blend the desktop through. Best-effort
     // — the see-through depends on a compositing WM (Wayland / X11 compositor).
-    const int themeIndex = Ubiquitty::Runtime::launchThemeIndex(config);
+    const int themeIndex = selectedThemeIndex(config);
     applyChromeTheme(themeIndex);
-    if (!UBIQUITTY_LINUX_CHROMELESS && config.titlebarStyle != Ubiquitty::Preferences::TitlebarStyle::Native) {
-        GtkWidget* header = gtk_header_bar_new();
-        gtk_widget_add_css_class(header, "ubiquitty-titlebar");
-        gtk_window_set_titlebar(GTK_WINDOW(app().window), header);
-    }
+    // The desktop's light or dark style, as libadwaita reads it from the
+    // settings portal: the reader who follows it gets the theme for it.
+    windowSignalConnectObject(adw_style_manager_get_default(), "notify::dark", G_CALLBACK(onSystemAppearanceChanged), app().window, G_CONNECT_DEFAULT);
 
     GtkEventController* keys = gtk_event_controller_key_new();
     // Capture phase: the terminal sees a key before a focused chrome widget
@@ -8723,7 +9078,9 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
     // Refresh the process inspector's tree while it's open.
     windowTimeoutAdd(1000, onInspectorRefresh, nullptr);
 
-    installUpdateMenu(gtkApplication);
+    installWindowMenus(gtkApplication);
+    rebuildTabStrip();
+    updateWindowTitle();
 
     gtk_window_set_decorated(GTK_WINDOW(app().window), !UBIQUITTY_LINUX_CHROMELESS);
     gtk_window_present(GTK_WINDOW(app().window));

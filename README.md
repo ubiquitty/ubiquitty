@@ -117,7 +117,7 @@ Release downloads:
 | `https://ubiquitty.org/download/host/<version>/ubiquitty-host-linux-x86_64`, `…-linux-arm64` | Static `ubiquitty-host` for Linux servers on x86_64 and arm64, needing no libraries. |
 | `https://ubiquitty.org/download/host/<version>/ubiquitty-host-macos-arm64` | `ubiquitty-host` for a Mac with Apple silicon used as a server: the app's own signed helper. |
 | `https://ubiquitty.org/download/host/<version>/SHA256SUMS` | The three hosts' SHA-256 digests. |
-| Linux AppImage: [x86_64](https://ubiquitty.org/download/linux/x86_64.AppImage) · [ARM64](https://ubiquitty.org/download/linux/aarch64.AppImage) | Linux GTK4 frontend for local sessions. It needs glibc 2.38, GCC 13's libstdc++ and GTK 4.16, or newer, and the Vulkan loader; Debian 13 and Fedora 41 carry them. `chmod +x` it and run it; **Check for Updates…** in its context menu patches it in place from a later release. |
+| Linux AppImage: [x86_64](https://ubiquitty.org/download/linux/x86_64.AppImage) · [ARM64](https://ubiquitty.org/download/linux/aarch64.AppImage) | Linux GTK4 and libadwaita frontend for local sessions. It needs glibc 2.38, GCC 13's libstdc++, GTK 4.16 and libadwaita 1.6, or newer, and the Vulkan loader; Debian 13 and Fedora 41 carry them. `chmod +x` it and run it; **Check for Updates…** in its main menu patches it in place from a later release. |
 
 Each host is the file that release's app bundles, byte for byte, and
 `https://ubiquitty.org/download/host/<os>-<arch>` sends the newest release's.

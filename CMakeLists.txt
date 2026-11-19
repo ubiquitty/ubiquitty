@@ -1584,6 +1584,10 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
 
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.16)
+    # libadwaita draws the GNOME chrome (header, tab bar, top-bar shadow, menus).
+    # 1.6 is the first whose stylesheet is CSS variables, which the themed
+    # chrome sets; Debian 13 and Fedora 41, the documented floor, carry it.
+    pkg_check_modules(ADWAITA REQUIRED IMPORTED_TARGET libadwaita-1>=1.6)
     pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo pangoft2)
     # Real-font glyph raster: fontconfig matches the monospace family, FreeType
     # rasterizes AA coverage. HarfBuzz is linked with the font stack so shaping support can
@@ -1681,8 +1685,17 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         Source/Platform/Linux/Smokes/SkipInkSmoke.cpp
         Source/Platform/Linux/Input/LinkInteraction.cpp
         Source/Platform/Linux/Input/LinkTarget.cpp
+        Source/Platform/Linux/GTK/ApplicationIcon.cpp
+        Source/Platform/Linux/GTK/Alerts.cpp
+        Source/Platform/Linux/GTK/ProcessIconLoader.cpp
+        Source/Platform/Linux/GTK/StatusMarkView.cpp
+        Source/Platform/Linux/GTK/TabStrip.cpp
+        Source/Platform/Linux/GTK/WindowAppearance.cpp
+        Source/Platform/Linux/GTK/WindowChrome.cpp
+        Source/Platform/Linux/GTK/WindowTitleView.cpp
         Source/Platform/Linux/Presentation/PaneGeometry.cpp
-        Source/Platform/Linux/Presentation/WindowAppearance.cpp
+        Source/Platform/Linux/Presentation/StatusSymbol.cpp
+        Source/Platform/Linux/Presentation/WindowTitleContent.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/Accessibility.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/AccessibleTerminal.cpp
         ${UBIQUITTY_KIT_SOURCE_DIR}/Source/Platform/Linux/VulkanRenderer.cpp
@@ -1756,7 +1769,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         -fno-exceptions -fno-rtti -Wall -Wextra
         ${UBIQUITTY_NARROWING_WARNING}
         "$<$<BOOL:${UBIQUITTY_WERROR}>:-Werror>")
-    target_link_libraries(ubiquitty-linux PRIVATE PkgConfig::GTK4 PkgConfig::PANGOCAIRO Vulkan::Vulkan
+    target_link_libraries(ubiquitty-linux PRIVATE PkgConfig::GTK4 PkgConfig::ADWAITA PkgConfig::PANGOCAIRO Vulkan::Vulkan
         PkgConfig::FREETYPE PkgConfig::FONTCONFIG PkgConfig::HARFBUZZ)
     target_link_options(ubiquitty-linux PRIVATE "LINKER:--wrap=sqrtf")
     # GCC LTO loses the assembler's versioned alias when it inlines the wrapper.
@@ -1898,6 +1911,52 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     add_custom_target(ubiquitty-linux-font ALL DEPENDS ${UBIQUITTY_LINUX_BUNDLED_FONT_OUTPUTS})
     add_dependencies(ubiquitty-linux ubiquitty-linux-font)
 
+    # The programs' icons a title draws before a name (Title::processIconCatalog),
+    # staged beside the binary in process-icons/ as the fonts are. The list is the
+    # catalog's: a file the catalog names and this list misses draws no icon.
+    set(UBIQUITTY_LINUX_PROCESS_ICONS
+        "claude-code.svg" "codex.svg" "opencode.svg" "pi.svg" "gemini-cli.svg"
+        "grok-build.png" "prime-agent.png" "deepagents.svg" "kimi-code.png")
+    set(UBIQUITTY_LINUX_PROCESS_ICON_OUTPUTS "")
+    foreach(icon IN LISTS UBIQUITTY_LINUX_PROCESS_ICONS)
+        add_custom_command(
+            OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/process-icons/${icon}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/process-icons/${icon}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/process-icons/${icon}"
+            DEPENDS "${UBIQUITTY_CORE_SOURCE_DIR}/Resources/process-icons/${icon}"
+            COMMENT "Bundle process icon ${icon} next to ubiquitty" VERBATIM)
+        list(APPEND UBIQUITTY_LINUX_PROCESS_ICON_OUTPUTS "${CMAKE_CURRENT_BINARY_DIR}/process-icons/${icon}")
+    endforeach()
+
+    # The app icon, as a hicolor theme beside the binary (icons/), so a build
+    # tree run finds it the way an installed one finds share/icons. Each size is
+    # Scripts/export-app-icon.py's own render at that size; the SVG is scalable.
+    set(UBIQUITTY_LINUX_APP_ICON_OUTPUTS "")
+    foreach(size IN ITEMS 16 24 32 48 64 128 256)
+        set(_ubiquitty_app_icon "${CMAKE_CURRENT_BINARY_DIR}/icons/hicolor/${size}x${size}/apps/org.ubiquitty.linux.png")
+        add_custom_command(
+            OUTPUT "${_ubiquitty_app_icon}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/Raster/Ubiquitty-${size}.png" "${_ubiquitty_app_icon}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/Raster/Ubiquitty-${size}.png"
+            COMMENT "Bundle the ${size}px app icon" VERBATIM)
+        list(APPEND UBIQUITTY_LINUX_APP_ICON_OUTPUTS "${_ubiquitty_app_icon}")
+        install(FILES "${_ubiquitty_app_icon}" DESTINATION "share/icons/hicolor/${size}x${size}/apps")
+    endforeach()
+    set(_ubiquitty_app_icon "${CMAKE_CURRENT_BINARY_DIR}/icons/hicolor/scalable/apps/org.ubiquitty.linux.svg")
+    add_custom_command(
+        OUTPUT "${_ubiquitty_app_icon}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/Ubiquitty.svg" "${_ubiquitty_app_icon}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/Ubiquitty.svg"
+        COMMENT "Bundle the scalable app icon" VERBATIM)
+    list(APPEND UBIQUITTY_LINUX_APP_ICON_OUTPUTS "${_ubiquitty_app_icon}")
+    install(FILES "${_ubiquitty_app_icon}" DESTINATION "share/icons/hicolor/scalable/apps")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/Resources/linux/org.ubiquitty.linux.desktop" DESTINATION share/applications)
+
+    add_custom_target(ubiquitty-linux-icons ALL DEPENDS ${UBIQUITTY_LINUX_PROCESS_ICON_OUTPUTS} ${UBIQUITTY_LINUX_APP_ICON_OUTPUTS})
+    add_dependencies(ubiquitty-linux ubiquitty-linux-icons)
+
     # The installed layout is the build directory's: the binary with its shaders
     # and fonts in one directory, since the frontend finds both through
     # /proc/self/exe. package-linux-appimage.sh lays out the AppDir with
@@ -1905,6 +1964,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     # than a second hand-kept copy of them.
     install(TARGETS ubiquitty-linux RUNTIME DESTINATION bin)
     install(FILES ${_ubiquitty_spv} ${UBIQUITTY_LINUX_BUNDLED_FONT_OUTPUTS} DESTINATION bin)
+    install(FILES ${UBIQUITTY_LINUX_PROCESS_ICON_OUTPUTS} DESTINATION bin/process-icons)
 
 # ----------------------------------------------------------------------
 # Wscons — the OpenBSD/NetBSD console as a terminal, standing where getty would

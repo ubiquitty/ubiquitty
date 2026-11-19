@@ -705,18 +705,18 @@ them. It imports no disk-space and no active-keyboard API.
   **Clang 19** or newer. Configure stops on an older one and names the fix;
   the same floor applies to `build-host.sh` and `build-agent.sh` on Linux. On
   macOS the build uses Apple clang from Xcode.
-- **GTK 4.16 or newer** (`-dev`) + the **Vulkan** loader/headers, and **glslc**, which
+- **GTK 4.16 or newer** and **libadwaita 1.6 or newer** (`-dev`) + the **Vulkan** loader/headers, and **glslc**, which
   compiles the renderer's shaders. Mesa **lavapipe** covers headless/CI rendering.
   Without glslc the configure stops; `UBIQUITTY_LINUX_GPU_SHADERS=OFF` in the
   environment of `build-linux-gtk.sh` builds a binary that renders on the CPU only.
-  - Debian 13, Ubuntu 26.04 and newer: `apt install cmake ninja-build g++ pkg-config libgtk-4-dev libvulkan-dev glslc`.
+  - Debian 13, Ubuntu 26.04 and newer: `apt install cmake ninja-build g++ pkg-config libgtk-4-dev libadwaita-1-dev libvulkan-dev glslc`.
     Ubuntu 24.04 cannot build the frontend, because its GTK is 4.14. Its plain
     `g++` is GCC 13 and its `clang` is Clang 18, both below the compiler floor,
     so the headless host builds there with `g++-14` installed and
     `CC=gcc-14 CXX=g++-14`. CMake keeps the compiler a build directory was
     first configured with, so switch compilers in a fresh directory.
-  - Fedora: `dnf install cmake ninja-build gcc-c++ gtk4-devel vulkan-loader-devel glslc`
-  - Arch: `pacman -S cmake ninja gcc pkgconf gtk4 vulkan-headers vulkan-icd-loader shaderc`
+  - Fedora: `dnf install cmake ninja-build gcc-c++ gtk4-devel libadwaita-devel vulkan-loader-devel glslc`
+  - Arch: `pacman -S cmake ninja gcc pkgconf gtk4 libadwaita vulkan-headers vulkan-icd-loader shaderc`
 - Release builds with Clang apply the training profile in `Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Support/pgo` when the
   compiler can read it, and otherwise build without it and print
   `PGO: NOT APPLIED` with the compiler's reason. GCC never reads it.

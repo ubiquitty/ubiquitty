@@ -142,30 +142,61 @@ int smokeWindowChrome(const char* outputDirectory)
             check(gtk_widget_get_height(activePane()->picture) + 1 >= startupRows * logicalCellHeight(), "a floating window keeps the launch grid height after its minimum is relaxed");
         }
     }
-    check(app().tabStrip && gtk_widget_get_mapped(app().tabStrip) == !UBIQUITTY_LINUX_CHROMELESS, "tab visibility matches the desktop build");
-    check(app().menuButton && gtk_widget_get_mapped(app().menuButton) == !UBIQUITTY_LINUX_CHROMELESS, "menu visibility matches the desktop build");
+    check((app().chrome != nullptr) == !UBIQUITTY_LINUX_CHROMELESS, "the chrome matches the desktop build");
     check(gtk_window_get_decorated(GTK_WINDOW(app().window)) == !UBIQUITTY_LINUX_CHROMELESS, "window decorations match the desktop build");
-    if (!UBIQUITTY_LINUX_CHROMELESS) {
-        gtk_menu_button_popup(GTK_MENU_BUTTON(app().menuButton));
+    if (app().chrome) {
+        check(adw_application_window_get_content(ADW_APPLICATION_WINDOW(app().window)) == app().chrome->widget(), "the libadwaita chrome holds the window content");
+        check(gtk_widget_get_mapped(GTK_WIDGET(app().chrome->menuButton())), "the primary menu is in the header");
+        check(!adw_tab_bar_get_tabs_revealed(ADW_TAB_BAR(app().chrome->tabBar())), "a window of one tab hides its tab bar");
+        // The terminal has the keys while no widget has focus: a new window
+        // leaves none in its top bar, and focus pushed onto a header button is
+        // given straight back, so typing never lands on the menu.
+        GtkWidget* focused = gtk_window_get_focus(GTK_WINDOW(app().window));
+        check(!focused || !gtk_widget_is_ancestor(focused, app().chrome->widget()) || gtk_widget_get_ancestor(focused, GTK_TYPE_SEARCH_BAR),
+            "a new window leaves no focus on its header");
+        // Tab has nowhere to go in the header: none of its controls is in the
+        // focus chain.
+        check(!gtk_widget_child_focus(app().chrome->widget(), GTK_DIR_TAB_FORWARD), "the header's controls are out of the focus chain");
+        // And focus put on one anyway is given back. The menu button is made
+        // focusable for this one check, as a theme or GTK itself could.
+        GtkWidget* menuButton = gtk_widget_get_first_child(GTK_WIDGET(app().chrome->menuButton()));
+        gtk_widget_set_focusable(menuButton, TRUE);
+        const gboolean didFocusButton = gtk_widget_grab_focus(menuButton);
+        settle();
+        gtk_widget_set_focusable(menuButton, FALSE);
+        check(didFocusButton, "the menu button took focus for the hand-back check");
+        check(gtk_window_get_focus(GTK_WINDOW(app().window)) == nullptr, "focus that lands on a header button is given back to the terminal");
+        check(!doesMenuOwnKeys(), "typing reaches the terminal after focus touched the menu button");
+        gtk_menu_button_popup(app().chrome->menuButton());
         settle();
         check(onKeyPressed(nullptr, GDK_KEY_Down, 0, static_cast<GdkModifierType>(0), nullptr) == GDK_EVENT_PROPAGATE,
             "menu navigation reaches GTK instead of the terminal");
-        gtk_menu_button_popdown(GTK_MENU_BUTTON(app().menuButton));
+        gtk_menu_button_popdown(app().chrome->menuButton());
     }
     const SurfaceID surface = app().model->activeSurface();
     const TabID firstTab = app().model->activeTab(surface);
     g_action_group_activate_action(G_ACTION_GROUP(app().window), "new-tab", nullptr);
     settle();
-    check(app().model->tabCount(surface) == 2, "the menu opens a second tab");
-    GtkWidget* firstButton = gtk_widget_get_first_child(app().tabStrip);
-    if (firstButton) {
-        g_signal_emit_by_name(firstButton, "clicked");
+    check(app().model->tabCount(surface) == 2, "the header's new-tab action opens a second tab");
+    if (app().chrome) {
+        check(adw_tab_bar_get_tabs_revealed(ADW_TAB_BAR(app().chrome->tabBar())), "a second tab reveals the tab bar");
+        // What a tab's button does when clicked: select its tab by identifier.
+        g_action_group_change_action_state(G_ACTION_GROUP(app().window), "active-tab", g_variant_new_uint32(static_cast<std::uint32_t>(firstTab)));
         settle();
-        check(app().model->activeTab(surface) == firstTab, "clicking a tab changes the focused session");
-        firstButton = gtk_widget_get_first_child(app().tabStrip);
-        check(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(firstButton)), "the selected tab follows the model");
-    } else
-        check(false, "the strip contains a tab button");
+        check(app().model->activeTab(surface) == firstTab, "selecting a tab changes the focused session");
+        GVariant* state = g_action_group_get_action_state(G_ACTION_GROUP(app().window), "active-tab");
+        check(state && g_variant_get_uint32(state) == static_cast<std::uint32_t>(firstTab), "the checked tab follows the model");
+        if (state)
+            g_variant_unref(state);
+        // What a tab's close button and a middle click do.
+        const TabID secondTab = app().model->tabAt(surface, 1);
+        g_action_group_activate_action(G_ACTION_GROUP(app().window), "close-tab", g_variant_new_uint32(static_cast<std::uint32_t>(secondTab)));
+        settle();
+        check(app().model->tabCount(surface) == 1, "closing a tab from the bar ends it");
+        check(!adw_tab_bar_get_tabs_revealed(ADW_TAB_BAR(app().chrome->tabBar())), "the tab bar hides again at one tab");
+        g_action_group_activate_action(G_ACTION_GROUP(app().window), "new-tab", nullptr);
+        settle();
+    }
     const std::string savedDocument = Ubiquitty::Preferences::liveDocument();
     const std::string savedThemeName = app().liveThemeName;
     const auto configureTheme = [&](const char* background) {
@@ -189,6 +220,70 @@ int smokeWindowChrome(const char* outputDirectory)
         check(background.red == 161 && background.green == 178 && background.blue == 195,
             "a same-index palette replacement reaches every pane");
         check(!pane->pendingCapture, "a palette replacement discards stale captured pixels");
+    }
+    // Switching tabs keeps the grid inside its padding on every frame: a
+    // remounted pane must not show one frame with the grid at the left edge
+    // before it moves right into place.
+    if (app().model->tabCount(surface) >= 2) {
+        const auto leftPaddingOverrun = [&](GtkWidget* picture) -> int {
+            const int width = gtk_widget_get_width(picture);
+            const int height = gtk_widget_get_height(picture);
+            if (!gtk_widget_get_mapped(picture) || width <= 0 || height <= 0)
+                return -1;
+            GdkPaintable* paintable = gtk_widget_paintable_new(picture);
+            GtkSnapshot* snapshot = gtk_snapshot_new();
+            gdk_paintable_snapshot(paintable, GDK_SNAPSHOT(snapshot), width, height);
+            GskRenderNode* node = gtk_snapshot_free_to_node(snapshot);
+            g_object_unref(paintable);
+            if (!node)
+                return -1;
+            const graphene_rect_t bounds = GRAPHENE_RECT_INIT(0, 0, static_cast<float>(width), static_cast<float>(height));
+            GdkTexture* texture = gsk_renderer_render_texture(gtk_native_get_renderer(gtk_widget_get_native(picture)), node, &bounds);
+            gsk_render_node_unref(node);
+            if (!texture)
+                return -1;
+            const int textureWidth = gdk_texture_get_width(texture);
+            const int textureHeight = gdk_texture_get_height(texture);
+            std::vector<guchar> pixels(static_cast<std::size_t>(textureWidth) * static_cast<std::size_t>(textureHeight) * 4);
+            gdk_texture_download(texture, pixels.data(), static_cast<gsize>(textureWidth) * 4);
+            if (const char* debug = std::getenv("UBQ_SMOKE_PADDING_DUMP")) {
+                static int dumped = 0;
+                const std::string path = std::string(debug) + "/switch-" + std::to_string(dumped++) + ".png";
+                if (dumped <= 40)
+                    gdk_texture_save_to_png(texture, path.c_str());
+            }
+            g_object_unref(texture);
+            // The first padded columns of every row: the theme's ground and nothing else.
+            const int padding = textureWidth * 12 / width; // under the 14-point padding, at any scale
+            int overrun = 0;
+            for (int row = 0; row < textureHeight; ++row) {
+                for (int column = 0; column < padding; ++column) {
+                    const guchar* pixel = &pixels[(static_cast<std::size_t>(row) * static_cast<std::size_t>(textureWidth) + static_cast<std::size_t>(column)) * 4];
+                    // Cairo order: B, G, R, A.
+                    if (std::abs(pixel[2] - 161) > 8 || std::abs(pixel[1] - 178) > 8 || std::abs(pixel[0] - 195) > 8)
+                        ++overrun;
+                }
+            }
+            return overrun;
+        };
+        bool didKeepPadding = true;
+        int framesSeen = 0;
+        for (int round = 0; round < 4; ++round) {
+            switchToTab(app().model->tabAt(surface, round % 2));
+            const gint64 deadline = g_get_monotonic_time() + 500'000;
+            while (g_get_monotonic_time() < deadline) {
+                g_main_context_iteration(nullptr, FALSE);
+                const int overrun = leftPaddingOverrun(activePane()->picture);
+                if (overrun > 0) {
+                    g_printerr("smoke-window-chrome: switch %d, frame %d: %d pixels of the grid inside the left padding\n", round, framesSeen, overrun);
+                    didKeepPadding = false;
+                }
+                framesSeen += overrun >= 0;
+                g_usleep(4000);
+            }
+        }
+        check(framesSeen > 0, "a switched-to pane renders frames to inspect");
+        check(didKeepPadding, "every frame after a tab switch keeps the grid inside its left padding");
     }
     check(gtk_widget_has_css_class(app().window, "ubiquitty-themed-bg")
             && gtk_widget_has_css_class(app().paneContainer, "ubiquitty-themed-bg"),
@@ -219,36 +314,159 @@ int smokeWindowChrome(const char* outputDirectory)
     applyChromeTheme(fixtureIndex);
     check(!gtk_widget_has_css_class(app().window, "ubiquitty-translucent") && app().windowAppearance.cssProvider() == retainedProvider,
         "returning to opaque replaces the same scoped provider without stale transparency");
+    // Following the desktop's light and dark style: the style manager's dark
+    // property is what the settings portal sets, and forcing it here takes the
+    // same path a desktop switch does without touching the desktop.
+    {
+        // A theme of each polarity: a named theme of the other one is answered
+        // with its sibling, which is Core's rule and not what this checks.
+        std::string lightName;
+        std::string darkName;
+        for (int index = 0; index < Ubiquitty::Themes::themeCount() && (lightName.empty() || darkName.empty()); ++index) {
+            std::string& name = Ubiquitty::Themes::isThemeDark(index) ? darkName : lightName;
+            if (name.empty())
+                name = Ubiquitty::Themes::themeName(index);
+        }
+        AdwStyleManager* styleManager = adw_style_manager_get_default();
+        adw_style_manager_set_color_scheme(styleManager, ADW_COLOR_SCHEME_FORCE_LIGHT);
+        check(Ubiquitty::Preferences::configure("[appearance]\nfollow_system = true\nsystem_light_theme = \"" + lightName
+                      + "\"\nsystem_dark_theme = \"" + darkName + "\"\n",
+                  Ubiquitty::Preferences::ParseMode::Strict)
+                  .isApplied,
+            "a follow-system document applies");
+        settle();
+        check(app().liveThemeName == lightName, "a light desktop selects the light theme");
+        adw_style_manager_set_color_scheme(styleManager, ADW_COLOR_SCHEME_FORCE_DARK);
+        settle();
+        check(app().liveThemeName == darkName, "switching the desktop to dark selects the dark theme");
+        adw_style_manager_set_color_scheme(styleManager, ADW_COLOR_SCHEME_FORCE_LIGHT);
+        settle();
+        check(app().liveThemeName == lightName, "switching back to light selects the light theme");
+        adw_style_manager_set_color_scheme(styleManager, ADW_COLOR_SCHEME_DEFAULT);
+    }
     check(Ubiquitty::Preferences::configure(savedDocument, Ubiquitty::Preferences::ParseMode::Strict).isApplied,
         "the original configuration is restored after the theme probe");
     const int restoredTheme = Ubiquitty::Themes::indexForName(savedThemeName.c_str());
     if (restoredTheme >= 0)
         applyThemeToAllPanes(restoredTheme);
     checkFrame(app().window, "tabs", "the window produces a rendered frame");
+    // Split Right shows a second, live terminal beside the first: both panes
+    // laid out side by side, each with a frame of its own, and the new one
+    // drawing its shell's prompt rather than an empty or stretched frame.
+    if (app().chrome) {
+        LinuxPane* original = activePane();
+        g_action_group_activate_action(G_ACTION_GROUP(app().window), "split-right", nullptr);
+        LinuxPane* added = activePane();
+        check(added != original && app().model->paneTree(surface)->paneCount() == 2, "Split Right adds a second pane to the tab");
+        // A pane's frame as GTK draws it: the picture's own paintable is the
+        // renderer's, so it is rendered through the window's renderer to read.
+        const auto inkPixels = [&](GtkWidget* picture) -> int {
+            const int width = gtk_widget_get_width(picture);
+            const int height = gtk_widget_get_height(picture);
+            if (!gtk_widget_get_mapped(picture) || width <= 0 || height <= 0)
+                return -1;
+            GdkPaintable* paintable = gtk_widget_paintable_new(picture);
+            GtkSnapshot* snapshot = gtk_snapshot_new();
+            gdk_paintable_snapshot(paintable, GDK_SNAPSHOT(snapshot), width, height);
+            GskRenderNode* node = gtk_snapshot_free_to_node(snapshot);
+            g_object_unref(paintable);
+            if (!node)
+                return -1;
+            const graphene_rect_t bounds = GRAPHENE_RECT_INIT(0, 0, static_cast<float>(width), static_cast<float>(height));
+            GdkTexture* texture = gsk_renderer_render_texture(gtk_native_get_renderer(gtk_widget_get_native(picture)), node, &bounds);
+            gsk_render_node_unref(node);
+            if (!texture)
+                return -1;
+            const int textureWidth = gdk_texture_get_width(texture);
+            const int textureHeight = gdk_texture_get_height(texture);
+            std::vector<guchar> pixels(static_cast<std::size_t>(textureWidth) * static_cast<std::size_t>(textureHeight) * 4);
+            gdk_texture_download(texture, pixels.data(), static_cast<gsize>(textureWidth) * 4);
+            g_object_unref(texture);
+            // The ground is the first pixel; ink is anything far from it.
+            int ink = 0;
+            for (std::size_t offset = 0; offset < pixels.size(); offset += 4) {
+                const int distance = std::abs(pixels[offset] - pixels[0]) + std::abs(pixels[offset + 1] - pixels[1]) + std::abs(pixels[offset + 2] - pixels[2]);
+                ink += distance > 96;
+            }
+            return ink;
+        };
+        bool isShown = false;
+        const gint64 deadline = g_get_monotonic_time() + 15'000'000;
+        while (!isShown && g_get_monotonic_time() < deadline) {
+            g_main_context_iteration(nullptr, FALSE);
+            isShown = added && original && gtk_widget_get_mapped(original->picture) && gtk_widget_get_mapped(added->picture)
+                && gtk_widget_get_width(added->picture) > 0 && inkPixels(original->picture) > 0 && inkPixels(added->picture) > 0;
+            g_usleep(10'000);
+        }
+        check(isShown, "both panes are mapped and each draws its own terminal");
+        if (original && added) {
+            graphene_point_t left {};
+            graphene_point_t right {};
+            const graphene_point_t origin = GRAPHENE_POINT_INIT(0, 0);
+            const bool didPlace = gtk_widget_compute_point(original->picture, app().window, &origin, &left)
+                && gtk_widget_compute_point(added->picture, app().window, &origin, &right);
+            check(didPlace && right.x > left.x + gtk_widget_get_width(original->picture) / 2.0f && std::abs(right.y - left.y) < 1.0f,
+                "the new pane sits to the right of the first, at the same height");
+            check(std::abs(gtk_widget_get_width(original->picture) - gtk_widget_get_width(added->picture)) <= 2,
+                "the split divides the width evenly");
+        }
+        checkFrame(app().window, "split", "the split window produces a rendered frame");
+        // Only the focused pane's cursor is live; the other's is steady.
+        if (original && added && original->session->terminal()) {
+            const auto hold = holdPaneModel(*original);
+            const Ubiquitty::Linux::CursorOverlay other = resolvePaneCursorOverlay(*original, original->session->terminal());
+            check(!other.focused && other.blinkAlpha == 1.0f, "the unfocused pane's cursor is drawn steady and unfocused");
+        }
+        // Back to one pane: the new one runs only its shell, so it closes unasked.
+        g_action_group_activate_action(G_ACTION_GROUP(app().window), "close-pane", nullptr);
+        settle();
+        check(app().model->paneTree(surface)->paneCount() == 1, "Close Pane removes the split");
+    }
+    // A tab running a job asks before it closes, in a libadwaita alert, and
+    // keeps its tab when the reader cancels.
+    if (app().chrome) {
+        const TabID runningTab = app().model->activeTab(surface);
+        const int tabsBefore = app().model->tabCount(surface);
+        activePane()->session->sendInput(std::string("sleep 30\r"));
+        armPTYWriteDrain(activePane());
+        const gint64 deadline = g_get_monotonic_time() + 15'000'000;
+        while (g_get_monotonic_time() < deadline && app().model->isPaneSafeToClose(paneIDForPane(activePane()))) {
+            g_main_context_iteration(nullptr, FALSE);
+            (void)activePane()->session->sampleProcessStateOffDrain();
+            g_usleep(20'000);
+        }
+        check(!app().model->isPaneSafeToClose(paneIDForPane(activePane())), "a pane running sleep is not safe to close");
+        g_action_group_activate_action(G_ACTION_GROUP(app().window), "close-tab", g_variant_new_uint32(static_cast<std::uint32_t>(runningTab)));
+        settle();
+        AdwDialog* question = adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(app().window));
+        check(question && ADW_IS_ALERT_DIALOG(question), "closing a tab that runs a job asks first");
+        check(app().model->tabCount(surface) == tabsBefore, "the tab stays open while the question is asked");
+        check(doesMenuOwnKeys(), "an open question takes the keyboard from the terminal");
+        if (question) {
+            checkFrame(app().window, "close-confirmation", "the close question produces a rendered frame");
+            adw_alert_dialog_choose(ADW_ALERT_DIALOG(question), app().window, nullptr, nullptr, nullptr);
+            adw_dialog_close(question);
+            settle();
+        }
+        check(app().model->tabCount(surface) == tabsBefore, "cancelling keeps the tab");
+    }
     g_action_group_activate_action(G_ACTION_GROUP(app().window), "about", nullptr);
     settle();
-    GListModel* windows = gtk_window_get_toplevels();
-    GtkWidget* about = nullptr;
-    for (guint i = 0; i < g_list_model_get_n_items(windows); ++i) {
-        GObject* window = G_OBJECT(g_list_model_get_item(windows, i));
-        if (GTK_IS_ABOUT_DIALOG(window)) {
-            about = GTK_WIDGET(window);
-            break;
-        }
-        g_object_unref(window);
-    }
-    check(about != nullptr, "About opens an application information window");
-    if (about) {
-        check(gtk_widget_get_mapped(about), "About is mapped");
-        check(g_strcmp0(gtk_about_dialog_get_program_name(GTK_ABOUT_DIALOG(about)), "Ubiquitty") == 0,
-            "About names the application");
-        check(g_strcmp0(gtk_about_dialog_get_version(GTK_ABOUT_DIALOG(about)), Ubiquitty::Protocol::Sync::appVersionWithIdentity().c_str()) == 0,
+    AdwDialog* about = adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(app().window));
+    check(about && ADW_IS_ABOUT_DIALOG(about), "About opens libadwaita's application information dialog");
+    if (about && ADW_IS_ABOUT_DIALOG(about)) {
+        AdwAboutDialog* dialog = ADW_ABOUT_DIALOG(about);
+        check(g_strcmp0(adw_about_dialog_get_application_name(dialog), "Ubiquitty") == 0, "About names the application");
+        check(g_strcmp0(adw_about_dialog_get_version(dialog), Ubiquitty::Protocol::Sync::appVersionWithIdentity().c_str()) == 0,
             "About shows the running build identity");
-        check(gtk_about_dialog_get_license_type(GTK_ABOUT_DIALOG(about)) == GTK_LICENSE_APACHE_2_0,
-            "About identifies the application license");
-        checkFrame(about, "about", "About produces a rendered frame");
-        gtk_window_close(GTK_WINDOW(about));
-        g_object_unref(about);
+        check(g_strcmp0(adw_about_dialog_get_application_icon(dialog), Ubiquitty::Linux::GTK::applicationIconName) == 0,
+            "About shows the application icon");
+        check(gtk_icon_theme_has_icon(gtk_icon_theme_get_for_display(gtk_widget_get_display(app().window)), Ubiquitty::Linux::GTK::applicationIconName),
+            "the bundled application icon is found");
+        check(adw_about_dialog_get_license_type(dialog) == GTK_LICENSE_APACHE_2_0, "About identifies the application license");
+        checkFrame(app().window, "about", "About produces a rendered frame");
+        adw_dialog_close(about);
+        settle();
     }
     app().configurationWatcher.stop();
     gtk_window_destroy(GTK_WINDOW(app().window));

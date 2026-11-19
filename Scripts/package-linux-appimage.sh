@@ -15,8 +15,9 @@
 #
 # This builds a thin AppImage: it bundles the ubiquitty binary with the
 # shaders and fonts it opens from its own directory, and the AppImage updater,
-# and relies on the host's GTK 4.16 or newer, Vulkan loader, glibc and
-# libstdc++, whose floors are checked below. It does not bundle the GTK stack:
+# and relies on the host's GTK 4.16 and libadwaita 1.6 or newer, Vulkan loader,
+# glibc and libstdc++, whose floors are checked below. It does not bundle the
+# GTK stack:
 # linuxdeploy produced a broken (mixed-GLib) bundle on the newest toolchains,
 # and the self-update mechanism does not need it.
 #
@@ -197,35 +198,39 @@ python3 "$TOOLS_ROOT/Scripts/appimage-support.py" stage "$SUPPORT" "$ARCH" "$APP
 # the project notice + the per-dependency texts the bundled binary links/embeds.
 DOCDIR="$APPDIR/usr/share/doc/ubiquitty"
 python3 "$TOOLS_CORE_ROOT/Scripts/license_notices.py" --source "$ROOT" --core "$CORE_ROOT" --kit "$KIT_ROOT" --copy "$DOCDIR"
-install -Dm644 "$ROOT/Resources/linux/org.ubiquitty.linux.desktop" \
-    "$APPDIR/usr/share/applications/org.ubiquitty.linux.desktop"
+# The desktop entry and the hicolor icons come from `cmake --install` above,
+# under the name the .desktop file's Icon= key and the GtkApplication id share;
+# CMakeLists.txt holds the one list. A missing one stops the build: a desktop
+# entry naming an icon that is not there shows a generic one with nothing
+# reported.
+[ -s "$APPDIR/usr/share/applications/org.ubiquitty.linux.desktop" ] \
+    || { echo "ERROR: cmake --install staged no desktop entry" >&2; exit 1; }
+for icon in scalable/apps/org.ubiquitty.linux.svg 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
+    case "$icon" in *.svg) path="$icon" ;; *) path="$icon/apps/org.ubiquitty.linux.png" ;; esac
+    [ -s "$APPDIR/usr/share/icons/hicolor/$path" ] \
+        || { echo "ERROR: cmake --install staged no app icon at share/icons/hicolor/$path" >&2; exit 1; }
+done
+for icon in claude-code.svg codex.svg; do
+    [ -s "$APPDIR/usr/bin/process-icons/$icon" ] \
+        || { echo "ERROR: cmake --install staged no process icon $icon" >&2; exit 1; }
+done
 # appimagetool wants the .desktop + icon at the AppDir root too.
 cp "$APPDIR/usr/share/applications/org.ubiquitty.linux.desktop" "$APPDIR/org.ubiquitty.linux.desktop"
-
-# Icon: the app icon's exports (Scripts/export-app-icon.py writes them from
-# Resources/Icon/Ubiquitty.icon), installed under the name the .desktop file's
-# Icon= key and the GtkApplication id share. Each hicolor size is ictool's own
-# render at that size, so a small size is drawn for its grid rather than
-# downsampled from a large one; the flat SVG is the scalable entry. A missing
-# export stops the build: a desktop entry naming an icon that is not there
-# shows a generic one with nothing reported.
-ICON_SVG="$ROOT/Resources/Icon/Ubiquitty.svg"
 ICON_RASTERS="$ROOT/Resources/Icon/Raster"
-[ -f "$ICON_SVG" ] || { echo "ERROR: no desktop icon at $ICON_SVG" >&2; exit 1; }
-for size in 16 24 32 48 64 128 256; do
-    raster="$ICON_RASTERS/Ubiquitty-$size.png"
-    [ -f "$raster" ] || { echo "ERROR: no ${size}px desktop icon at $raster" >&2; exit 1; }
-    install -Dm644 "$raster" "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps/org.ubiquitty.linux.png"
-done
-install -Dm644 "$ICON_SVG" "$APPDIR/usr/share/icons/hicolor/scalable/apps/org.ubiquitty.linux.svg"
 cp "$ICON_RASTERS/Ubiquitty-256.png" "$APPDIR/org.ubiquitty.linux.png"
 cp "$ICON_RASTERS/Ubiquitty-256.png" "$APPDIR/.DirIcon"
 
-# AppRun: put the bundled tools on PATH and exec the binary (relies on host GTK4).
+# AppRun: put the bundled tools on PATH and exec the binary (relies on host GTK4
+# and libadwaita). The runtime exports ARGV0 as the .AppImage's own name; zsh
+# makes an exported ARGV0 the argv[0] of every command it runs, so a shell in
+# the terminal would start each program under the AppImage's name (mise then
+# takes itself for a broken shim). Ubiquitty does not read it, so it ends here;
+# APPIMAGE, which the updater reads, stays.
 cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/bin/bash
 HERE="$(dirname "$(readlink -f "$0")")"
 export PATH="$HERE/usr/bin:$PATH"
+unset ARGV0
 exec "$HERE/usr/bin/ubiquitty" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"

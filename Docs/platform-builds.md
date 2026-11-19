@@ -96,8 +96,8 @@ The app connects to a host; it does not run a local shell on the phone.
 ## Linux GTK4 and Vulkan
 
 Build natively on Linux with the common C++ toolchain, `pkg-config`, and
-development packages for **GTK 4.16 or newer, Vulkan, FreeType, Fontconfig, and
-HarfBuzz**. Debian 13, Ubuntu 26.04 and Fedora carry them; Ubuntu 24.04's GTK
+development packages for **GTK 4.16 or newer, libadwaita 1.6 or newer, Vulkan,
+FreeType, Fontconfig, and HarfBuzz**. Debian 13, Ubuntu 26.04 and Fedora carry them; Ubuntu 24.04's GTK
 is 4.14.
 Install **glslc** to compile the renderer's shaders, and a Vulkan driver
 appropriate to the GPU; Mesa lavapipe provides a software driver. Without
