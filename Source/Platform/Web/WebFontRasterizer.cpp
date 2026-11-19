@@ -1242,6 +1242,45 @@ bool WebFontRasterizer::rasterizeClusterInCell(const std::uint32_t* codePoints, 
     return fallback();
 }
 
+bool WebFontRasterizer::rasterizeClusterWindow(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight,
+    double phaseInPixels, Rendering::ClusterRasterBounds bounds, int slotWidth, int slotHeight, int rowOffsetInPixels, int windowHeight,
+    std::uint8_t* coverageOut)
+{
+    if (!m_isAvailable || !codePoints || count <= 0 || count > clusterPoolMaximumCodePoints || slotWidth <= 0 || slotHeight <= 0
+        || windowHeight <= 0 || !coverageOut)
+        return false;
+    const auto cluster = std::span(codePoints, static_cast<std::size_t>(count));
+    const std::string family = familyForCluster(codePoints, count, face, weight, Rendering::Font::Presentation::Text);
+    const auto base = codePoints[Unicode::clusterBaseIndex(cluster)];
+    if (family.empty() || Unicode::isExtendedPictographic(base))
+        return false;
+    // The slot's baseline, as `rasterizeCluster` places it, moved up by the
+    // rows the window starts below the slot's top.
+    const int baseline = std::min(static_cast<int>(m_metrics.baselineFromTop), slotHeight) - rowOffsetInPixels;
+    const int cssWeight = cssWeightFor(face, weight, m_userAxes, m_weights);
+    // The two draws `rasterizeClusterInCell` chooses between, on the same
+    // test: a syllabic cluster whose advance overflows its cell is fitted
+    // across, every other cluster is drawn as the face shapes it.
+    if (Rendering::clusterHorizontalFitEligible(cluster) && std::isfinite(phaseInPixels) && std::isfinite(bounds.left)
+        && std::isfinite(bounds.width) && bounds.width > 0) {
+        std::array<double, 5> metrics {};
+        if (webFontMeasureCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face), false, metrics.data())
+            && std::ranges::all_of(metrics, [](double value) { return std::isfinite(value); })
+            && metrics[0] >= 0 && metrics[2] >= metrics[1] && metrics[4] >= metrics[3] && metrics[0] > bounds.width) {
+            const double sourceLeft = phaseInPixels + std::min(0.0, metrics[1]);
+            const double sourceRight = phaseInPixels + std::max(metrics[0], metrics[2]);
+            const auto fit = Rendering::fitClusterHorizontal(sourceLeft, sourceRight, bounds);
+            const double penX = phaseInPixels * fit.scaleX + fit.translationX;
+            return webFontDrawClusterInCell(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face), phaseInPixels,
+                       bounds.left, bounds.width, fit.scaleX, 1, penX, baseline, slotWidth, windowHeight, false, coverageOut)
+                != 0;
+        }
+    }
+    return webFontDrawCluster(family.c_str(), codePoints, count, m_pixelSize, cssWeight, Rendering::isItalic(face) ? 1 : 0, baseline, slotWidth,
+               windowHeight, 0, coverageOut)
+        != 0;
+}
+
 bool WebFontRasterizer::rasterizeColorCluster(const std::uint32_t* codePoints, int count, int slotInPixels, std::uint8_t* pixelsOut)
 {
     if (!m_isAvailable || !codePoints || count <= 0 || slotInPixels <= 0 || !pixelsOut)

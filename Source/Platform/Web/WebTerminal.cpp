@@ -3158,12 +3158,17 @@ bool WebTerminal::buildFrame()
     m_fonts->renderer.lendLetters(inputs, out);
     Rendering::InstanceCounts counts = Rendering::buildCellInstances(inputs, backend, out);
     // A packed run, a box decomposition or a rule cut into pieces can emit
-    // more quads than the seeds hold.
-    if (counts.proportionalGlyphs > m_proportionalGlyphs.size()
+    // more quads than the seeds hold, and so can a stack of marks drawn
+    // through windows of its own (ClusterWindows.h).
+    if (counts.glyphs > m_glyphs.size()
+        || counts.proportionalGlyphs > m_proportionalGlyphs.size()
         || counts.proportionalStrips > m_proportionalStrips.size()
         || counts.ligatureGlyphs > m_ligatureGlyphs.size()
         || counts.boxFills > m_boxFills.size()
         || counts.decorations > m_decorations.size()) {
+        m_glyphs.resize(std::max(counts.glyphs, m_glyphs.size()));
+        out.glyphs = m_glyphs.data();
+        out.glyphCapacity = m_glyphs.size();
         m_proportionalGlyphs.resize(std::max(counts.proportionalGlyphs, m_proportionalGlyphs.size()));
         m_proportionalStrips.resize(std::max(counts.proportionalStrips, m_proportionalStrips.size()));
         m_ligatureGlyphs.resize(std::max(counts.ligatureGlyphs, m_ligatureGlyphs.size()));

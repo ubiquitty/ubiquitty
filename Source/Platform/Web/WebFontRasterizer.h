@@ -149,6 +149,37 @@ public:
     bool rasterizeClusterInCell(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight,
         double phaseInPixels, Rendering::ClusterRasterBounds, int slotWidth, int slotHeight, std::uint8_t* coverageOut) override;
 
+    /// Whether a stacked cluster's windows can be drawn: the page's face
+    /// stands its baseline where the metrics put it, so the slot's baseline is
+    /// known. The bundled fallback keeps its cells.
+    ///
+    /// - Returns: True when the page's face is in use.
+    [[nodiscard]] bool drawsClusterWindows() const override { return m_isAvailable; }
+
+    /// Draws a window of a cluster's uncut drawing (Rendering::GlyphRasterizer).
+    ///
+    /// The canvas is the window, and the cluster is drawn on it with its
+    /// baseline moved up by the window's offset, through the same draw and
+    /// the same fit its own slot takes. A cluster the page's face would
+    /// draw as a pictograph is declined: that draw lifts it to fit the canvas,
+    /// and a window's canvas is not the slot it would fit.
+    ///
+    /// - Parameters:
+    ///   - codePoints: The cluster's Unicode scalars.
+    ///   - count: The number of scalars to read.
+    ///   - face: The font style to use.
+    ///   - weight: The weight override, or zero for the style's default.
+    ///   - phaseInPixels: The pen's fraction within one device pixel.
+    ///   - bounds: The allocated cell interval in slot coordinates.
+    ///   - slotWidth: The slot's and the window's width in pixels.
+    ///   - slotHeight: The height of the slot the cluster is drawn into.
+    ///   - rowOffsetInPixels: The slot row shown on the window's first row.
+    ///   - windowHeight: The window's height in pixels.
+    ///   - coverageOut: `slotWidth * windowHeight` coverage bytes.
+    /// - Returns: True when the window was drawn.
+    bool rasterizeClusterWindow(const std::uint32_t* codePoints, int count, Rendering::FontFace face, std::uint32_t weight, double phaseInPixels,
+        Rendering::ClusterRasterBounds bounds, int slotWidth, int slotHeight, int rowOffsetInPixels, int windowHeight, std::uint8_t* coverageOut) override;
+
     /// True whenever the host's text engine is usable.
     ///
     /// A browser's emoji face is the system's rather than the page's, so the
