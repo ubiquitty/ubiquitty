@@ -134,6 +134,9 @@ int smokeWindowChrome(const char* outputDirectory)
     int minWidth = 0, minHeight = 0;
     gtk_widget_get_size_request(activePane()->picture, &minWidth, &minHeight);
     check(minWidth == -1 && minHeight == -1, "the launch grid imposes no permanent minimum size");
+    // The window opens at the launch grid, top padding under the header included.
+    check(activePane()->columns == startupColumns && activePane()->rows == startupRows,
+        (std::string("the window opens at the launch grid, not ") + std::to_string(activePane()->columns) + "x" + std::to_string(activePane()->rows)).c_str());
     if (GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(app().window)); surface && GDK_IS_TOPLEVEL(surface)) {
         const auto state = gdk_toplevel_get_state(GDK_TOPLEVEL(surface));
         const auto isCompositorSized = state & (GDK_TOPLEVEL_STATE_TILED | GDK_TOPLEVEL_STATE_FULLSCREEN | GDK_TOPLEVEL_STATE_MAXIMIZED);

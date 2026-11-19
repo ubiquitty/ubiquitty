@@ -1846,7 +1846,10 @@ Ubiquitty::Rendering::EdgeInsets paneInsets(const LinuxPane& pane, float scale)
     // separates the text from it. libadwaita's raised top bar casts a shadow
     // over the content instead, so an unstated top edge takes the inset a window
     // without a title bar gets.
-    if (app().chrome && !config.paddingTop.has_value())
+    // Keyed to the build, not to app().chrome: the window is sized for its
+    // launch grid before the chrome is built, and that size must already hold
+    // this inset or the grid opens a row short.
+    if (!UBIQUITTY_LINUX_CHROMELESS && !config.paddingTop.has_value())
         padding.top = Ubiquitty::Preferences::Effective::titlelessPaddingTop(config);
     return { static_cast<float>(padding.left) * scale, static_cast<float>(padding.right) * scale,
         static_cast<float>(padding.top) * scale, static_cast<float>(padding.bottom) * scale };
