@@ -2422,6 +2422,21 @@ Ubiquitty::App::TitleViewerFacts titleViewerFacts(std::string fallbackName)
     return viewer;
 }
 
+// What a program said about its work, for the header's subtitle and the tab:
+// its status record's title and message, else its indicator's label. Core's
+// "app: state" label is not used: the program's icon names the app and the
+// status mark draws the state. Empty when the program gave no words.
+std::string programStatusWords(LinuxPane& pane)
+{
+    Ubiquitty::Terminal* term = pane.session->terminal();
+    if (!term)
+        return {};
+    const auto hold = holdPaneModel(pane);
+    if (term->programStatus.primary())
+        return Ubiquitty::App::programActivityText(term->programStatus);
+    return std::string(Ubiquitty::tabStatusText(term));
+}
+
 // What a pane shows beside its title in the header and its tab: the program
 // it runs, by Core's process-icon catalog, and the status that program
 // reported, as Core's roll-up kinds it.
@@ -2458,8 +2473,11 @@ void updateWindowTitle()
         return;
     const Ubiquitty::Preferences::Effective::TitleComposition composition = Ubiquitty::Preferences::Effective::windowTitleComposition(loadPreferences());
     const Ubiquitty::App::PaneTitleFacts facts = paneTitleFacts(*activePane(), composition);
-    if (app().chrome)
-        app().chrome->showTitle(Ubiquitty::Linux::Presentation::windowTitleContent(facts, titleViewerFacts("Ubiquitty"), composition), paneMarks(*activePane()));
+    if (app().chrome) {
+        Ubiquitty::App::PaneTitleFacts headerFacts = facts;
+        headerFacts.programStatus = programStatusWords(*activePane());
+        app().chrome->showTitle(Ubiquitty::Linux::Presentation::windowTitleContent(headerFacts, titleViewerFacts("Ubiquitty"), composition), paneMarks(*activePane()));
+    }
     std::string title = Ubiquitty::App::composeTitle(facts, titleViewerFacts("Ubiquitty (Linux)"), composition, Ubiquitty::Session::TitleSurface::Window).title;
     if (activePane()->hasUnheardBell) {
         title = "🔔 " + title;
@@ -7842,7 +7860,11 @@ bool launchShell()
 std::string buildTabLabel(LinuxPane& pane, int index)
 {
     const Ubiquitty::Preferences::Effective::TitleComposition composition = Ubiquitty::Preferences::Effective::tabTitleComposition(loadPreferences());
-    return Ubiquitty::App::composeTitle(paneTitleFacts(pane, composition), titleViewerFacts("Tab " + std::to_string(index + 1)), composition, Ubiquitty::Session::TitleSurface::Tab).title;
+    Ubiquitty::App::PaneTitleFacts facts = paneTitleFacts(pane, composition);
+    // The tab's status mark shows the program and its state; the label carries
+    // only what the program itself said.
+    facts.programStatus = programStatusWords(pane);
+    return Ubiquitty::App::composeTitle(facts, titleViewerFacts("Tab " + std::to_string(index + 1)), composition, Ubiquitty::Session::TitleSurface::Tab).title;
 }
 
 // The model owns tab identity and selection; the chrome's tab bar shows them

@@ -22,6 +22,12 @@ constexpr const char* styleSheet = R"css(
     padding-left: 0;
     padding-right: 0;
 }
+/* The terminal runs to the window's bottom edge, so that edge is square:
+   libadwaita rounds all four corners, a terminal only its top two. */
+window.csd {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+}
 .ubiquitty-process-icon.plate {
     background-color: currentColor;
     border-radius: 4px;

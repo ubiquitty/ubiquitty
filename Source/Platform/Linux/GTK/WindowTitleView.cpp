@@ -39,7 +39,7 @@ void setText(GtkWidget* label, const std::string& text)
 
 WindowTitleView::WindowTitleView(ProcessIconLoader& icons)
     : m_icons(icons)
-    , m_root(adoptSunk(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6)))
+    , m_root(adoptSunk(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0)))
     , m_status(statusPixelSize)
     , m_icon(gtk_image_new())
     , m_title(makeLabel("title", PANGO_ELLIPSIZE_END))
@@ -58,21 +58,21 @@ WindowTitleView::WindowTitleView(ProcessIconLoader& icons)
     gtk_widget_set_valign(m_icon, GTK_ALIGN_CENTER);
     gtk_widget_set_visible(m_icon, FALSE);
 
-    GtkWidget* lines = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_valign(lines, GTK_ALIGN_CENTER);
-    gtk_widget_set_hexpand(lines, TRUE);
-    gtk_box_append(GTK_BOX(lines), m_title);
+    // The program's icon names what runs, so it sits on the title's line.
+    GtkWidget* titleRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(titleRow, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(titleRow), m_icon);
+    gtk_box_append(GTK_BOX(titleRow), m_title);
     gtk_widget_set_halign(m_subtitleRow, GTK_ALIGN_CENTER);
-    gtk_label_set_text(GTK_LABEL(m_separator), "·");
+    // GNOME's separator between the parts of a title: a spaced em dash.
+    gtk_label_set_text(GTK_LABEL(m_separator), "—");
     gtk_accessible_update_state(GTK_ACCESSIBLE(m_separator), GTK_ACCESSIBLE_STATE_HIDDEN, TRUE, -1);
     gtk_box_append(GTK_BOX(m_subtitleRow), m_directory);
     gtk_box_append(GTK_BOX(m_subtitleRow), m_separator);
     gtk_box_append(GTK_BOX(m_subtitleRow), m_status.widget());
     gtk_box_append(GTK_BOX(m_subtitleRow), m_statusText);
-    gtk_box_append(GTK_BOX(lines), m_subtitleRow);
-
-    gtk_box_append(GTK_BOX(root), m_icon);
-    gtk_box_append(GTK_BOX(root), lines);
+    gtk_box_append(GTK_BOX(root), titleRow);
+    gtk_box_append(GTK_BOX(root), m_subtitleRow);
 }
 
 void WindowTitleView::showIcon(const PaneMarks& marks, const ChromeGround& ground)

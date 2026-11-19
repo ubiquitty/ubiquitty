@@ -15,9 +15,9 @@
 namespace Ubiquitty::Linux::GTK {
 
 /// The header bar's title widget, laid out as libadwaita's two-line window
-/// title: the program's icon beside a bold title, and under it a smaller
-/// subtitle holding the working directory, then the program's status mark
-/// and text.
+/// title: the program's icon and a bold title on the first line, and under it
+/// a smaller subtitle holding the working directory, then the program's status
+/// mark and whatever the program itself said about its work.
 class WindowTitleView final {
 public:
     /// Builds the title widget.
