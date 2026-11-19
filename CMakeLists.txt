@@ -1675,6 +1675,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     add_executable(ubiquitty-linux
         # Linux frontend (GTK4 shell + Vulkan renderer + the local PAL)
         Source/Platform/Linux/main.cpp
+        Source/Platform/Linux/LibmCompatibility.cpp
         Source/Platform/Linux/Smokes/PaddingSmoke.cpp
         Source/Platform/Linux/Smokes/SkipInkSmoke.cpp
         Source/Platform/Linux/Input/LinkInteraction.cpp
@@ -1756,6 +1757,7 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
         "$<$<BOOL:${UBIQUITTY_WERROR}>:-Werror>")
     target_link_libraries(ubiquitty-linux PRIVATE PkgConfig::GTK4 PkgConfig::PANGOCAIRO Vulkan::Vulkan
         PkgConfig::FREETYPE PkgConfig::FONTCONFIG PkgConfig::HARFBUZZ)
+    target_link_options(ubiquitty-linux PRIVATE "LINKER:--wrap=sqrtf")
     # forkpty lives in libutil on Linux/glibc (PTYStream.cpp).
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(ubiquitty-linux PRIVATE util)
