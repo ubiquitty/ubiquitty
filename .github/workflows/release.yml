@@ -279,7 +279,7 @@ jobs:
       - name: Stop owned CI containers before caching
         id: stop-containers
         if: always()
-        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$UBIQUITTY_SOURCE_ROOT" --cleanup-containers
       - name: Save the compiler cache
         if: always() && env.CCACHE_DIR != '' && steps.stop-containers.outcome == 'success'
         continue-on-error: true
@@ -327,7 +327,7 @@ jobs:
           if-no-files-found: error
       - name: Stop remaining owned CI containers
         if: always()
-        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$UBIQUITTY_SOURCE_ROOT" --cleanup-containers
 
 
   release-ubq:
@@ -404,7 +404,7 @@ jobs:
       - name: Stop owned CI containers before caching
         id: stop-containers
         if: always()
-        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$UBIQUITTY_SOURCE_ROOT" --cleanup-containers
       - name: Save the compiler cache
         if: always() && env.CCACHE_DIR != '' && steps.stop-containers.outcome == 'success'
         continue-on-error: true

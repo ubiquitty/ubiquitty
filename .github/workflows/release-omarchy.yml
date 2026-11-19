@@ -116,7 +116,7 @@ jobs:
           if-no-files-found: error
       - name: Stop remaining owned CI containers
         if: always()
-        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$GITHUB_WORKSPACE" --cleanup-containers
+        run: ./Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh --source-root "$UBIQUITTY_SOURCE_ROOT" --cleanup-containers
 
   collect:
     name: Verify both chromeless Omarchy packages
