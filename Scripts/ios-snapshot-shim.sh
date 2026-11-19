@@ -38,6 +38,7 @@ FEED=""
 FEED_FILE=""
 ROWS=""
 COLUMNS=""
+BACKDROP=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --snapshot) OUTPUT="${2:-}"; shift 2 ;;
@@ -54,11 +55,14 @@ while [ $# -gt 0 ]; do
         --unfocused) UNFOCUSED="--unfocused"; shift ;;
         # Passed through to the app, which states the configuration flags
         # through Core's helper and applies the post-feed actions as the
-        # macOS driver does. --bg-image waits on a backdrop pass of its own.
-        --bg-opacity | --tek-color-mode | --tek-beam | --tek-bg | --padding-x | --padding-y | --select-rect | --search | --view-offset)
+        # macOS driver does.
+        --bg-opacity | --bg-image-opacity | --bg-image-mode | --tek-color-mode | --tek-beam | --tek-bg | --padding-x | --padding-y | --select-rect | --search | --view-offset)
             [ $# -ge 2 ] || { echo "ios-snapshot: $1 needs a value" >&2; exit 2; }
             PASSTHROUGH+=("$1" "$2"); shift 2 ;;
         --tek-glow | --clear-to-mark | --clear-preserve-input) PASSTHROUGH+=("$1"); shift ;;
+        # A file the app opens, so it travels into the sandbox below as the
+        # configuration does.
+        --bg-image) BACKDROP="${2:-}"; shift 2 ;;
         --scale) SCALE="${2:-}"; shift 2 ;;
         *) echo "ios-snapshot: unsupported argument: $1" >&2; exit 2 ;;
     esac
@@ -105,6 +109,12 @@ rm -f "$CONTAINER_OUTPUT"
 # omission is a picture rather than an error.
 CONTAINER_CONFIG="$CONTAINER/Documents/ubiquitty-ios-snapshot.toml"
 cp "$CONFIG" "$CONTAINER_CONFIG"
+if [ -n "$BACKDROP" ]; then
+    [ -f "$BACKDROP" ] || { echo "ios-snapshot: backdrop does not exist: $BACKDROP" >&2; exit 2; }
+    CONTAINER_BACKDROP="$CONTAINER/Documents/ubiquitty-ios-snapshot-backdrop.${BACKDROP##*.}"
+    cp "$BACKDROP" "$CONTAINER_BACKDROP"
+    PASSTHROUGH+=("--bg-image" "$CONTAINER_BACKDROP")
+fi
 
 set +e
 # The frame clock pinned at tick zero, where a fresh terminal's cursor is
