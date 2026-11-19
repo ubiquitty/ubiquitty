@@ -14,8 +14,8 @@ using Presentation::ChromeGround;
 namespace {
 
 constexpr const char* styleSheetKey = "ubiquitty-chrome-style-sheet";
-// A header icon's size, as libadwaita draws its buttons' symbolic icons.
-constexpr int statusPixelSize = 16;
+// The status mark's size in the header, matching the tab bar's indicator.
+constexpr int statusPixelSize = 12;
 
 // The chrome's few rules of its own; every colour is libadwaita's.
 constexpr const char* styleSheet = R"css(
@@ -29,6 +29,16 @@ constexpr const char* styleSheet = R"css(
 window.csd {
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
+}
+/* A tab's status indicator, at the size of the header's mark: the tab's
+   label is the larger signal, the indicator a glance beside it. */
+tabbar tab .tab-indicator {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 0;
+}
+tabbar tab .tab-indicator image {
+    -gtk-icon-size: 12px;
 }
 .ubiquitty-process-icon.plate {
     background-color: currentColor;
@@ -97,10 +107,10 @@ WindowChrome::WindowChrome(GtkWidget* content, GtkWidget* searchBar)
     if (GtkWidget* button = gtk_widget_get_first_child(m_menuButton))
         gtk_widget_set_focusable(button, FALSE);
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), m_menuButton);
-    // The focused program's status, at the header's end beside the menu; the
-    // title keeps what the program is and where.
-    gtk_widget_set_margin_end(m_status.widget(), 6);
-    adw_header_bar_pack_end(ADW_HEADER_BAR(header), m_status.widget());
+    // The focused program's status, at the header's start beside New Tab, as
+    // libadwaita's tab bar draws a tab's indicator at the tab's start.
+    gtk_widget_set_margin_start(m_status.widget(), 6);
+    adw_header_bar_pack_start(ADW_HEADER_BAR(header), m_status.widget());
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), m_title.widget());
 
     adw_toolbar_view_add_top_bar(toolbar, header);

@@ -23,10 +23,10 @@
 namespace Ubiquitty::Linux::GTK {
 
 /// A terminal window's GNOME chrome, built from libadwaita as GNOME's own
-/// terminals build theirs: a raised top bar holding the header (new tab at the
-/// start, the two-line title, the focused program's status mark, the primary
-/// menu and the window controls at the end), the tab bar, and the find bar,
-/// over the window's content.
+/// terminals build theirs: a raised top bar holding the header (new tab and the
+/// focused program's status mark at the start, the two-line title, the
+/// primary menu and the window controls at the end), the tab bar, and the
+/// find bar, over the window's content.
 ///
 /// Every control names a window action (`Presentation::ChromeActions`); the
 /// chrome holds no callback into the window that owns it.

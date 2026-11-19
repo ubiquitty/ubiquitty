@@ -17,7 +17,7 @@ namespace Ubiquitty::Linux::GTK {
 /// title: the program's icon and a bold title on the first line, and under it
 /// a smaller subtitle with what the program said about its work, or the
 /// working directory when it said nothing. The status mark is the header's,
-/// by its menu.
+/// beside New Tab.
 class WindowTitleView final {
 public:
     /// Builds the title widget.
