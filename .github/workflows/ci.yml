@@ -58,6 +58,7 @@ jobs:
     timeout-minutes: 35
     permissions:
       contents: read
+      packages: read
       actions: read
       checks: read
     outputs:
@@ -105,6 +106,14 @@ jobs:
         with:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
           key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
+      - uses: ./.github/actions/verified-ci-image
+        if: runner.environment == 'github-hosted' && runner.arch == 'X64' && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true' && vars.PGO_LINUX_X86_64_IMAGE != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
+        with:
+          image: ${{ vars.PGO_LINUX_X86_64_IMAGE }}
+          token: ${{ github.token }}
+          source-root: ${{ github.workspace }}
+          recipe: ${{ steps.image.outputs.digest }}
+          archive: ${{ runner.temp }}/ubq-ci-linux-image.tar
       - name: Run the fail-fast preflight
         if: steps.reach.outputs.preflight != 'false'
         env:
@@ -181,6 +190,9 @@ jobs:
       UBQ_CI_CMAKE: ${{ needs.preflight.outputs.cmake }}
       UBQ_CI_PREFLIGHT_COMPLETE: "1"
       STAGES: ${{ matrix.stages }}
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -238,6 +250,14 @@ jobs:
         with:
           path: ${{ runner.temp }}/ubq-ci-linux-image.tar
           key: ci-linux-image-${{ runner.arch }}-${{ steps.image.outputs.digest }}
+      - uses: ./.github/actions/verified-ci-image
+        if: runner.environment == 'github-hosted' && runner.arch == 'X64' && steps.image.outputs.digest != '' && steps.restore-image.outputs.cache-hit != 'true' && vars.PGO_LINUX_X86_64_IMAGE != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
+        with:
+          image: ${{ vars.PGO_LINUX_X86_64_IMAGE }}
+          token: ${{ github.token }}
+          source-root: ${{ github.workspace }}
+          recipe: ${{ steps.image.outputs.digest }}
+          archive: ${{ runner.temp }}/ubq-ci-linux-image.tar
       - name: Run the fail-fast Linux battery
         id: battery
         env:

@@ -388,32 +388,11 @@ jobs:
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-linux-wasm-
       - name: Use the battery build root
         run: echo "UBQ_BUILD_ROOT=$RUNNER_WORKSPACE/build" >> "$GITHUB_ENV"
-      # Reuse the verified native CI image instead of rebuilding its Ubuntu
-      # dependency layer. Emscripten remains pinned by the browser battery.
-      - name: Match the verified image store
-        env:
-          CONTAINERD_IMAGE_STORE: "true"
-        run: |
-          sudo --preserve-env=CONTAINERD_IMAGE_STORE python3 - <<'PYTHON'
-          import json
-          import os
-          from pathlib import Path
-          path = Path('/etc/docker/daemon.json')
-          configuration = json.loads(path.read_text()) if path.exists() else {}
-          configuration.setdefault('features', {})['containerd-snapshotter'] = os.environ['CONTAINERD_IMAGE_STORE'] == 'true'
-          path.parent.mkdir(parents=True, exist_ok=True)
-          path.write_text(json.dumps(configuration))
-          PYTHON
-          sudo systemctl restart docker
-          docker info --format '{{json .DriverStatus}}'
-      - name: Authenticate the image pull
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Load the verified native CI image
-        env:
-          RELEASE_PGO_IMAGE: ${{ vars.PGO_LINUX_X86_64_IMAGE }}
-        run: python3 "$UBQ_RELEASE_CI" image --architecture x86_64 --reference "$RELEASE_PGO_IMAGE"
+      - uses: ./.github/actions/verified-ci-image
+        with:
+          image: ${{ vars.PGO_LINUX_X86_64_IMAGE }}
+          token: ${{ github.token }}
+          source-root: ${{ env.UBIQUITTY_SOURCE_ROOT }}
       - name: Build the browser frontend in the CI toolchain
         env:
           UBQ_CI_LINUX_IMAGE: "true"

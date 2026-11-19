@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: 2026 Stanislav Yaglo
+# SPDX-License-Identifier: Apache-2.0
+name: Verified CI image
+description: Load the recorded native image without rebuilding its dependency layer.
+inputs:
+  image:
+    description: Immutable registry image reference
+    required: true
+  token:
+    description: Read-only registry token
+    required: true
+  source-root:
+    description: Populated product checkout
+    required: true
+  recipe:
+    description: Load only when the recorded recipe matches this CI recipe
+    default: ''
+  archive:
+    description: Optional Docker archive for the existing Actions cache
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Check the recorded recipe
+      id: recipe
+      shell: bash
+      env:
+        PRODUCT_SOURCE: ${{ inputs.source-root }}
+        EXPECTED_RECIPE: ${{ inputs.recipe }}
+      run: |
+        python3 - <<'PYTHON'
+        import json
+        import os
+        from pathlib import Path
+        profile = Path(os.environ['PRODUCT_SOURCE']) / 'Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Support/pgo/linux-x86_64-core.trained-toolchain'
+        recorded = json.loads(profile.read_text())['recipe']
+        expected = os.environ['EXPECTED_RECIPE']
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('compatible=' + str(not expected or recorded == expected).lower() + '\n')
+        PYTHON
+    - name: Match the verified image store
+      if: steps.recipe.outputs.compatible == 'true'
+      shell: bash
+      run: |
+        sudo python3 - <<'PYTHON'
+        import json
+        from pathlib import Path
+        path = Path('/etc/docker/daemon.json')
+        configuration = json.loads(path.read_text()) if path.exists() else {}
+        configuration.setdefault('features', {})['containerd-snapshotter'] = True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(configuration))
+        PYTHON
+        sudo systemctl restart docker
+        docker info --format '{{json .DriverStatus}}'
+    - name: Authenticate the image pull
+      if: steps.recipe.outputs.compatible == 'true'
+      shell: bash
+      env:
+        GHCR_TOKEN: ${{ inputs.token }}
+      run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+    - name: Verify and load the recorded image
+      if: steps.recipe.outputs.compatible == 'true'
+      shell: bash
+      env:
+        UBIQUITTY_SOURCE_ROOT: ${{ inputs.source-root }}
+        RELEASE_PGO_IMAGE: ${{ inputs.image }}
+      run: python3 "$GITHUB_WORKSPACE/Scripts/release_ci.py" image --architecture x86_64 --reference "$RELEASE_PGO_IMAGE"
+    - name: Preserve the image for the existing cache
+      if: steps.recipe.outputs.compatible == 'true' && inputs.archive != ''
+      shell: bash
+      env:
+        PRODUCT_SOURCE: ${{ inputs.source-root }}
+        IMAGE_ARCHIVE: ${{ inputs.archive }}
+      run: |
+        recipe="$("$PRODUCT_SOURCE/Libraries/ubiquitty-kit/Libraries/ubiquitty-core/Scripts/ci-linux-image.sh" --source-root "$PRODUCT_SOURCE" --recipe-digest)"
+        docker save -o "$IMAGE_ARCHIVE" "ubq-ci-linux:$recipe"
