@@ -139,6 +139,20 @@ TEST(integratingWritesTheEntryAndThisAppsIcons)
     CHECK(decide(machine.locations) == Decision::Leave);
 }
 
+TEST(integratingReplacesIconsAnEarlierImageLeft)
+{
+    // A size the earlier image shipped and this one does not would be chosen
+    // over the scalable icon at that size; another app's icon stays.
+    Machine machine;
+    const fs::path icons = machine.locations.dataHome / "icons/hicolor";
+    Machine::write(icons / "64x64/apps/org.ubiquitty.linux.png", "old");
+    Machine::write(icons / "64x64/apps/someone-else.png", "theirs");
+    CHECK(integrate(machine.locations));
+    CHECK(!fs::exists(icons / "64x64/apps/org.ubiquitty.linux.png"));
+    CHECK(fs::exists(icons / "64x64/apps/someone-else.png"));
+    CHECK(fs::exists(icons / "48x48/apps/org.ubiquitty.linux.png"));
+}
+
 TEST(anEntryForAMovedAppImageIsRefreshed)
 {
     Machine machine;

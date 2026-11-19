@@ -205,8 +205,7 @@ python3 "$TOOLS_CORE_ROOT/Scripts/license_notices.py" --source "$ROOT" --core "$
 # reported.
 [ -s "$APPDIR/usr/share/applications/org.ubiquitty.linux.desktop" ] \
     || { echo "ERROR: cmake --install staged no desktop entry" >&2; exit 1; }
-for icon in scalable/apps/org.ubiquitty.linux.svg 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
-    case "$icon" in *.svg) path="$icon" ;; *) path="$icon/apps/org.ubiquitty.linux.png" ;; esac
+for path in scalable/apps/org.ubiquitty.linux.svg symbolic/apps/org.ubiquitty.linux-symbolic.svg; do
     [ -s "$APPDIR/usr/share/icons/hicolor/$path" ] \
         || { echo "ERROR: cmake --install staged no app icon at share/icons/hicolor/$path" >&2; exit 1; }
 done
@@ -216,9 +215,10 @@ for icon in claude-code.svg codex.svg; do
 done
 # appimagetool wants the .desktop + icon at the AppDir root too.
 cp "$APPDIR/usr/share/applications/org.ubiquitty.linux.desktop" "$APPDIR/org.ubiquitty.linux.desktop"
-ICON_RASTERS="$ROOT/Resources/Icon/Raster"
-cp "$ICON_RASTERS/Ubiquitty-256.png" "$APPDIR/org.ubiquitty.linux.png"
-cp "$ICON_RASTERS/Ubiquitty-256.png" "$APPDIR/.DirIcon"
+# The file manager's icon for the AppImage itself: the GNOME icon, rendered.
+ICON_RENDER="$ROOT/Resources/Icon/GNOME/org.ubiquitty.linux.png"
+cp "$ICON_RENDER" "$APPDIR/org.ubiquitty.linux.png"
+cp "$ICON_RENDER" "$APPDIR/.DirIcon"
 
 # AppRun: put the bundled tools on PATH and exec the binary (relies on host GTK4
 # and libadwaita). The runtime exports ARGV0 as the .AppImage's own name; zsh

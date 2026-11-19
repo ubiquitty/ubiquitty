@@ -344,6 +344,7 @@
     },
     {
       "paths": [
+        "Resources/Icon/GNOME/org.ubiquitty.linux.png",
         "Resources/Icon/Raster/Ubiquitty-128.png",
         "Resources/Icon/Raster/Ubiquitty-16.png",
         "Resources/Icon/Raster/Ubiquitty-24.png",

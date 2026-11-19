@@ -72,10 +72,10 @@ binary (`UBIQUITTY_LINUX_BUNDLED_FONTS` in `CMakeLists.txt`). Under
 `usr/share/doc/ubiquitty/` it carries this file, the inventory, and the license
 text of every component the inventory says needs a notice.
 
-GTK 4 (LGPL-2.1-or-later), Pango and PangoCairo, FreeType, fontconfig,
-HarfBuzz, the Vulkan loader and, where the build finds them, libX11, libXfixes
-and libwayland-client are linked dynamically from the host system and are not
-bundled in the AppImage, so they have no inventory row.
+GTK 4 and libadwaita (both LGPL-2.1-or-later), Pango and PangoCairo,
+FreeType, fontconfig, HarfBuzz, the Vulkan loader and, where the build finds
+them, libX11, libXfixes and libwayland-client are linked dynamically from the
+host system and are not bundled in the AppImage, so they have no inventory row.
 
 | Component | Used for | License | License text |
 |---|---|---|---|

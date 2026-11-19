@@ -1932,28 +1932,24 @@ elseif(UBIQUITTY_FRONTEND STREQUAL "Linux")
     endforeach()
 
     # The app icon, as a hicolor theme beside the binary (icons/), so a build
-    # tree run finds it the way an installed one finds share/icons. Each size is
-    # Scripts/export-app-icon.py's own render at that size; the SVG is scalable.
+    # tree run finds it the way an installed one finds share/icons. GNOME's
+    # icons are scalable: the app icon on GNOME's template and its one-ink
+    # symbolic mark, from Resources/Icon/GNOME. No fixed-size PNG is installed,
+    # since a theme prefers one of those over the scalable icon at its size.
     set(UBIQUITTY_LINUX_APP_ICON_OUTPUTS "")
-    foreach(size IN ITEMS 16 24 32 48 64 128 256)
-        set(_ubiquitty_app_icon "${CMAKE_CURRENT_BINARY_DIR}/icons/hicolor/${size}x${size}/apps/org.ubiquitty.linux.png")
+    foreach(icon IN ITEMS "scalable/apps/org.ubiquitty.linux.svg" "symbolic/apps/org.ubiquitty.linux-symbolic.svg")
+        get_filename_component(_ubiquitty_icon_name "${icon}" NAME)
+        get_filename_component(_ubiquitty_icon_directory "${icon}" DIRECTORY)
+        set(_ubiquitty_app_icon "${CMAKE_CURRENT_BINARY_DIR}/icons/hicolor/${icon}")
         add_custom_command(
             OUTPUT "${_ubiquitty_app_icon}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/Raster/Ubiquitty-${size}.png" "${_ubiquitty_app_icon}"
-            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/Raster/Ubiquitty-${size}.png"
-            COMMENT "Bundle the ${size}px app icon" VERBATIM)
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/GNOME/${_ubiquitty_icon_name}" "${_ubiquitty_app_icon}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/GNOME/${_ubiquitty_icon_name}"
+            COMMENT "Bundle the app icon ${_ubiquitty_icon_name}" VERBATIM)
         list(APPEND UBIQUITTY_LINUX_APP_ICON_OUTPUTS "${_ubiquitty_app_icon}")
-        install(FILES "${_ubiquitty_app_icon}" DESTINATION "share/icons/hicolor/${size}x${size}/apps")
+        install(FILES "${_ubiquitty_app_icon}" DESTINATION "share/icons/hicolor/${_ubiquitty_icon_directory}")
     endforeach()
-    set(_ubiquitty_app_icon "${CMAKE_CURRENT_BINARY_DIR}/icons/hicolor/scalable/apps/org.ubiquitty.linux.svg")
-    add_custom_command(
-        OUTPUT "${_ubiquitty_app_icon}"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/Ubiquitty.svg" "${_ubiquitty_app_icon}"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/Ubiquitty.svg"
-        COMMENT "Bundle the scalable app icon" VERBATIM)
-    list(APPEND UBIQUITTY_LINUX_APP_ICON_OUTPUTS "${_ubiquitty_app_icon}")
-    install(FILES "${_ubiquitty_app_icon}" DESTINATION "share/icons/hicolor/scalable/apps")
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/Resources/linux/org.ubiquitty.linux.desktop" DESTINATION share/applications)
 
     add_custom_target(ubiquitty-linux-icons ALL DEPENDS ${UBIQUITTY_LINUX_PROCESS_ICON_OUTPUTS} ${UBIQUITTY_LINUX_APP_ICON_OUTPUTS})

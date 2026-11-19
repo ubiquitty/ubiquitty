@@ -136,10 +136,21 @@ void copyIcons(const fs::path& appDirectory, const fs::path& dataHome)
     const fs::path source = appDirectory / "usr/share/icons/hicolor";
     const fs::path destination = dataHome / "icons/hicolor";
     std::error_code error;
+    // The application's icons from an earlier image go first: a size this
+    // image no longer ships would otherwise be preferred over its scalable one.
+    for (fs::directory_iterator size(destination, error), end; !error && size != end; size.increment(error)) {
+        for (fs::directory_iterator icon(size->path() / "apps", error), last; !error && icon != last; icon.increment(error)) {
+            if (icon->path().stem() == applicationID || icon->path().stem() == std::string(applicationID) + "-symbolic") {
+                std::error_code removeError;
+                fs::remove(icon->path(), removeError);
+            }
+        }
+        error.clear();
+    }
     for (fs::directory_iterator size(source, error), end; !error && size != end; size.increment(error)) {
         const fs::path apps = size->path() / "apps";
         for (fs::directory_iterator icon(apps, error), last; !error && icon != last; icon.increment(error)) {
-            if (icon->path().stem() != applicationID)
+            if (icon->path().stem() != applicationID && icon->path().stem() != std::string(applicationID) + "-symbolic")
                 continue;
             const fs::path target = destination / size->path().filename() / "apps" / icon->path().filename();
             std::error_code copyError;

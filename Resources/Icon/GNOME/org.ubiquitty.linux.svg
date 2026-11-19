@@ -1,0 +1,28 @@
+<!-- Copyright (C) 2026 Stanislav Yaglo -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- The Ubiquitty mark of Resources/Icon/Ubiquitty.icon on GNOME's app icon
+     template: a 128 grid, a face lit from above, and the base it stands on. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="face" x1="0" y1="10" x2="0" y2="82.8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2a2a2e"/>
+      <stop offset="1" stop-color="#0a0a0c"/>
+    </linearGradient>
+    <linearGradient id="base" x1="0" y1="102" x2="0" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4a4a52"/>
+      <stop offset="1" stop-color="#2c2c31"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="10" x2="0" y2="114" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="0.18" stop-color="#ffffff" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.07"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="16" width="112" height="104" rx="12" fill="url(#base)"/>
+  <rect x="8" y="10" width="112" height="104" rx="12" fill="url(#face)"/>
+  <rect x="8.5" y="10.5" width="111" height="103" rx="11.5" fill="none" stroke="url(#rim)" stroke-width="1"/>
+  <g transform="translate(14.141 10.152) scale(0.09885)">
+    <path d="M623.55 665.32H504.41A119.14 119.14 0 0 1 385.27 546.19V242.92Q385.27 221.26 363.61 221.26H244.47Q222.81 221.26 222.81 242.92V546.19A281.6 281.6 0 0 0 504.41 827.79H623.55Z" fill="#9a9aaa"/>
+    <path d="M786.01 242.92Q786.01 221.26 764.35 221.26H645.21Q623.55 221.26 623.55 242.92V827.79L786.01 665.32Z" fill="#ffffff"/>
+  </g>
+</svg>
