@@ -772,6 +772,12 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
     GtkWidget* inspectorWindow = nullptr;
     GtkWidget* inspectorLabel = nullptr;
     GtkWidget* accessibleTerminal = nullptr;
+    // The session's accessibility status (org.a11y.Status), and whether it
+    // says an assistive technology wants the terminal's text. The accessible
+    // snapshot holds the model while it reads the screen, so it is taken
+    // only while something is there to read it.
+    GDBusProxy* accessibilityStatus = nullptr;
+    bool isAccessibilityRequested = false;
     GtkIMContext* imContext = nullptr; // input method (dead keys / compose / CJK)
     bool hasInputMethodPreedit = false;
     GtkWidget* focusedPicture = nullptr; // the FOCUSED pane's GtkPicture (alias of activePane()->picture)
@@ -7418,7 +7424,7 @@ gboolean onAccessiblePublishDue(gpointer)
 // trailing publish for the frame that ends a stream.
 void publishAccessibleTerminal()
 {
-    if (!app().accessibleTerminal)
+    if (!app().accessibleTerminal || !app().isAccessibilityRequested)
         return;
     const double now = static_cast<double>(g_get_monotonic_time()) / 1e6;
     if (now - app().lastAccessiblePublishSeconds >= accessiblePublishIntervalSeconds) {
@@ -7433,7 +7439,7 @@ void publishAccessibleTerminalNow()
 {
     GtkWidget* accessible = app().accessibleTerminal;
     LinuxPane* pane = activePane();
-    if (!accessible || !pane || !pane->picture)
+    if (!accessible || !app().isAccessibilityRequested || !pane || !pane->picture)
         return;
     app().lastAccessiblePublishSeconds = static_cast<double>(g_get_monotonic_time()) / 1e6;
     graphene_rect_t bounds;
@@ -7446,6 +7452,51 @@ void publishAccessibleTerminalNow()
         Ubiquitty::Linux::Accessibility::snapshot(pane->session->terminal(), pane->viewOffset, &pane->selection.state),
         { bounds.origin.x + presentation.placement.origin.x / scale, bounds.origin.y + presentation.placement.origin.y / scale },
         { logicalCellWidth() * presentation.placement.scale, logicalCellHeight() * presentation.placement.scale });
+}
+
+// Reads the accessibility status and publishes the terminal when it has
+// just come to be wanted: a screen reader started mid-session finds the
+// screen as it stands.
+void readAccessibilityStatus()
+{
+    GDBusProxy* status = app().accessibilityStatus;
+    if (!status)
+        return;
+    const auto isSet = [status](const char* property) {
+        GVariant* value = g_dbus_proxy_get_cached_property(status, property);
+        const bool isTrue = value && g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN) && g_variant_get_boolean(value);
+        if (value)
+            g_variant_unref(value);
+        return isTrue;
+    };
+    const bool isRequested = isSet("IsEnabled") || isSet("ScreenReaderEnabled");
+    const bool hasJustBeenRequested = isRequested && !app().isAccessibilityRequested;
+    app().isAccessibilityRequested = isRequested;
+    if (hasJustBeenRequested)
+        publishAccessibleTerminalNow();
+}
+
+void onAccessibilityStatusChanged(GDBusProxy*, GVariant*, GStrv, gpointer)
+{
+    readAccessibilityStatus();
+}
+
+void onAccessibilityStatusReady(GObject*, GAsyncResult* result, gpointer)
+{
+    // No accessibility bus means nothing can ask for the text.
+    GDBusProxy* status = g_dbus_proxy_new_for_bus_finish(result, nullptr);
+    if (!status)
+        return;
+    app().accessibilityStatus = status;
+    g_signal_connect(status, "g-properties-changed", G_CALLBACK(onAccessibilityStatusChanged), nullptr);
+    readAccessibilityStatus();
+}
+
+// Starts watching whether an assistive technology wants the terminal's text.
+void watchAccessibilityStatus()
+{
+    g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START, nullptr, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status", nullptr,
+        onAccessibilityStatusReady, nullptr);
 }
 
 Ubiquitty::Linux::Presentation::SelectionFocus selectionFocus(bool isFocusedInActiveWindow) // bool-ok: converts the frame's one focus fact into the policy's enum
@@ -9057,7 +9108,7 @@ void openWindowApp(GtkApplication* gtkApplication, std::optional<Ubiquitty::Runt
     gtk_accessible_update_property(GTK_ACCESSIBLE(app().accessibleTerminal), GTK_ACCESSIBLE_PROPERTY_LABEL, "Terminal", -1);
     gtk_overlay_add_overlay(GTK_OVERLAY(paneOverlay), app().accessibleTerminal);
     gtk_overlay_set_measure_overlay(GTK_OVERLAY(paneOverlay), app().accessibleTerminal, FALSE);
-    publishAccessibleTerminal();
+    watchAccessibilityStatus();
     app().progressBar = gtk_drawing_area_new();
     // Fills the whole pane area: the draw func paints a thin bar at each pane's
     // top edge (per-pane bars), so it can't be a pinned top strip.
