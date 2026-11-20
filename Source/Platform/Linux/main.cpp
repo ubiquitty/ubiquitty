@@ -460,6 +460,8 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     // the writability watch, the held-frame timer — stay unarmed: the loop
     // owns the transport, the queued writes and the coherence rule's clock.
     bool isIngesting = false;
+    // Whether the flood now arriving has held synchronized output; see onTick.
+    bool didFloodHoldSynchronizedOutput = false;
     struct FrameRelease {
         void operator()(Ubiquitty::Rendering::FrameCapture* frame) const { ::releaseFrameCapture(frame); }
     };
@@ -786,6 +788,11 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
 
     // ---- frame state ----
     bool isRepaintPending = true; // set by requestRepaint(); cleared by the frame that paints
+    // A repaint something other than a flood asked for, which the next tick
+    // draws whatever is arriving; and when the last frame was drawn, which is
+    // what a flood's cadence is measured from.
+    bool isPromptRepaintOwed = true;
+    std::uint32_t lastPresentMicros = 0;
     FrameBufferPool framePool;
     // The accessible snapshot is republished at most every
     // accessiblePublishIntervalSeconds while frames stream, with one trailing
@@ -984,7 +991,10 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
 // callback, whose address the body needs.
 enum class RepaintCause : std::uint8_t {
     Activity,
-    CursorStep
+    CursorStep,
+    /// Output from a pane a flood is arriving in: drawn at the flood's
+    /// cadence, where every other cause is drawn on the next tick.
+    FloodOutput
 };
 void requestRepaint(RepaintCause = RepaintCause::Activity);
 void scheduleCaretBlink(const Ubiquitty::Terminal*);
@@ -2652,7 +2662,7 @@ void applyPaneDelivery(LinuxPane& pane, const PaneDelivery& delivery)
     const auto* shown = app().model->paneTree(app().model->activeSurface());
     const bool isPaneVisible = &pane == activePane() || (shown && shown->holdsPane(static_cast<int>(paneIDForPane(&pane))));
     if (delivery.didOutputArrive && isPaneVisible)
-        requestRepaint();
+        requestRepaint(pane.session->isFloodUnderway() ? RepaintCause::FloodOutput : RepaintCause::Activity);
     if (&pane == activePane()) {
         partStartMicros = Ubiquitty::PAL::monotonicMicros();
         applyWindowTitle(delivery.didTitleChange || delivery.didDirectoryChange || delivery.didProcessStateChange);
@@ -7649,9 +7659,32 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     // on screen rather than frozen until it ends. Asked before the hold below:
     // the rule stamps the block under the model lock itself.
     //
+    // A flood is drawn at its own cadence, not the display's: nobody reads
+    // output that arrives faster than it parses, and a frame costs the parser
+    // more than its own time (FrameDriver::floodFrameIntervalSeconds). Only
+    // while a flood is still underway in a visible pane and nothing else has
+    // asked for a frame; its last state is drawn on the tick after it stops.
+    // Decided before the panes' frames are taken, so none is taken for a tick
+    // that draws nothing.
+    const std::uint32_t tickMicros = Ubiquitty::PAL::monotonicMicros();
+    double floodFrameInterval = 0.0;
+    forEachVisibleLeaf([&](LinuxPane& pane) {
+        if (!pane.isIngesting || !pane.session->isFloodUnderway()) {
+            pane.didFloodHoldSynchronizedOutput = false;
+            return;
+        }
+        // A flood of synchronized blocks is one held frame after another, and
+        // the hold is down only for the instant between two of them: once
+        // seen held, the flood is a held one until it ends.
+        pane.didFloodHoldSynchronizedOutput = pane.didFloodHoldSynchronizedOutput || pane.session->readSnapshot().syncHoldActive;
+        floodFrameInterval = std::max(floodFrameInterval, pane.didFloodHoldSynchronizedOutput ? Ubiquitty::Runtime::FrameDriver::synchronizedFloodFrameIntervalSeconds : Ubiquitty::Runtime::FrameDriver::floodFrameIntervalSeconds);
+    });
+    const bool isFloodPaced = app().isRepaintPending && !app().isPromptRepaintOwed
+        && static_cast<double>(tickMicros - app().lastPresentMicros) < floodFrameInterval * 1e6;
     // Every visible leaf takes its admitted boundary frame, or the live read
     // Core permits when native overlays need the current model.
-    forEachVisibleLeaf([](LinuxPane& pane) { preparePaneFrame(pane); });
+    if (!isFloodPaced)
+        forEachVisibleLeaf([](LinuxPane& pane) { preparePaneFrame(pane); });
     // Core's drive recommends continuous presentation while the screen
     // changes at frame rate: the grid moves between any two ticks, so a frame
     // is owed on each whatever the delivery cadence, as the Swift arm's frame
@@ -7670,7 +7703,7 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
             pane.session->setSyncPublishRefreshSeconds(frameInterval);
         }
         if (pane.session->isPresentationRecommendedContinuous())
-            requestRepaint();
+            requestRepaint(pane.session->isFloodUnderway() ? RepaintCause::FloodOutput : RepaintCause::Activity);
     });
     ++app().perfWindow.ticks;
     // The tick's own reads of the focused model, ended before the paint: each
@@ -7719,7 +7752,9 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     // captured sync-clear frame remains available across the next update
     // block, so continuous BSU/ESU output can present completed frames at
     // native cadence without waiting for the watchdog.
-    if (app().isRepaintPending) {
+    if (app().isRepaintPending && !isFloodPaced) {
+        app().isPromptRepaintOwed = false;
+        app().lastPresentMicros = tickMicros;
         // Repaint every visible leaf (a split tab shows N at once); each is still one
         // texture from one renderGrid/rasterizeTerm call keyed to its own term.
         // The frame's own reads of the focused model come first, under the
@@ -7773,10 +7808,12 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
 void requestRepaint(RepaintCause cause)
 {
     app().isRepaintPending = true;
+    if (cause == RepaintCause::Activity)
+        app().isPromptRepaintOwed = true;
 
     // Output activity extends continuous drive even without a widget. A
     // cursor-only step changes pixels but does not extend that drive.
-    if (cause == RepaintCause::Activity) {
+    if (cause != RepaintCause::CursorStep) {
         const double now = static_cast<double>(g_get_monotonic_time()) / 1e6;
         (void)app().frameDriver.noteActivity(now);
     }
