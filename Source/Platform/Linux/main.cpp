@@ -248,6 +248,7 @@
 #include "Core/Preferences/SnapshotConfigurationFlags.h"
 #include "Core/Preferences/Vocabulary.h"
 #include "Core/Protocol/Sync/WireVersion.h"
+#include "Core/Rendering/AnimationSchedule.h"
 #include "Core/Rendering/BeamLayout.h"
 #include "Core/Rendering/BoxDrawingRasterizer.h"
 #include "Core/Rendering/BundledFonts.h"
@@ -460,8 +461,9 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     // the writability watch, the held-frame timer — stay unarmed: the loop
     // owns the transport, the queued writes and the coherence rule's clock.
     bool isIngesting = false;
-    // Whether the flood now arriving has held synchronized output; see onTick.
-    bool didFloodHoldSynchronizedOutput = false;
+    // Whether output of this pane has asked for a frame that no tick has drawn
+    // yet; see onTick.
+    bool isOutputFrameOwed = false;
     struct FrameRelease {
         void operator()(Ubiquitty::Rendering::FrameCapture* frame) const { ::releaseFrameCapture(frame); }
     };
@@ -788,9 +790,10 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
 
     // ---- frame state ----
     bool isRepaintPending = true; // set by requestRepaint(); cleared by the frame that paints
-    // A repaint something other than a flood asked for, which the next tick
-    // draws whatever is arriving; and when the last frame was drawn, which is
-    // what a flood's cadence is measured from.
+    // A repaint the reader or the view asked for rather than a pane's output,
+    // which the next tick draws whatever is arriving; and when the last frame
+    // was drawn, which is what the cadence of a flood of synchronized output
+    // is measured from.
     bool isPromptRepaintOwed = true;
     std::uint32_t lastPresentMicros = 0;
     FrameBufferPool framePool;
@@ -992,14 +995,17 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
 enum class RepaintCause : std::uint8_t {
     Activity,
     CursorStep,
-    /// Output from a pane a flood is arriving in: drawn at the flood's
-    /// cadence, where every other cause is drawn on the next tick.
-    FloodOutput
+    /// A pane's own output, which marks the pane (LinuxPane::isOutputFrameOwed)
+    /// and is judged at the tick: drawn then as any cause is, unless a flood
+    /// whose program holds synchronized output is underway in the pane by
+    /// then, which is drawn at that hold's cadence.
+    Output
 };
 void requestRepaint(RepaintCause = RepaintCause::Activity);
 void scheduleCaretBlink(const Ubiquitty::Terminal*);
 void restartCaretBlink(bool isInput); // bool-ok: GtkText's pend (input) versus focus restart.
 double cursorPresentationInterval(GtkWidget*);
+double framePresentationInterval(GtkWidget*);
 
 // A base subobject is destroyed after every member, whatever order the members
 // are written in, so inheriting the referents is what keeps the panes from
@@ -2661,8 +2667,10 @@ void applyPaneDelivery(LinuxPane& pane, const PaneDelivery& delivery)
     }
     const auto* shown = app().model->paneTree(app().model->activeSurface());
     const bool isPaneVisible = &pane == activePane() || (shown && shown->holdsPane(static_cast<int>(paneIDForPane(&pane))));
-    if (delivery.didOutputArrive && isPaneVisible)
-        requestRepaint(pane.session->isFloodUnderway() ? RepaintCause::FloodOutput : RepaintCause::Activity);
+    if (delivery.didOutputArrive && isPaneVisible) {
+        pane.isOutputFrameOwed = true;
+        requestRepaint(RepaintCause::Output);
+    }
     if (&pane == activePane()) {
         partStartMicros = Ubiquitty::PAL::monotonicMicros();
         applyWindowTitle(delivery.didTitleChange || delivery.didDirectoryChange || delivery.didProcessStateChange);
@@ -2759,7 +2767,7 @@ void beginPaneIngest(LinuxPane& pane)
     // the adaptive driver a rate before the ingest thread starts: without it,
     // its conservative unknown-rate answer requests a frame on every tick
     // even after output stops. The tick replaces this fallback with GTK's rate.
-    const double presentationInterval = cursorPresentationInterval(pane.picture);
+    const double presentationInterval = framePresentationInterval(pane.picture);
     pane.session->setPresentationFrameIntervalSeconds(presentationInterval);
     // The same rate paces what the drain publishes and delivers: a capture or
     // a hop to this thread that the display cannot show is work for nothing.
@@ -3056,14 +3064,37 @@ void scheduleCursorPresentation(LinuxPane& pane, double nowSeconds)
     pane.cursorPresentationSource = windowTimeoutAdd(milliseconds, onCursorPresentationDue, &pane);
 }
 
+// The refresh interval of the display a widget is on: the rate its monitor
+// advertises, the frame clock's own reading where the monitor names none, and
+// 60 Hz for a widget that is on no display yet. The monitor is asked first
+// because the clock answers 60 Hz until it has timed a refresh, which is its
+// guess and not the display's rate.
 double cursorPresentationInterval(GtkWidget* picture)
 {
     gint64 intervalMicroseconds = 0;
     if (picture) {
-        if (GdkFrameClock* clock = gtk_widget_get_frame_clock(picture))
+        GtkNative* native = gtk_widget_get_native(picture);
+        GdkSurface* surface = native ? gtk_native_get_surface(native) : nullptr;
+        GdkMonitor* monitor = surface ? gdk_display_get_monitor_at_surface(gtk_widget_get_display(picture), surface) : nullptr;
+        if (const int milliHertz = monitor ? gdk_monitor_get_refresh_rate(monitor) : 0; milliHertz > 0)
+            intervalMicroseconds = static_cast<gint64>(1'000'000'000 / milliHertz);
+        else if (GdkFrameClock* clock = gtk_widget_get_frame_clock(picture))
             gdk_frame_clock_get_refresh_info(clock, 0, &intervalMicroseconds, nullptr);
     }
     return intervalMicroseconds > 0 ? static_cast<double>(intervalMicroseconds) / 1e6 : 1.0 / 60.0;
+}
+
+// The interval between two frames of a widget's pane: its display's refresh,
+// lengthened to the reader's `[render] max_fps` when that is the slower. Core's
+// ladder decides (Rendering::presentationFramesPerSecond), as it does for the
+// Swift arm's display link.
+double framePresentationInterval(GtkWidget* picture)
+{
+    const double displayInterval = cursorPresentationInterval(picture);
+    const auto displayRate = static_cast<std::int32_t>(std::lround(1.0 / displayInterval));
+    const std::int32_t rate = Ubiquitty::Rendering::presentationFramesPerSecond(displayRate,
+        Ubiquitty::Preferences::Effective::maxFPS(loadPreferences()), Ubiquitty::Rendering::FramePresentation::Presented);
+    return rate > 0 && rate < displayRate ? 1.0 / static_cast<double>(rate) : displayInterval;
 }
 
 void updateIMCursorLocation(Ubiquitty::CellPosition cursor); // defined with the IME handlers below
@@ -7661,31 +7692,42 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     // on screen rather than frozen until it ends. Asked before the hold below:
     // the rule stamps the block under the model lock itself.
     //
-    // A flood is drawn at its own cadence, not the display's: nobody reads
-    // output that arrives faster than it parses, and a frame costs the parser
-    // more than its own time (FrameDriver::floodFrameIntervalSeconds). Only
-    // while a flood is still underway in a visible pane and nothing else has
-    // asked for a frame; its last state is drawn on the tick after it stops.
-    // Decided before the panes' frames are taken, so none is taken for a tick
-    // that draws nothing.
+    // Output is drawn at the display's rate whatever its own: each tick takes
+    // the newest frame the drain captured, and a flood scrolls as smoothly as
+    // a trickle does. The one output the display does not follow is a flood
+    // whose program holds synchronized output, which is drawn at the cadence
+    // an unbroken hold would be (FrameDriver::synchronizedFloodFrameIntervalSeconds).
+    // Only while that flood is still underway in a visible pane and nothing
+    // else has asked for a frame, neither the reader nor another pane's
+    // output; its last state is drawn on the tick after it stops. What a
+    // pane's output is owed is judged here and not where it was delivered: a
+    // program that prints a line and opens its update behind it has asked for
+    // the hold by the time the tick comes. Decided before the panes' frames
+    // are taken, so none is taken for a tick that draws nothing.
     const std::uint32_t tickMicros = Ubiquitty::PAL::monotonicMicros();
-    double floodFrameInterval = 0.0;
+    double heldFloodFrameInterval = 0.0;
+    bool isOrdinaryOutputOwed = false;
     forEachVisibleLeaf([&](LinuxPane& pane) {
-        if (!pane.isIngesting || !pane.session->isFloodUnderway()) {
-            pane.didFloodHoldSynchronizedOutput = false;
-            return;
-        }
-        // A flood of synchronized blocks is one held frame after another, and
-        // the hold is down only for the instant between two of them: once
-        // seen held, the flood is a held one until it ends.
-        pane.didFloodHoldSynchronizedOutput = pane.didFloodHoldSynchronizedOutput || pane.session->readSnapshot().syncHoldActive;
-        floodFrameInterval = std::max(floodFrameInterval, pane.didFloodHoldSynchronizedOutput ? Ubiquitty::Runtime::FrameDriver::synchronizedFloodFrameIntervalSeconds : Ubiquitty::Runtime::FrameDriver::floodFrameIntervalSeconds);
+        if (pane.isIngesting && pane.session->isSynchronizedFloodUnderway())
+            heldFloodFrameInterval = Ubiquitty::Runtime::FrameDriver::synchronizedFloodFrameIntervalSeconds;
+        else if (pane.isOutputFrameOwed)
+            isOrdinaryOutputOwed = true;
     });
-    const bool isFloodPaced = app().isRepaintPending && !app().isPromptRepaintOwed
-        && static_cast<double>(tickMicros - app().lastPresentMicros) < floodFrameInterval * 1e6;
+    const double sincePresentSeconds = static_cast<double>(tickMicros - app().lastPresentMicros) / 1e6;
+    const bool isFloodPaced = app().isRepaintPending && !app().isPromptRepaintOwed && !isOrdinaryOutputOwed
+        && sincePresentSeconds < heldFloodFrameInterval;
+    // The reader's ceiling on the frame rate, when it is under the display's.
+    // GTK's clock ticks at the display's rate and has no slower one to ask
+    // for, so a tick that comes inside the ceiling's interval draws nothing;
+    // half a refresh of slack keeps the tick that lands on the interval.
+    const double displayInterval = cursorPresentationInterval(app().paneContainer);
+    const double frameInterval = framePresentationInterval(app().paneContainer);
+    const bool isRateCapped = app().isRepaintPending && frameInterval > displayInterval
+        && sincePresentSeconds < frameInterval - displayInterval * 0.5;
+    const bool isTickPaced = isFloodPaced || isRateCapped;
     // Every visible leaf takes its admitted boundary frame, or the live read
     // Core permits when native overlays need the current model.
-    if (!isFloodPaced)
+    if (!isTickPaced)
         forEachVisibleLeaf([](LinuxPane& pane) { preparePaneFrame(pane); });
     // Core's drive recommends continuous presentation while the screen
     // changes at frame rate: the grid moves between any two ticks, so a frame
@@ -7699,13 +7741,15 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         // Refresh the driver's rate before asking it whether output still
         // warrants a vblank frame. FrameDriver's interval is atomic because
         // the ingest thread reads it while the main thread updates it here.
-        const double frameInterval = cursorPresentationInterval(pane.picture);
-        if (frameInterval != pane.session->presentationFrameIntervalSeconds()) {
-            pane.session->setPresentationFrameIntervalSeconds(frameInterval);
-            pane.session->setSyncPublishRefreshSeconds(frameInterval);
+        const double paneFrameInterval = framePresentationInterval(pane.picture);
+        if (paneFrameInterval != pane.session->presentationFrameIntervalSeconds()) {
+            pane.session->setPresentationFrameIntervalSeconds(paneFrameInterval);
+            pane.session->setSyncPublishRefreshSeconds(paneFrameInterval);
         }
-        if (pane.session->isPresentationRecommendedContinuous())
-            requestRepaint(pane.session->isFloodUnderway() ? RepaintCause::FloodOutput : RepaintCause::Activity);
+        if (pane.session->isPresentationRecommendedContinuous()) {
+            pane.isOutputFrameOwed = true;
+            requestRepaint(RepaintCause::Output);
+        }
     });
     ++app().perfWindow.ticks;
     // The tick's own reads of the focused model, ended before the paint: each
@@ -7754,7 +7798,7 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     // captured sync-clear frame remains available across the next update
     // block, so continuous BSU/ESU output can present completed frames at
     // native cadence without waiting for the watchdog.
-    if (app().isRepaintPending && !isFloodPaced) {
+    if (app().isRepaintPending && !isTickPaced) {
         app().isPromptRepaintOwed = false;
         app().lastPresentMicros = tickMicros;
         // Repaint every visible leaf (a split tab shows N at once); each is still one
@@ -7769,10 +7813,14 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
             hold->release();
         bool didDrawEveryLeaf = true;
         forEachVisibleLeaf([&](LinuxPane& pane) {
-            didDrawEveryLeaf = renderPaneInto(pane, pane.picture, nullptr) && didDrawEveryLeaf;
+            bool didDrawLeaf = renderPaneInto(pane, pane.picture, nullptr);
             if (pane.pendingCapture && pane.session->hasFrameChangesAfter(*pane.pendingCapture))
-                didDrawEveryLeaf = false;
+                didDrawLeaf = false;
             pane.pendingCapture.reset();
+            // Output that is still owed its frame keeps the pane's claim on
+            // the next tick.
+            pane.isOutputFrameOwed = pane.isOutputFrameOwed && !didDrawLeaf;
+            didDrawEveryLeaf = didDrawEveryLeaf && didDrawLeaf;
         });
         activePane()->lastCursorBlinkAlpha = paintedBlinkAlpha;
         app().lastBlinkPaintTicks = nowBlinkTicks; // advance the text-blink phase baseline
