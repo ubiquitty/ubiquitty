@@ -68,6 +68,10 @@ int smokePixelGeometry()
     // it is reset, the drawable while it is set. Turning it on owes the PTY a
     // new winsize, which the next publication delivers.
     checkReply("\033[16t\033[14t\033[?7402h\033[14t", "\033[6;32;16t\033[4;128;96t\033[4;162;130t");
+    // Written past the drain, whose pass would have published the mode: the
+    // tick reads the publication to learn whether anything it publishes from
+    // has changed, and takes no lock to ask.
+    pane.session->republishSnapshot();
     check(publishPanePixelGeometry(pane), "a fullscreen-content toggle did not republish the reported size");
 
     Ubiquitty::processBytes(terminal, "\033[?7402l");

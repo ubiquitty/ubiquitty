@@ -464,6 +464,25 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     // Whether output of this pane has asked for a frame that no tick has drawn
     // yet; see onTick.
     bool isOutputFrameOwed = false;
+    // The default background the pane's selection colour is mixed against and
+    // the palette it was read from: read under the model once a palette, so a
+    // frame's colour waits for no lock.
+    std::optional<Ubiquitty::Rendering::Vec4> selectionGround;
+    std::uint64_t selectionGroundPaletteEpoch = 0;
+    // Whether the model held rich text blocks when a frame last read it, or a
+    // captured frame came with some. This arm lays blocks out from the model,
+    // so such a pane's frames are read from it and not taken as captures.
+    bool hasRichTextBlocks = false;
+    // What the pane's pixel geometry was last published from; see
+    // publishPanePixelGeometry.
+    struct PixelPublication {
+        Ubiquitty::GridSize grid;
+        Ubiquitty::IntSize cell;
+        Ubiquitty::IntSize drawable;
+        bool isFullscreenContentActive = false;
+        [[nodiscard]] bool operator==(const PixelPublication&) const = default;
+    };
+    std::optional<PixelPublication> pixelPublication;
     struct FrameRelease {
         void operator()(Ubiquitty::Rendering::FrameCapture* frame) const { ::releaseFrameCapture(frame); }
     };
@@ -824,8 +843,6 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
         double hopTitleSeconds = 0.0;
         // Frames handed to the compositor as dma-bufs rather than read back.
         int exportedFrames = 0;
-        double holdWaitSeconds = 0.0;
-        double maxHoldWaitSeconds = 0.0;
     } perfWindow;
     // Idle<->active pacing, the same policy the macOS drive runs. GTK's frame
     // clock calls back at the display rate for as long as a callback is
@@ -1002,7 +1019,7 @@ enum class RepaintCause : std::uint8_t {
     Output
 };
 void requestRepaint(RepaintCause = RepaintCause::Activity);
-void scheduleCaretBlink(const Ubiquitty::Terminal*);
+void scheduleCaretBlink(const Ubiquitty::Cursor::AppearanceInputs*);
 void restartCaretBlink(bool isInput); // bool-ok: GtkText's pend (input) versus focus restart.
 double cursorPresentationInterval(GtkWidget*);
 double framePresentationInterval(GtkWidget*);
@@ -1327,6 +1344,7 @@ std::string buildTabLabel(LinuxPane& pane, int index);
 void switchTabRelative(int delta);
 void rebuildTabStrip();
 Ubiquitty::Rendering::Vec4 paneSelectionColor(const Ubiquitty::Terminal& terminal, Ubiquitty::Linux::Presentation::SelectionFocus focus);
+Ubiquitty::Rendering::Vec4 paneSelectionColor(LinuxPane& pane, std::uint64_t paletteEpoch, Ubiquitty::Linux::Presentation::SelectionFocus focus);
 Ubiquitty::Linux::Presentation::SelectionFocus selectionFocus(bool isFocusedInActiveWindow); // bool-ok: converts the frame's one focus fact into the policy's enum
 void installTabActions();
 Ubiquitty::Linux::Presentation::PaneMarks paneMarks(LinuxPane& pane);
@@ -1950,6 +1968,14 @@ bool publishPanePixelGeometry(LinuxPane& pane)
             drawable = { width * app().scale, height * app().scale };
         }
     }
+    // Asked every tick, and nearly every tick nothing it is made from has
+    // changed: the grid, the cell, the allocation, and the one mode that
+    // decides which extent a program is told. That is read off published
+    // state, so such a tick takes no lock for it.
+    const LinuxPane::PixelPublication asked { { pane.columns, pane.rows }, cell, drawable, pane.session->readSnapshot().modes.isFullscreenContentActive };
+    if (pane.pixelPublication == asked)
+        return false;
+    pane.pixelPublication = asked;
     std::uint32_t epochBefore = 0;
     {
         const auto hold = holdPaneModel(pane);
@@ -2123,8 +2149,8 @@ bool capturePaneRichText(LinuxPane& pane, const Ubiquitty::Linux::CursorOverlay*
     // Only rich text needs the composite: a bar outside a block is GTK's caret,
     // which the grid's cursor tier draws. Keep one final capture after visible
     // blocks disappear so the retained rasters and selection quads clear.
-    if (term->richTextBlocks.blocks(Ubiquitty::RichText::activeScreen(*term)).empty()
-        && pane.richTextFrame.richTextQuads().empty())
+    pane.hasRichTextBlocks = !term->richTextBlocks.blocks(Ubiquitty::RichText::activeScreen(*term)).empty();
+    if (!pane.hasRichTextBlocks && pane.richTextFrame.richTextQuads().empty())
         return false;
     Ubiquitty::Rendering::TerminalSnapshotOptions options;
     options.viewOffset = viewOffset;
@@ -2188,14 +2214,17 @@ void noteCaretInteraction()
 
 // The focused cursor's blink at `now`, a GLib monotonic reading. The toolkit
 // supplies its timeout; an explicit cursor rate still sets the period.
-Ubiquitty::Cursor::Blink::ToolkitBlinkPhase caretBlinkPhase(const Ubiquitty::Terminal& term, gint64 now)
+//
+// Asked of the cursor's inputs and not of the Terminal, so a frame drawn from
+// what the drain published resolves the caret as a frame read from the model
+// does.
+Ubiquitty::Cursor::Blink::ToolkitBlinkPhase caretBlinkPhase(const Ubiquitty::Cursor::AppearanceInputs& cursor, gint64 now)
 {
-    if (!Ubiquitty::Cursor::isStyleBlinking(term) || term.windowFocused == 0
-        || !app().window || !gtk_window_is_active(GTK_WINDOW(app().window)))
+    if (!cursor.isBlinking || !cursor.isWindowFocused || !app().window || !gtk_window_is_active(GTK_WINDOW(app().window)))
         return {};
     Ubiquitty::Cursor::Blink::ToolkitBlink blink = app().toolkitBlink;
-    if (term.cursorBlinkPeriodMilliseconds != 0)
-        blink.periodMilliseconds = term.cursorBlinkPeriodMilliseconds;
+    if (cursor.periodMilliseconds != 0)
+        blink.periodMilliseconds = cursor.periodMilliseconds;
     return Ubiquitty::Cursor::Blink::toolkitBlinkPaintPhase(blink, now - app().caretBlinkCycleStartMicros, now - app().caretInteractionMicros);
 }
 
@@ -2948,38 +2977,42 @@ gboolean onTitleRefresh(gpointer)
 // Both render paths consume it through fillCursorState, so the focused-block tier
 // + the bar/underline/hollow overlay land identically (the CPU<->GPU oracle). In
 // a scrolled-back view the cursor is suppressed downstream (viewOffset > 0).
-Ubiquitty::Linux::CursorOverlay resolveCursorOverlay(const Ubiquitty::Terminal* term)
+//
+// From the cursor's inputs: the drain's publication for a frame drawn from a
+// capture (TerminalSession::cursorAppearance), which waits for no lock, and
+// the model's own under the hold for a frame read from it.
+Ubiquitty::Linux::CursorOverlay resolveCursorOverlay(const Ubiquitty::Cursor::AppearanceInputs& inputs)
 {
     Ubiquitty::Linux::CursorOverlay cursor;
-    const Ubiquitty::Cursor::RenderState state = Ubiquitty::Cursor::resolveAppearance(term, Ubiquitty::PAL::monotonicTicks().count);
-    cursor.visible = term != nullptr && term->modes.isCursorVisible != 0;
+    const Ubiquitty::Cursor::RenderState state = Ubiquitty::Cursor::resolveAppearance(inputs, Ubiquitty::PAL::monotonicTicks().count);
+    cursor.visible = inputs.hasTerminal && inputs.isCursorVisible;
     cursor.shape = state.shape;
     cursor.blinkAlpha = state.blinkAlpha;
-    cursor.focused = term != nullptr && term->windowFocused != 0;
+    cursor.focused = inputs.hasTerminal && inputs.isWindowFocused;
     if (app().window && !gtk_window_is_active(GTK_WINDOW(app().window))) {
         cursor.focused = false;
         cursor.blinkAlpha = 1.0f;
     }
     // All three shapes follow GTK's blink setting and idle timeout. The
     // bounded paint phase keeps each fade below the display's refresh rate.
-    if (term)
-        cursor.blinkAlpha = caretBlinkPhase(*term, g_get_monotonic_time()).alpha;
+    if (inputs.hasTerminal)
+        cursor.blinkAlpha = caretBlinkPhase(inputs, g_get_monotonic_time()).alpha;
     return cursor;
 }
 
 // Wakes the focused cursor at its next opacity step. A one-shot repaint does
 // not extend the output-activity clock, so the frame callback can disarm
 // between steps and after GTK's blink timeout.
-void scheduleCaretBlink(const Ubiquitty::Terminal* term)
+void scheduleCaretBlink(const Ubiquitty::Cursor::AppearanceInputs* cursor)
 {
     if (app().caretBlinkSource != 0) {
         g_source_remove(app().caretBlinkSource);
         app().caretBlinkSource = 0;
     }
-    if (!term || !term->modes.isCursorVisible || !app().window || !gtk_widget_get_mapped(app().window)
+    if (!cursor || !cursor->isCursorVisible || !app().window || !gtk_widget_get_mapped(app().window)
         || !gtk_window_is_active(GTK_WINDOW(app().window)) || activePane()->viewOffset != 0)
         return;
-    const std::int64_t microseconds = caretBlinkPhase(*term, g_get_monotonic_time()).microsecondsUntilChange;
+    const std::int64_t microseconds = caretBlinkPhase(*cursor, g_get_monotonic_time()).microsecondsUntilChange;
     if (microseconds <= 0)
         return;
     const guint milliseconds = static_cast<guint>(std::clamp<std::int64_t>((microseconds + 999) / 1000, 1, 60000));
@@ -2999,14 +3032,19 @@ void noteCursorInput(LinuxPane& pane, double nowSeconds = static_cast<double>(g_
 // One pane's cursor. Only the focused pane's is live: every other pane of a
 // split draws its cursor unfocused and steady, as an inactive window does, so
 // the one that takes the keys is the one that blinks.
-Ubiquitty::Linux::CursorOverlay resolvePaneCursorOverlay(const LinuxPane& pane, const Ubiquitty::Terminal* term)
+Ubiquitty::Linux::CursorOverlay resolvePaneCursorOverlay(const LinuxPane& pane, const Ubiquitty::Cursor::AppearanceInputs& inputs)
 {
-    Ubiquitty::Linux::CursorOverlay cursor = resolveCursorOverlay(term);
+    Ubiquitty::Linux::CursorOverlay cursor = resolveCursorOverlay(inputs);
     if (&pane != activePane()) {
         cursor.focused = false;
         cursor.blinkAlpha = 1.0f;
     }
     return cursor;
+}
+
+Ubiquitty::Linux::CursorOverlay resolvePaneCursorOverlay(const LinuxPane& pane, const Ubiquitty::Terminal* term)
+{
+    return resolvePaneCursorOverlay(pane, Ubiquitty::Cursor::appearanceInputs(term));
 }
 
 Ubiquitty::Linux::CursorOverlay resolvePresentedCursorOverlay(LinuxPane& pane, double nowSeconds, double intervalSeconds)
@@ -3916,21 +3954,39 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     // a hold is a wait the parser pays, and there is nothing to read under it.
     if (pane.isFrameDeclined)
         return false;
+    // A frame the drain captured is drawn from the capture and from what the
+    // drain published beside it, and asks no hold: the frame waits for no
+    // parse and the parser pays nothing for it. This arm draws three things
+    // from the model, though, and a capture that comes with one of them is
+    // let go for a frame read under the hold: the storage tube, rich text
+    // blocks, which Pango lays out here, and the chrome over the focused pane.
+    const bool hasPaneChrome = &pane == activePane()
+        && (app().beamSession.isOpen() || *Ubiquitty::Input::hintText(pane.session->hintShowing(), Ubiquitty::Input::ModifierVocabulary::Words) != '\0');
+    if (pane.pendingCapture
+        && (!app().isVulkanReady || pane.pendingCapture->isTekFrame() || !pane.pendingCapture->richTextQuads().empty()
+            || !pane.richTextFrame.richTextQuads().empty() || hasPaneChrome)) {
+        pane.hasRichTextBlocks = pane.hasRichTextBlocks || !pane.pendingCapture->richTextQuads().empty();
+        pane.pendingCapture.reset();
+    }
+    const bool isDrawnFromCapture = pane.pendingCapture != nullptr;
     std::optional<Ubiquitty::Runtime::TerminalSession::ModelReadScope> ownHold;
-    if (!outerHold && pane.session)
+    if (!outerHold && pane.session && !isDrawnFromCapture)
         ownHold.emplace(*pane.session);
     auto* const hold = outerHold ? outerHold : &ownHold;
     Ubiquitty::Runtime::FrameDemand demand;
     demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
-    if (!pane.pendingCapture && pane.session->liveReadDecline(*term, demand).decline != Ubiquitty::Runtime::FrameDecline::None)
+    if (!isDrawnFromCapture && pane.session->liveReadDecline(*term, demand).decline != Ubiquitty::Runtime::FrameDecline::None)
         return false;
-    const int frameViewOffset = paneFrameViewOffset(pane, *term);
+    // The cursor's inputs and the offset the frame shows: the capture's own
+    // and the drain's publication, or the model's under the hold.
+    const Ubiquitty::Cursor::AppearanceInputs cursorAppearance = isDrawnFromCapture ? pane.session->cursorAppearance() : Ubiquitty::Cursor::appearanceInputs(term);
+    const int frameViewOffset = isDrawnFromCapture ? pane.pendingCapture->viewOffset() : paneFrameViewOffset(pane, *term);
     std::unique_ptr<std::vector<uint8_t>> frameBuffer = app().framePool.take();
     std::vector<uint8_t>& rgba = *frameBuffer;
     int width = 0, height = 0;
     const double nowSeconds = static_cast<double>(g_get_monotonic_time()) / 1e6;
-    Ubiquitty::Linux::CursorOverlay cursor = pane.pendingCapture ? resolvePaneCursorOverlay(pane, term)
-                                                                 : resolvePresentedCursorOverlay(pane, nowSeconds, cursorPresentationInterval(picture));
+    Ubiquitty::Linux::CursorOverlay cursor = isDrawnFromCapture ? resolvePaneCursorOverlay(pane, cursorAppearance)
+                                                                : resolvePresentedCursorOverlay(pane, nowSeconds, cursorPresentationInterval(picture));
     if (pane.pendingCapture) {
         pane.pendingCapture->setCursorMixAlpha(cursor.blinkAlpha);
         pane.pendingCapture->applyCursorPresentation(pane.cursorPresentation, nowSeconds, cursorPresentationInterval(picture),
@@ -3938,7 +3994,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     }
     scheduleCursorPresentation(pane, nowSeconds);
     if (&pane == activePane())
-        scheduleCaretBlink(term);
+        scheduleCaretBlink(&cursorAppearance);
     // SGR 5/6 text blink rides the same per-frame monotonic tick as the cursor,
     // resolved once here and handed to whichever path renders so the CPU<->GPU
     // oracle holds. The builder gates on hasBlinkHint, so no-blink screens are
@@ -3951,7 +4007,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     // pane rendered next.
     Ubiquitty::Rendering::BeamGeometry chrome;
     Ubiquitty::Rendering::HintToastGeometry hint;
-    if (&pane == activePane()) {
+    if (&pane == activePane() && !isDrawnFromCapture) {
         chrome = layoutBeamForFrame(*term);
         hint = layoutHintForFrame(*pane.session, *term);
     }
@@ -3961,8 +4017,9 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     const Ubiquitty::CellPosition cursorPosition = pane.pendingCapture
         ? Ubiquitty::CellPosition { pane.pendingCapture->cursorRow(), pane.pendingCapture->cursorColumn() }
         : Ubiquitty::CellPosition { term->screens.active->cursorY, term->screens.active->cursorX };
-    const bool isProgramViewport = term->isTekModeActive || term->modes.fullscreenContent;
-    const bool shouldFollowCursor = frameViewOffset == 0 && term->modes.isCursorVisible != 0;
+    const bool isTekFrame = !isDrawnFromCapture && term->isTekModeActive;
+    const bool isProgramViewport = isTekFrame || (isDrawnFromCapture ? pane.pendingCapture->isFullscreenContentActive() : term->modes.fullscreenContent);
+    const bool shouldFollowCursor = frameViewOffset == 0 && cursorAppearance.isCursorVisible;
     const auto framePresentation = paneGeometry(pane, gridSize, {
                                                                     .policy = app().rasterContext.renderConfiguration().nonOwnerPresentation,
                                                                     .cursor = cursorPosition,
@@ -3973,12 +4030,13 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
                                                                     .shouldFollowCursor = shouldFollowCursor,
                                                                 });
     const bool isPaneFocused = &pane == activePane() && app().window && gtk_window_is_active(GTK_WINDOW(app().window));
-    app().rasterContext.setFrameSelectionColor(paneSelectionColor(*term, selectionFocus(isPaneFocused)));
+    app().rasterContext.setFrameSelectionColor(paneSelectionColor(pane, pane.session->readSnapshot().paletteEpoch, selectionFocus(isPaneFocused)));
     const auto frameGeometry = app().rasterContext.frameCaptureGeometry(framePresentation.rasterOrigin, framePresentation.rasterSize);
     app().rasterContext.setFrameHoverLink(pane.hoveredLink);
     app().rasterContext.setBeamChrome(&chrome);
     app().rasterContext.setHintChrome(&hint);
-    const bool hasRichFrame = capturePaneRichText(pane, &cursor, frameViewOffset, framePresentation.rasterOrigin, framePresentation.rasterSize);
+    const bool hasRichFrame = !isDrawnFromCapture
+        && capturePaneRichText(pane, &cursor, frameViewOffset, framePresentation.rasterOrigin, framePresentation.rasterSize);
     // A caret inside a block is the block's: Pango owns its insertion offset.
     const bool drawsRichCaret = hasRichFrame && pane.richTextFrame.hasRichTextCaret();
     if (drawsRichCaret) {
@@ -4004,7 +4062,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     // A Tektronix frame is drawn by the CPU raster, which composites Core's
     // beam over the tube; the GPU pipeline has no Tek pass, and a tube frame is
     // vectors over a flat fill rather than a grid worth a GPU build.
-    const bool shouldRenderOnGPU = app().isVulkanReady && !term->isTekModeActive;
+    const bool shouldRenderOnGPU = app().isVulkanReady && !isTekFrame;
     if (shouldRenderOnGPU && !hasRichFrame && app().vulkan.canExportFrames())
         app().vulkan.requestFrameExport();
     Ubiquitty::Rendering::FrameCapture::ViewTierOverrides capturedView;
@@ -4109,7 +4167,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
             // deliveries that asked for it.
             const Ubiquitty::Runtime::TerminalSession::PerfDrainTally tally = pane.isIngesting ? pane.session->takePerfDrainTally() : Ubiquitty::Runtime::TerminalSession::PerfDrainTally {};
             Ubiquitty::PAL::logLine(stderr,
-                "[perf] {:.2f}s | {:3}fr {:5.0f}fps exported={} | frame(ms) avg={:6.3f} max={:6.3f} | wait={:6.3f}/{:6.3f} | readback={:6.3f}/{:6.3f} | ticks={} withheld={} | hops={} avg={:.3f}ms (flags {:.1f} follow {:.1f} queues {:.1f} title {:.1f} pointer {:.1f} ms) | hold(ms) avg={:.3f} max={:.3f} | ingest: {} deliveries {:.1f} MB {:.0f} ms parse (longest {:.1f} ms) | lock handoffs {} {:.2f} ms | captures {} replaced {} | {}x{} | backend={}",
+                "[perf] {:.2f}s | {:3}fr {:5.0f}fps exported={} | frame(ms) avg={:6.3f} max={:6.3f} | wait={:6.3f}/{:6.3f} | readback={:6.3f}/{:6.3f} | ticks={} withheld={} | hops={} avg={:.3f}ms (flags {:.1f} follow {:.1f} queues {:.1f} title {:.1f} pointer {:.1f} ms) | ingest: {} deliveries {:.1f} MB {:.0f} ms parse (longest {:.1f} ms) | lock handoffs {} {:.2f} ms | captures {} replaced {} | {}x{} | backend={}",
                 windowSeconds, frames, frames / windowSeconds, window.exportedFrames,
                 frameSum / frames * 1000.0, maxFrameSeconds * 1000.0,
                 waitSum / frames * 1000.0, maxWaitSeconds * 1000.0,
@@ -4118,7 +4176,6 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
                 window.hops, window.hops > 0 ? window.hopSeconds / window.hops * 1000.0 : 0.0,
                 window.hopFlagsSeconds * 1000.0, window.hopFollowSeconds * 1000.0, window.hopQueuesSeconds * 1000.0,
                 window.hopTitleSeconds * 1000.0, window.hopPointerSeconds * 1000.0,
-                window.ticks > 0 ? window.holdWaitSeconds / window.ticks * 1000.0 : 0.0, window.maxHoldWaitSeconds * 1000.0,
                 tally.deliveries, static_cast<double>(tally.bytes) / 1e6, static_cast<double>(tally.ingestMicroseconds) / 1000.0,
                 static_cast<double>(tally.longestIngestMicroseconds) / 1000.0,
                 tally.lockHandoffs, static_cast<double>(tally.lockHandoffMicroseconds) / 1000.0,
@@ -7401,11 +7458,11 @@ void drawProgressBar(GtkDrawingArea* area, cairo_t* cr, int width, int height, g
     forEachVisibleLeaf([&](LinuxPane& pane) {
         if (!pane.picture)
             return;
-        uint8_t state = Ubiquitty::OSC::ProgressNone, value = 0;
-        if (Ubiquitty::Terminal* term = pane.session->terminal()) {
-            const auto hold = holdPaneModel(pane);
-            Ubiquitty::getProgress(term, &state, &value);
-        }
+        // The drain publishes the progress beside the modes, so neither the
+        // tick nor the draw waits for the model to read it.
+        const Ubiquitty::Runtime::RuntimeSnapshot published = pane.session->readSnapshot();
+        const uint8_t state = published.progressState;
+        const uint8_t value = published.progressValue;
         if (state == Ubiquitty::OSC::ProgressNone)
             return;
         graphene_rect_t bounds;
@@ -7430,11 +7487,9 @@ void updateProgressBar()
     bool anyProgress = false;
     bool anyIndeterminate = false;
     forEachVisibleLeaf([&](LinuxPane& pane) {
-        uint8_t state = Ubiquitty::OSC::ProgressNone, value = 0;
-        if (Ubiquitty::Terminal* term = pane.session->terminal()) {
-            const auto hold = holdPaneModel(pane);
-            Ubiquitty::getProgress(term, &state, &value);
-        }
+        // The drain publishes the progress beside the modes, so the tick does
+        // not wait for the model to read it.
+        const uint8_t state = pane.session->readSnapshot().progressState;
         if (state != Ubiquitty::OSC::ProgressNone)
             anyProgress = true;
         if (state == Ubiquitty::OSC::ProgressIndeterminate)
@@ -7567,6 +7622,28 @@ Ubiquitty::Rendering::Vec4 paneSelectionColor(const Ubiquitty::Terminal& termina
         { static_cast<float>(accent.red), static_cast<float>(accent.green), static_cast<float>(accent.blue), 1.0f }, focus);
 }
 
+// The same for a pane, at a display tick. The ground is the terminal's default
+// background, which changes when its palette does: it is read under the model
+// once a palette epoch and kept, so the tick that asks waits for no lock.
+Ubiquitty::Rendering::Vec4 paneSelectionColor(LinuxPane& pane, std::uint64_t paletteEpoch, Ubiquitty::Linux::Presentation::SelectionFocus focus)
+{
+    if (!pane.selectionGround || pane.selectionGroundPaletteEpoch != paletteEpoch) {
+        const auto hold = holdPaneModel(pane);
+        const Ubiquitty::Terminal* terminal = pane.session->terminal();
+        if (!terminal)
+            return {};
+        const auto channel = [](std::uint16_t value) { return static_cast<float>(Ubiquitty::channel16To8(value)) / 255.0f; };
+        const Ubiquitty::PaletteRGB background = terminal->palette.defaultBackground;
+        pane.selectionGround = Ubiquitty::Rendering::Vec4 { channel(background.red), channel(background.green), channel(background.blue), 1.0f };
+        // The model's epoch, which the published one catches up with.
+        pane.selectionGroundPaletteEpoch = terminal->paletteEpoch;
+    }
+    GdkRGBA accent { 0.21f, 0.52f, 0.89f, 1.0f };
+    adw_accent_color_to_rgba(adw_style_manager_get_accent_color(adw_style_manager_get_default()), &accent);
+    return Ubiquitty::Linux::Presentation::desktopSelectionColor(*pane.selectionGround,
+        { static_cast<float>(accent.red), static_cast<float>(accent.green), static_cast<float>(accent.blue), 1.0f }, focus);
+}
+
 // Keep frames admitted at parser boundaries instead of looking for the same
 // boundary again after the parser has already started the next redraw.
 void preparePaneFrame(LinuxPane& pane)
@@ -7579,17 +7656,12 @@ void preparePaneFrame(LinuxPane& pane)
     const int cellWidth = app().rasterContext.cellWidth();
     const int cellHeight = app().rasterContext.cellHeight();
     const bool isFocused = &pane == activePane() && app().window && gtk_window_is_active(GTK_WINDOW(app().window));
-    bool canUseBoundaryFrames = app().isVulkanReady;
-    Ubiquitty::Rendering::Vec4 selectionColor {};
-    {
-        const auto hold = holdPaneModel(pane);
-        const auto* terminal = pane.session->terminal();
-        if (terminal)
-            selectionColor = paneSelectionColor(*terminal, selectionFocus(isFocused));
-        canUseBoundaryFrames = canUseBoundaryFrames && terminal && !terminal->isTekModeActive
-            && terminal->richTextBlocks.blocks(Ubiquitty::RichText::activeScreen(*terminal)).empty()
-            && pane.richTextFrame.richTextQuads().empty();
-    }
+    // Whether the pane's frames can be the drain's captures, from what is
+    // published and what the last frame found, so the tick asks no lock for
+    // it: the storage tube and rich text blocks are drawn from the model.
+    const bool canUseBoundaryFrames = app().isVulkanReady && pane.session->terminal() && !hoverSnapshot.isTekModeActive
+        && !pane.hasRichTextBlocks && pane.richTextFrame.richTextQuads().empty();
+    const Ubiquitty::Rendering::Vec4 selectionColor = paneSelectionColor(pane, hoverSnapshot.paletteEpoch, selectionFocus(isFocused));
     const auto authored = paneGeometry(pane, { hoverSnapshot.columns, hoverSnapshot.rows });
     if (app().isVulkanReady && (!pane.captureConfiguration || *pane.captureConfiguration != configuration || pane.captureCellWidth != cellWidth || pane.captureCellHeight != cellHeight || pane.isCaptureFocused != isFocused || !isSameColor(pane.captureSelectionColor, selectionColor) || pane.captureRasterOrigin.x != authored.rasterOrigin.x || pane.captureRasterOrigin.y != authored.rasterOrigin.y || pane.captureRasterSize.width != authored.rasterSize.width || pane.captureRasterSize.height != authored.rasterSize.height)) {
         app().rasterContext.setFrameSelectionColor(selectionColor);
@@ -7752,26 +7824,22 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         }
     });
     ++app().perfWindow.ticks;
-    // The tick's own reads of the focused model, ended before the paint: each
-    // pane's frame takes its own hold and hands it back at the renderer's
-    // capture boundary, which a hold here would outlast. The pointer fact
-    // and the rule above asked the session and so came first.
-    const std::uint32_t holdStartMicros = Ubiquitty::PAL::monotonicMicros();
-    auto hold = holdPaneModel(*activePane());
-    const double holdWaitSeconds = static_cast<double>(static_cast<std::uint32_t>(Ubiquitty::PAL::monotonicMicros() - holdStartMicros)) / 1e6;
-    app().perfWindow.holdWaitSeconds += holdWaitSeconds;
-    app().perfWindow.maxHoldWaitSeconds = std::max(app().perfWindow.maxHoldWaitSeconds, holdWaitSeconds);
+    // The tick's own facts about the focused model are the drain's
+    // publication, not the model: the history's depth, the cursor's inputs and
+    // the blink reading below. A tick waits for no lock to learn them, so the
+    // parser never pays for a tick and a tick never stands behind a parse.
+    //
     // Keep the focused pane's scrollback viewport in range: a resize or trimmed
     // history can shrink scrollbackCount below the current offset.
     const int prevViewOffset = activePane()->viewOffset;
-    clampActivePaneViewOffset(activePane()->session->terminal());
+    activePane()->viewOffset = Ubiquitty::Screen::clampViewOffset(prevViewOffset, activePane()->session->readSnapshot().scrollbackCount);
     if (activePane()->viewOffset != prevViewOffset)
         requestRepaint();
     // Cursor opacity changes only at the bounded GTK paint steps. A step can
     // arrive while another reason has the clock active, so reconcile it here
     // as well as through the sleeping caret timer.
     if (activePane()->viewOffset == 0) {
-        const Ubiquitty::Linux::CursorOverlay cursor = resolveCursorOverlay(activePane()->session->terminal());
+        const Ubiquitty::Linux::CursorOverlay cursor = resolveCursorOverlay(activePane()->session->cursorAppearance());
         if ((cursor.visible || activePane()->cursorPresentation.isHolding()) && cursor.blinkAlpha != activePane()->lastCursorBlinkAlpha) {
             requestRepaint(RepaintCause::CursorStep);
         }
@@ -7785,11 +7853,9 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     const uint32_t nowBlinkTicks = Ubiquitty::PAL::monotonicTicks().count;
     bool doesBlinkOweFrame = false;
     forEachVisibleLeaf([&](LinuxPane& pane) {
-        const auto paneHold = holdPaneModel(pane);
-        Ubiquitty::Terminal* t = pane.session->terminal();
-        if (t && t->grid && t->grid->hasBlinkHint()
-            && (pane.viewOffset > 0 || Ubiquitty::Rendering::anyCellBlinks(*t))
-            && Ubiquitty::needsAnimationRedraw(t->grid.get(), nowBlinkTicks, app().lastBlinkPaintTicks))
+        const Ubiquitty::Runtime::RuntimeSnapshot published = pane.session->readSnapshot();
+        if (published.hasBlinkHint && (pane.viewOffset > 0 || published.hasBlinkCellOnScreen)
+            && Ubiquitty::needsAnimationRedraw(nowBlinkTicks, app().lastBlinkPaintTicks))
             doesBlinkOweFrame = true;
     });
     if (doesBlinkOweFrame)
@@ -7803,14 +7869,11 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         app().lastPresentMicros = tickMicros;
         // Repaint every visible leaf (a split tab shows N at once); each is still one
         // texture from one renderGrid/rasterizeTerm call keyed to its own term.
-        // The frame's own reads of the focused model come first, under the
-        // tick's hold, which the focused pane's frame then ends at its
-        // capture boundary: the blink phase this frame paints and the
-        // accessible snapshot of the grid it paints.
-        const float paintedBlinkAlpha = resolveCursorOverlay(activePane()->session->terminal()).blinkAlpha;
+        // The blink phase this frame paints comes first, from the published
+        // cursor, and the accessible snapshot of the grid it paints, which
+        // takes its own hold when an assistive technology has asked for it.
+        const float paintedBlinkAlpha = resolveCursorOverlay(activePane()->session->cursorAppearance()).blinkAlpha;
         publishAccessibleTerminal();
-        if (hold)
-            hold->release();
         bool didDrawEveryLeaf = true;
         forEachVisibleLeaf([&](LinuxPane& pane) {
             bool didDrawLeaf = renderPaneInto(pane, pane.picture, nullptr);
