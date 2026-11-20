@@ -127,7 +127,6 @@ int smokePixelGeometry()
         return terminal->columns > idleColumns && terminal->rows > idleRows && app().tickCallbackID == 0;
     }),
         "native resize did not wake the idle clock, publish, and return to idle");
-    check(!app().frameDriver.active(), "resize left the frame clock running");
     gtk_window_destroy(GTK_WINDOW(app().window));
     app().window = nullptr;
     app().paneContainer = nullptr;

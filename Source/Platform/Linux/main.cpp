@@ -120,7 +120,8 @@
 //                         lockstep, switch/close, last-tab guard) without a window
 //   --smoke-splits        drive the split lifecycle (split/moveFocus/close-collapse,
 //                         last-pane escalation) with launched panes, without a window
-//   --smoke-pacing        that a repaint request reaches the idle<->active pacing policy
+//   --smoke-pacing        that a repaint request marks the frame it asks for, and what a
+//                         frame Core declined waits on
 //   --smoke-atlas-capacity  that the glyph atlas is cut for the screen it serves
 //   --smoke-coverage-sheet  that a partial sheet upload leaves the sheet holding the mirror
 //   --smoke-readback-memory that the frame is read back from cached memory
@@ -425,6 +426,43 @@ private:
 
 struct App;
 
+/// Core's answer for a frame it declined: why, and the tick it named to ask
+/// again at, zero where what ends the hold wakes the view.
+struct DeclinedFrame {
+    Ubiquitty::Runtime::FrameDecline decline = Ubiquitty::Runtime::FrameDecline::None;
+    std::uint32_t askAgainTicks = 0;
+};
+
+/// Who drains a pane: its ingest loop on a thread of its own, or the GTK
+/// thread between its other work.
+enum class PaneDrain : std::uint8_t {
+    Loop,
+    Inline
+};
+
+/// Whether the frame clock has to keep asking for a frame Core declined.
+///
+/// What ends most holds says so. The delivery or the release hook that admits
+/// a frame the coherence rule held wakes the view, and so does the publication
+/// of a capture it awaits; a hold with a budget names the tick to ask again
+/// at, which a one-shot keeps. The clock is left to ask only where neither is
+/// promised: an owner that has not turned since the view's demand, and a pane
+/// no loop drains, which announces nothing between its passes.
+///
+/// - Parameters:
+///   - frame: Core's answer for the frame.
+///   - drain: Who drains the pane the frame is of.
+/// - Returns: Whether nothing but the clock will ask for the frame again.
+constexpr bool doesClockAskForDeclinedFrame(DeclinedFrame frame, PaneDrain drain)
+{
+    if (frame.askAgainTicks > 0)
+        return false;
+    if (drain == PaneDrain::Inline)
+        return true;
+    return frame.decline != Ubiquitty::Runtime::FrameDecline::HeldByCoherence
+        && frame.decline != Ubiquitty::Runtime::FrameDecline::AwaitingCapture;
+}
+
 struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     Ubiquitty::Rendering::FrameHoverLink hoveredLink;
     std::uint64_t hoverModelGeneration = 0;
@@ -506,6 +544,8 @@ struct LinuxPane : Ubiquitty::CanMakeWeakPtr {
     // The selection colour the registered capture geometry carries.
     Ubiquitty::Rendering::Vec4 captureSelectionColor {};
     bool isFrameDeclined = false;
+    // Core's answer for the frame this pane was last declined.
+    DeclinedFrame declinedFrame;
     // The pointer-lock mode (private 7403) as the last delivery published it.
     // The verdict is asked on an edge of it, not on every delivery: a flood
     // delivers hundreds of times a second, and each ask is a model lock the
@@ -849,12 +889,6 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
         // Frames handed to the compositor as dma-bufs rather than read back.
         int exportedFrames = 0;
     } perfWindow;
-    // Idle<->active pacing, the same policy the macOS drive runs. GTK's frame
-    // clock calls back at the display rate for as long as a callback is
-    // installed, and this frontend's callback does the grid math and the blink
-    // reconciliation on every one of them — on a terminal nobody is watching,
-    // that is the display rate's worth of work and wakeups for no frame.
-    Ubiquitty::Runtime::FrameDriver frameDriver;
     // GTK's caret blink: its settings, and the two clocks GtkText keeps for
     // its focused text, in GLib monotonic microseconds — when the cycle
     // starts, which input holds back half a period, and the last interaction,
@@ -864,10 +898,17 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
     gint64 caretInteractionMicros = 0;
     // The wake at the end of a lit or dark stretch, when no frame clock runs.
     guint caretBlinkSource = 0;
-    // The installed tick callback, or zero when the clock is not driving us.
-    // Removed when output goes idle and re-installed by requestRepaint(), which
-    // is why every path that wants a frame goes through it.
+    // The installed tick callback, or zero when nothing has asked the clock
+    // for a cycle. The tick that leaves nothing for the clock to ask removes
+    // it and requestRepaint() installs it, which is why every path that wants
+    // a frame goes through that.
     guint tickCallbackID = 0;
+    // The one-shot that asks again for a frame Core declined, at the tick
+    // Core named for it, and when it is due on GLib's monotonic clock.
+    guint frameAskSource = 0;
+    gint64 frameAskDueMicros = 0;
+    // The wake at the step blinking text on display takes next.
+    guint textBlinkSource = 0;
     double progressPhase = 0.0; // indeterminate comet position, wraps at 1.0
     uint32_t lastBlinkPaintTicks = 0;
     int columns = startupColumns, rows = startupRows; // current grid; tracks the widget size
@@ -1015,17 +1056,21 @@ struct App : PaneReferents, std::enable_shared_from_this<App> {
 // of its body because callers reach it from above the frame clock's own
 // callback, whose address the body needs.
 enum class RepaintCause : std::uint8_t {
+    /// The view changed what it draws: the reader, the cursor's step, a
+    /// selection, a resize. The frame is owed whatever the drain published.
     Activity,
-    CursorStep,
-    /// A pane's output woke the view. It owes a frame only if what the drain
-    /// published has moved past the frame on the glass, which the tick asks:
-    /// the drain wakes the view for a delivery, for a frame it released and
-    /// for one it captured on request, and those are not three screens.
+    /// A pane's output woke the view, or the tick Core named for a frame it
+    /// declined came. A frame is owed only if what the drain published has
+    /// moved past the frame on the glass, which the tick asks: the drain wakes
+    /// the view for a delivery, for a frame it released and for one it
+    /// captured on request, and those are not three screens.
     Output
 };
 void requestRepaint(RepaintCause = RepaintCause::Activity);
+void askOutputFrame(LinuxPane&);
 void scheduleCaretBlink(const Ubiquitty::Cursor::AppearanceInputs*);
 void restartCaretBlink(bool isInput); // bool-ok: GtkText's pend (input) versus focus restart.
+void requestCaretFrame();
 double cursorPresentationInterval(GtkWidget*);
 double framePresentationInterval(GtkWidget*);
 
@@ -1770,7 +1815,6 @@ void onWindowUnmapped(GtkWidget*, gpointer)
         gtk_widget_remove_tick_callback(app().paneContainer, app().tickCallbackID);
         app().tickCallbackID = 0;
     }
-    app().frameDriver.setMode(Ubiquitty::Runtime::FrameMode::OnDemand);
 }
 
 // OSC 52 clipboard client (the running program reads/writes the clipboard).
@@ -2208,7 +2252,10 @@ void restartCaretBlink(bool isInput) // bool-ok: GtkText's pend (input) versus f
     const gint64 now = g_get_monotonic_time();
     app().caretInteractionMicros = now;
     app().caretBlinkCycleStartMicros = now + Ubiquitty::Cursor::Blink::toolkitBlinkDelayMicroseconds(app().toolkitBlink, isInput);
-    requestRepaint();
+    if (isInput)
+        requestCaretFrame();
+    else
+        requestRepaint();
 }
 
 void noteCaretInteraction()
@@ -2703,7 +2750,7 @@ void applyPaneDelivery(LinuxPane& pane, const PaneDelivery& delivery)
     const auto* shown = app().model->paneTree(app().model->activeSurface());
     const bool isPaneVisible = &pane == activePane() || (shown && shown->holdsPane(static_cast<int>(paneIDForPane(&pane))));
     if (delivery.didOutputArrive && isPaneVisible)
-        requestRepaint(RepaintCause::Output);
+        askOutputFrame(pane);
     if (&pane == activePane()) {
         partStartMicros = Ubiquitty::PAL::monotonicMicros();
         applyWindowTitle(delivery.didTitleChange || delivery.didDirectoryChange || delivery.didProcessStateChange);
@@ -3005,9 +3052,8 @@ Ubiquitty::Linux::CursorOverlay resolveCursorOverlay(const Ubiquitty::Cursor::Ap
     return cursor;
 }
 
-// Wakes the focused cursor at its next opacity step. A one-shot repaint does
-// not extend the output-activity clock, so the frame callback can disarm
-// between steps and after GTK's blink timeout.
+// Wakes the focused cursor at its next opacity step: no frame clock runs
+// between steps, nor after GTK's blink timeout.
 void scheduleCaretBlink(const Ubiquitty::Cursor::AppearanceInputs* cursor)
 {
     if (app().caretBlinkSource != 0) {
@@ -3023,8 +3069,32 @@ void scheduleCaretBlink(const Ubiquitty::Cursor::AppearanceInputs* cursor)
     const guint milliseconds = static_cast<guint>(std::clamp<std::int64_t>((microseconds + 999) / 1000, 1, 60000));
     app().caretBlinkSource = windowTimeoutAdd(milliseconds, [](gpointer) -> gboolean {
         app().caretBlinkSource = 0;
-        requestRepaint(RepaintCause::CursorStep);
+        requestRepaint();
         return G_SOURCE_REMOVE; }, nullptr);
+}
+
+// Asks for the caret's frame after a key moved its blink timeline, when that
+// changes what the glass shows of it.
+//
+// Most keys change nothing: a caret that is lit stays lit. A frame drawn for
+// such a key is the one the compositor then paces the key's echo behind, so
+// the echo is shown a refresh later than it could have been. The wake at the
+// step the caret takes next is armed again here, since no frame is drawn to
+// arm it.
+void requestCaretFrame()
+{
+    LinuxPane* pane = activePane();
+    if (!pane || !pane->session || pane->viewOffset != 0) {
+        requestRepaint();
+        return;
+    }
+    const Ubiquitty::Cursor::AppearanceInputs inputs = pane->session->cursorAppearance();
+    const Ubiquitty::Linux::CursorOverlay cursor = resolveCursorOverlay(inputs);
+    if ((cursor.visible || pane->cursorPresentation.isHolding()) && cursor.blinkAlpha != pane->lastCursorBlinkAlpha) {
+        requestRepaint();
+        return;
+    }
+    scheduleCaretBlink(&inputs);
 }
 
 // Input feedback must not wait behind the redraw filter: the cell just typed
@@ -3982,8 +4052,13 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
     auto* const hold = outerHold ? outerHold : &ownHold;
     Ubiquitty::Runtime::FrameDemand demand;
     demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
-    if (!isDrawnFromCapture && pane.session->liveReadDecline(*term, demand).decline != Ubiquitty::Runtime::FrameDecline::None)
-        return false;
+    if (!isDrawnFromCapture) {
+        const Ubiquitty::Runtime::LiveReadAnswer answer = pane.session->liveReadDecline(*term, demand);
+        if (answer.decline != Ubiquitty::Runtime::FrameDecline::None) {
+            pane.declinedFrame = { answer.decline, answer.askAgainTicks };
+            return false;
+        }
+    }
     // The cursor's inputs and the offset the frame shows: the capture's own
     // and the drain's publication, or the model's under the hold.
     const Ubiquitty::Cursor::AppearanceInputs cursorAppearance = isDrawnFromCapture ? pane.session->cursorAppearance() : Ubiquitty::Cursor::appearanceInputs(term);
@@ -7731,6 +7806,13 @@ void preparePaneFrame(LinuxPane& pane)
             pane.isFrameCurrent = true;
         return;
     }
+    // A frame taken off the clock and not yet drawn is the one to draw while
+    // nothing published has moved past it: asking again would have the drain
+    // capture the same screen a second time.
+    if (pane.pendingCapture && !keepsSearchLive && !pane.session->hasFrameChangesAfter(*pane.pendingCapture)) {
+        pane.isFrameDeclined = false;
+        return;
+    }
     Ubiquitty::Runtime::FrameDemand demand;
     demand.nowTicks = Ubiquitty::PAL::monotonicTicks();
     demand.selection = &pane.selection;
@@ -7739,7 +7821,16 @@ void preparePaneFrame(LinuxPane& pane)
     demand.selectionSpans = { pane.capturedSelectionSpans.data(), pane.capturedSelectionSpans.size() };
     demand.keepsSearchLive = keepsSearchLive;
     Ubiquitty::Runtime::FrameSupply supply;
-    pane.pendingCapture.reset(pane.session->takeFrame(demand, supply));
+    std::unique_ptr<Ubiquitty::Rendering::FrameCapture, LinuxPane::FrameRelease> taken(pane.session->takeFrame(demand, supply));
+    if (!taken && pane.pendingCapture && !keepsSearchLive && supply.route == Ubiquitty::Runtime::FrameRoute::Declined) {
+        // A frame taken off the clock is still in hand, and Core holds what
+        // the drain published past it. The one in hand is complete and newer
+        // than the glass, so it is drawn, with the selection it was taken
+        // with; the held one is asked for behind it.
+        pane.isFrameDeclined = false;
+        return;
+    }
+    pane.pendingCapture = std::move(taken);
     if (pane.pendingCapture && supply.selection.needed > supply.selection.count) {
         pane.capturedSelectionSpans.resize(static_cast<std::size_t>(supply.selection.needed));
         supply.selection = pane.session->selectionForTakenFrame(&pane.selection, *pane.pendingCapture,
@@ -7747,8 +7838,87 @@ void preparePaneFrame(LinuxPane& pane)
     }
     pane.capturedSelectionSpanCount = supply.selection.count;
     pane.isFrameDeclined = supply.route == Ubiquitty::Runtime::FrameRoute::Declined;
+    pane.declinedFrame = { supply.decline, supply.askAgainTicks };
     if (pane.isFrameDeclined)
         ++app().perfWindow.withheldTicks;
+}
+
+// Asks again for a frame Core declined, at the tick Core named with it. The
+// sooner of two asks is the one kept: an ask that comes early is answered
+// with the hold's remaining budget and armed again, and one that comes late
+// is a frame that waited for nothing.
+void scheduleFrameAsk(std::uint32_t ticks)
+{
+    if (ticks == 0)
+        return;
+    const gint64 dueMicros = g_get_monotonic_time() + static_cast<gint64>(std::min<std::uint64_t>(std::uint64_t { ticks } * 1000000 / 60, 60000000));
+    if (app().frameAskSource != 0) {
+        if (app().frameAskDueMicros <= dueMicros)
+            return;
+        g_source_remove(app().frameAskSource);
+    }
+    app().frameAskDueMicros = dueMicros;
+    const guint milliseconds = static_cast<guint>((std::uint64_t { ticks } * 1000 + 59) / 60);
+    app().frameAskSource = windowTimeoutAdd(std::min<guint>(milliseconds, 60000), [](gpointer) -> gboolean {
+        app().frameAskSource = 0;
+        forEachVisibleLeaf([](LinuxPane& pane) { askOutputFrame(pane); });
+        return G_SOURCE_REMOVE; }, nullptr);
+}
+
+// Asks a pane for the frame its output owes, off the clock, and asks the
+// clock for a cycle only when there is a frame to draw.
+//
+// GTK's clock runs one cycle a refresh, and a cycle that draws nothing is
+// still that refresh's one: a frame that becomes drawable a millisecond
+// behind it waits a whole refresh for the next. Output that has just arrived
+// is what such a cycle meets, held by the coherence rule until it has been
+// quiet. Asking costs no cycle here. What Core answers says who asks next, as
+// it does at a tick: its wake when the hold ends, the tick it named, or the
+// clock where nothing else will.
+void askOutputFrame(LinuxPane& pane)
+{
+    // Unmapped, or a cycle is already coming, and that asks every pane.
+    if (!app().paneContainer || !gtk_widget_get_mapped(app().paneContainer) || app().tickCallbackID != 0) {
+        requestRepaint(RepaintCause::Output);
+        return;
+    }
+    preparePaneFrame(pane);
+    if (pane.isFrameCurrent)
+        return;
+    if (!pane.isFrameDeclined || doesClockAskForDeclinedFrame(pane.declinedFrame, pane.isIngesting ? PaneDrain::Loop : PaneDrain::Inline)) {
+        requestRepaint(RepaintCause::Output);
+        return;
+    }
+    // The frame is owed, and nothing may draw it until Core lets it go: the
+    // wake or the tick that ends the hold asks here again.
+    scheduleFrameAsk(pane.declinedFrame.askAgainTicks);
+}
+
+// Wakes the view at the step blinking text takes next, while such text is on
+// display. A step is a frame the screen owes with no output to announce it,
+// and no frame clock runs between steps to notice one.
+void scheduleTextBlink(std::uint32_t nowTicks)
+{
+    if (app().textBlinkSource != 0)
+        return;
+    const std::uint32_t ticks = Ubiquitty::ticksUntilAnimationRedraw(nowTicks);
+    if (ticks == 0)
+        return;
+    // The step falls inside the last of those ticks, so a wait of all of
+    // them, rounded up, wakes behind it.
+    const guint milliseconds = static_cast<guint>(std::min<std::uint64_t>((std::uint64_t { ticks } * 1000 + 59) / 60, 60000));
+    app().textBlinkSource = windowTimeoutAdd(milliseconds, [](gpointer) -> gboolean {
+        app().textBlinkSource = 0;
+        requestRepaint();
+        return G_SOURCE_REMOVE; }, nullptr);
+}
+
+void cancelTextBlink()
+{
+    if (app().textBlinkSource == 0)
+        return;
+    g_source_remove(app().textBlinkSource);
+    app().textBlinkSource = 0;
 }
 
 gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
@@ -7784,62 +7954,38 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         // Stages pixels before the owner sees the grid, so a local program
         // receives one complete winsize and a remote picture is never reflowed here.
         publishPanePixelGeometry(pane);
-        // The renderer builds its proportional face on the first frame after a
-        // font or zoom change, so a remote pane's host is told the faces once
-        // that frame has drawn; outside the model hold taken below.
-        if (pane.session)
-            pane.session->publishOwedProportionalFaces();
     });
     // Wayland pointer lock: the surface gets no ordinary motion events while
     // locked, so this tick is what turns the relative-pointer listener's
     // deposits into the reports Core's ladder expects.
     drainPointerLockMotion();
-    // Whether this present is withheld is Core's rule: a synchronized-output
-    // block still open, the coherence rule holding a screen still being drawn,
-    // an erase whose redraw is still arriving. A saturated drain is not
-    // withheld -- its frames are the passes' own -- which is what keeps a flood
-    // on screen rather than frozen until it ends. Asked before the hold below:
-    // the rule stamps the block under the model lock itself.
-    //
     // A frame is drawn for every screen that changed, at the rate the screen
     // changes up to the display's: once a second for a clock, at every
     // refresh for a flood or for a program that completes a synchronized
     // update a refresh, and not at all while nothing changes. Nothing here
-    // paces output by what it is. Each tick takes the newest frame the drain
-    // captured; a tick the drain captured nothing for draws nothing.
+    // paces output by what it is, and nothing polls for it: what changes a
+    // screen asks for this tick, and the tick takes the newest frame the
+    // drain captured.
+    //
+    // Whether a present is withheld is Core's rule: a synchronized-output
+    // block still open, the coherence rule holding a screen still being drawn,
+    // an erase whose redraw is still arriving. A saturated drain is not
+    // withheld -- its frames are the passes' own -- which is what keeps a flood
+    // on screen rather than frozen until it ends.
     const std::uint32_t tickMicros = Ubiquitty::PAL::monotonicMicros();
     const double sincePresentSeconds = static_cast<double>(tickMicros - app().lastPresentMicros) / 1e6;
-    // The reader's ceiling on the frame rate, when it is under the display's.
-    // GTK's clock ticks at the display's rate and has no slower one to ask
-    // for, so a tick that comes inside the ceiling's interval draws nothing;
-    // half a refresh of slack keeps the tick that lands on the interval.
-    const double displayInterval = cursorPresentationInterval(app().paneContainer);
-    const double frameInterval = framePresentationInterval(app().paneContainer);
-    const bool isTickPaced = app().isRepaintPending && frameInterval > displayInterval
-        && sincePresentSeconds < frameInterval - displayInterval * 0.5;
-    // Every visible leaf takes its admitted boundary frame, or the live read
-    // Core permits when native overlays need the current model.
-    if (app().isRepaintPending && !isTickPaced)
-        forEachVisibleLeaf([](LinuxPane& pane) { preparePaneFrame(pane); });
-    // Core's drive recommends continuous presentation while the screen
-    // changes at frame rate: the grid moves between any two ticks, so a frame
-    // is owed on each whatever the delivery cadence, as the Swift arm's frame
-    // clock resumes on the same recommendation. Only an ingesting pane: the
-    // inline drain's own deliveries already ask per drain.
+    // The drain publishes for the display it is drawn on. GTK only exposes
+    // the panel interval after the picture is rooted, so the rate is refreshed
+    // here; the driver's interval is atomic because the ingest thread reads
+    // it while this thread updates it.
     forEachVisibleLeaf([](LinuxPane& pane) {
         if (!pane.isIngesting || !pane.session->isAdaptivePresentation())
             return;
-        // GTK only exposes the panel interval after the picture is rooted.
-        // Refresh the driver's rate before asking it whether output still
-        // warrants a vblank frame. FrameDriver's interval is atomic because
-        // the ingest thread reads it while the main thread updates it here.
         const double paneFrameInterval = framePresentationInterval(pane.picture);
         if (paneFrameInterval != pane.session->presentationFrameIntervalSeconds()) {
             pane.session->setPresentationFrameIntervalSeconds(paneFrameInterval);
             pane.session->setSyncPublishRefreshSeconds(paneFrameInterval);
         }
-        if (pane.session->isPresentationRecommendedContinuous())
-            requestRepaint(RepaintCause::Output);
     });
     ++app().perfWindow.ticks;
     // The tick's own facts about the focused model are the drain's
@@ -7859,7 +8005,7 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     if (activePane()->viewOffset == 0) {
         const Ubiquitty::Linux::CursorOverlay cursor = resolveCursorOverlay(activePane()->session->cursorAppearance());
         if ((cursor.visible || activePane()->cursorPresentation.isHolding()) && cursor.blinkAlpha != activePane()->lastCursorBlinkAlpha) {
-            requestRepaint(RepaintCause::CursorStep);
+            requestRepaint();
         }
     }
     // SGR 5/6 text blink: when any visible pane has blink cells, repaint on the
@@ -7869,21 +8015,34 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
     // lets a pane whose blink was erased go idle/quiet; a scrolled-back pane
     // keeps the step, since the rows it displays are outside that reading.
     const uint32_t nowBlinkTicks = Ubiquitty::PAL::monotonicTicks().count;
-    bool doesBlinkOweFrame = false;
+    bool isBlinkOnDisplay = false;
     forEachVisibleLeaf([&](LinuxPane& pane) {
         const Ubiquitty::Runtime::RuntimeSnapshot published = pane.session->readSnapshot();
-        if (published.hasBlinkHint && (pane.viewOffset > 0 || published.hasBlinkCellOnScreen)
-            && Ubiquitty::needsAnimationRedraw(nowBlinkTicks, app().lastBlinkPaintTicks))
-            doesBlinkOweFrame = true;
+        if (published.hasBlinkHint && (pane.viewOffset > 0 || published.hasBlinkCellOnScreen))
+            isBlinkOnDisplay = true;
     });
-    if (doesBlinkOweFrame)
+    if (isBlinkOnDisplay && Ubiquitty::needsAnimationRedraw(nowBlinkTicks, app().lastBlinkPaintTicks))
         requestRepaint();
-    // Keep a withheld present pending until a tick can draw it. A pane's
-    // captured sync-clear frame remains available across the next update
-    // block, so continuous BSU/ESU output can present completed frames at
+    // The reader's ceiling on the frame rate, when it is under the display's.
+    // GTK's clock ticks at the display's rate and has no slower one to ask
+    // for, so a tick that comes inside the ceiling's interval draws nothing
+    // and leaves the clock asked for the next; half a refresh of slack keeps
+    // the tick that lands on the interval.
+    const double displayInterval = cursorPresentationInterval(app().paneContainer);
+    const double frameInterval = framePresentationInterval(app().paneContainer);
+    const bool isTickPaced = app().isRepaintPending && frameInterval > displayInterval
+        && sincePresentSeconds < frameInterval - displayInterval * 0.5;
+    // Whether anything is left that only the clock will ask for.
+    bool doesClockAskAgain = isTickPaced;
+    // Everything above that owes a frame has asked by now, so the leaves are
+    // asked once for what all of it owes. A withheld present stays owed: a
+    // pane's captured sync-clear frame remains available across the next
+    // update block, so continuous BSU/ESU output presents completed frames at
     // native cadence without waiting for the watchdog.
     if (app().isRepaintPending && !isTickPaced) {
-        app().lastPresentMicros = tickMicros;
+        // Every visible leaf takes its admitted boundary frame, or the live
+        // read Core permits when native overlays need the current model.
+        forEachVisibleLeaf([](LinuxPane& pane) { preparePaneFrame(pane); });
         // Repaint every visible leaf (a split tab shows N at once); each is still one
         // texture from one renderGrid/rasterizeTerm call keyed to its own term.
         // The blink phase this frame paints comes first, from the published
@@ -7891,70 +8050,111 @@ gboolean onTick(GtkWidget*, GdkFrameClock*, gpointer)
         // takes its own hold when an assistive technology has asked for it.
         const float paintedBlinkAlpha = resolveCursorOverlay(activePane()->session->cursorAppearance()).blinkAlpha;
         publishAccessibleTerminal();
+        // These frames answer what was asked up to here. A frame asked for
+        // while they are drawn is the next one's, and only the clock will
+        // ask for it.
+        const bool wasViewRepaintOwed = app().isViewRepaintOwed;
+        app().isRepaintPending = false;
+        app().isViewRepaintOwed = false;
         bool didDrawEveryLeaf = true;
+        bool didDrawAnyLeaf = false;
+        bool isClockAskedForFrame = false;
+        std::uint32_t askAgainTicks = 0;
         forEachVisibleLeaf([&](LinuxPane& pane) {
             if (pane.isFrameCurrent)
                 return;
-            didDrawEveryLeaf = renderPaneInto(pane, pane.picture, nullptr) && didDrawEveryLeaf;
+            if (!renderPaneInto(pane, pane.picture, nullptr)) {
+                // Core declined the frame, and its answer says who asks next.
+                didDrawEveryLeaf = false;
+                if (doesClockAskForDeclinedFrame(pane.declinedFrame, pane.isIngesting ? PaneDrain::Loop : PaneDrain::Inline))
+                    isClockAskedForFrame = true;
+                else if (pane.declinedFrame.askAgainTicks > 0)
+                    askAgainTicks = askAgainTicks == 0 ? pane.declinedFrame.askAgainTicks : std::min(askAgainTicks, pane.declinedFrame.askAgainTicks);
+                return;
+            }
+            didDrawAnyLeaf = true;
             if (!pane.pendingCapture)
                 return;
+            // The drain has published past the frame just drawn, so the next
+            // is owed already, and the compositor's callback for this one is
+            // what paces it.
             if (pane.session->hasFrameChangesAfter(*pane.pendingCapture))
-                didDrawEveryLeaf = false;
+                isClockAskedForFrame = true;
             pane.presentedCapture = std::move(pane.pendingCapture);
         });
-        // What is still owed is output's: the view's own asks were this frame.
-        app().isViewRepaintOwed = false;
-        activePane()->lastCursorBlinkAlpha = paintedBlinkAlpha;
-        app().lastBlinkPaintTicks = nowBlinkTicks; // advance the text-blink phase baseline
-        app().isRepaintPending = !didDrawEveryLeaf;
+        if (!didDrawEveryLeaf) {
+            // A frame Core declined is drawn with what the view asked of it,
+            // when Core lets it go.
+            app().isViewRepaintOwed = app().isViewRepaintOwed || wasViewRepaintOwed;
+        } else {
+            activePane()->lastCursorBlinkAlpha = paintedBlinkAlpha;
+            app().lastBlinkPaintTicks = nowBlinkTicks; // advance the text-blink phase baseline
+        }
+        // The next cycle's frames: one asked for while these were drawn,
+        // one behind what the drain has already published, and a declined
+        // one nothing announces.
+        if (app().isRepaintPending || isClockAskedForFrame) {
+            requestRepaint(RepaintCause::Output);
+            doesClockAskAgain = true;
+        }
+        if (didDrawAnyLeaf)
+            app().lastPresentMicros = tickMicros;
+        scheduleFrameAsk(askAgainTicks);
     }
+    // The renderer builds its proportional face on the first frame after a
+    // font or zoom change, so a remote pane's host is told the faces once
+    // that frame has drawn.
+    forEachVisibleLeaf([](LinuxPane& pane) {
+        if (pane.session)
+            pane.session->publishOwedProportionalFaces();
+    });
     // The OSC 9;4 bar lives in its own GtkOverlay child (not the grid texture), so
     // it reconciles independently of app().isRepaintPending — progress changes and the comet
     // animation drive its own redraw.
     updateProgressBar();
+    if (isBlinkOnDisplay)
+        scheduleTextBlink(nowBlinkTicks);
+    else
+        cancelTextBlink();
 
-    // Nothing to draw and no output for a while: stop asking the clock. GTK
-    // calls back at the display rate for as long as a callback is installed,
-    // and the body above is not free — it re-derives every visible pane's grid
-    // and reconciles two blink phases. requestRepaint() brings it back, which
-    // is why every path that wants a frame goes through it.
+    // The clock is asked for another cycle only by what nothing else will ask
+    // for: a frame drawn behind what the drain has already published, a tick
+    // inside the reader's ceiling, a frame asked for while this one was
+    // drawn, and a declined frame nothing announces. Everything else asks
+    // through requestRepaint(): output's wake, the tick Core named for a
+    // frame it declined, the steps the cursor and blinking text take, the
+    // reader. A callback left installed is a cycle at the display's rate
+    // whether or not anything changed, and after two cycles that painted
+    // nothing GTK's clock waits a sixtieth of a second for its next, whatever
+    // the display's rate, which is longer than a faster display's change may
+    // wait.
     //
     // The progress bar drives its own redraw through its own widget, so a
-    // paused clock does not freeze it.
-    const double tickSeconds = static_cast<double>(g_get_monotonic_time()) / 1e6;
-    if (!app().isRepaintPending && app().frameDriver.idleExpired(tickSeconds)) {
-        app().frameDriver.setMode(Ubiquitty::Runtime::FrameMode::OnDemand);
-        app().tickCallbackID = 0;
-        return G_SOURCE_REMOVE;
-    }
-    return G_SOURCE_CONTINUE;
+    // clock that is not asked does not freeze it.
+    if (doesClockAskAgain)
+        return G_SOURCE_CONTINUE;
+    app().tickCallbackID = 0;
+    return G_SOURCE_REMOVE;
 }
 
 // Asks for a frame, and makes sure something will draw it.
 //
 // Every path that wants the screen repainted comes here rather than setting the
-// flag: the frame clock's callback is removed when output goes idle, so a path
-// that only set the flag would mark a frame nobody was left to paint. The
-// driver's stamp is what the idle decision is measured from, so a request that
-// skipped it would leave the clock reading the last stamp instead of this one.
+// flag: the frame clock's callback is installed only while something has asked
+// for a cycle, so a path that only set the flag would mark a frame nobody was
+// left to paint. An idle clock runs the cycle at once, and one waiting on the
+// compositor for the frame before runs it when that frame is taken, which is
+// the display's own pace.
 void requestRepaint(RepaintCause cause)
 {
     app().isRepaintPending = true;
     if (cause != RepaintCause::Output)
         app().isViewRepaintOwed = true;
 
-    // Output activity extends continuous drive even without a widget. A
-    // cursor-only step changes pixels but does not extend that drive.
-    if (cause != RepaintCause::CursorStep) {
-        const double now = static_cast<double>(g_get_monotonic_time()) / 1e6;
-        (void)app().frameDriver.noteActivity(now);
-    }
-
     if (!app().paneContainer || !gtk_widget_get_mapped(app().paneContainer))
         return; // headless or unmapped: the next map requests its own frame
     if (app().tickCallbackID != 0)
         return;
-    app().frameDriver.setMode(Ubiquitty::Runtime::FrameMode::Continuous);
     app().tickCallbackID = windowTickAdd(app().paneContainer, onTick, nullptr, nullptr);
 }
 

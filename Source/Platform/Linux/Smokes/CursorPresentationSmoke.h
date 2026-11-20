@@ -132,8 +132,6 @@ bool smokeCursorPresentation(Ubiquitty::Linux::VulkanRenderer& renderer)
     (void)resolvePresentedCursorOverlay(pane, nowSeconds, 1.0 / 60.0);
     scheduleCursorPresentation(pane, nowSeconds);
     const bool didArmDeadline = pane.cursorPresentationSource != 0;
-    (void)app().frameDriver.noteActivity(nowSeconds);
-    const bool doesClockCoverDeadline = !app().frameDriver.idleExpired(pane.cursorPresentation.deadlineSeconds());
     const gint64 waitUntil = g_get_monotonic_time() + 250000;
     while (pane.cursorPresentationSource != 0 && g_get_monotonic_time() < waitUntil) {
         (void)g_main_context_iteration(nullptr, FALSE);
@@ -142,10 +140,10 @@ bool smokeCursorPresentation(Ubiquitty::Linux::VulkanRenderer& renderer)
     const auto expired = resolvePresentedCursorOverlay(pane, static_cast<double>(g_get_monotonic_time()) / 1e6, 1.0 / 60.0);
     const bool didDeadlineExpire = pane.cursorPresentationSource == 0 && expired.presentation->row < 0
         && pane.cursorPresentation.deadlineSeconds() == 0;
-    didPass = didPass && didArmDeadline && didDeadlineExpire && doesClockCoverDeadline;
-    g_print("smoke-cursor: presentation idle-deadline armed=%d expired=%d clock-covers=%d -- %s\n",
-        didArmDeadline ? 1 : 0, didDeadlineExpire ? 1 : 0, doesClockCoverDeadline ? 1 : 0,
-        didArmDeadline && didDeadlineExpire && doesClockCoverDeadline ? "PASS" : "FAIL");
+    didPass = didPass && didArmDeadline && didDeadlineExpire;
+    g_print("smoke-cursor: presentation idle-deadline armed=%d expired=%d -- %s\n",
+        didArmDeadline ? 1 : 0, didDeadlineExpire ? 1 : 0,
+        didArmDeadline && didDeadlineExpire ? "PASS" : "FAIL");
     guint closedSource = 0;
     {
         LinuxPane closingPane;
