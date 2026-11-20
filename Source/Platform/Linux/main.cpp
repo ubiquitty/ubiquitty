@@ -6725,7 +6725,6 @@ void updatePaneHoverCursor(LinuxPane& pane, double x, double y, GdkModifierType 
 {
     if (!pane.picture && (&pane != activePane() || !app().focusedPicture))
         return;
-    Ubiquitty::Terminal* term = pane.session->terminal();
     pane.hoverModifiers = state;
     if (&pane == activePane())
         app().hoverModifiers = state;
@@ -6760,7 +6759,6 @@ void updatePaneHoverCursor(LinuxPane& pane, double x, double y, GdkModifierType 
         hover.textDigest = pane.session->resolvedLinkTextDigest();
     }
     publishHoveredLink(pane, hover);
-    const auto hold = holdPaneModel(pane);
     const auto& reporting = interaction.reportingState();
     context.isRectangularSelectArmed = Ubiquitty::Input::localDragIsRectangular(reporting);
     context.selectionBypassesMouseReporting = Ubiquitty::Input::allowsLocalDragSelect(reporting);
@@ -6776,7 +6774,10 @@ void updatePaneHoverCursor(LinuxPane& pane, double x, double y, GdkModifierType 
     // resolution — each stays false until the frontend can answer it, rather
     // than being answered wrongly here.
 
-    const Ubiquitty::MousePointerShape shape = Ubiquitty::Input::pointerShape(term, context);
+    // The terminal's half of the answer (the tube, mouse tracking, a shape
+    // the program asked for) is the drain's publication, so the shape waits
+    // for no lock.
+    const Ubiquitty::MousePointerShape shape = Ubiquitty::Input::pointerShape(pane.session->readSnapshot(), context);
     if (shape == pane.hoverCursorShape)
         return;
     gtk_widget_set_cursor_from_name(pane.picture ? pane.picture : app().focusedPicture, cursorNameForShape(shape));
@@ -7649,8 +7650,14 @@ Ubiquitty::Rendering::Vec4 paneSelectionColor(LinuxPane& pane, std::uint64_t pal
 void preparePaneFrame(LinuxPane& pane)
 {
     const auto hoverSnapshot = pane.session->readSnapshot();
+    // What stands under a resting pointer is asked again when the model has
+    // moved, which reads the model: once a frame for ordinary output, whose
+    // parse the read waits a bite of, and not at all while a flood is
+    // underway, when the text under the pointer is gone before it is read.
+    // The frame after the flood finds the generation still behind and asks.
     if (pane.isPointerPositionKnown && !app().isPointerLocked
-        && (pane.hoverModelGeneration != hoverSnapshot.modelGeneration || pane.hoverViewOffset != pane.viewOffset))
+        && (pane.hoverModelGeneration != hoverSnapshot.modelGeneration || pane.hoverViewOffset != pane.viewOffset)
+        && !(pane.isIngesting && pane.session->isFloodUnderway()))
         updatePaneHoverCursor(pane, pane.pointerX, pane.pointerY, pane.hoverModifiers);
     const auto& configuration = app().rasterContext.renderConfiguration();
     const int cellWidth = app().rasterContext.cellWidth();
