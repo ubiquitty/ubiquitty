@@ -278,13 +278,13 @@ int smokeCoverageSheet()
         };
         if (wereSheetsCreated && wasCommandAllocated) {
             bool didRecord = beginBatch()
-                && batchedSheet.recordUpload(device, commandBuffer, mirror, 0, sheetHeight);
+                && batchedSheet.recordUpload(commandBuffer, mirror, 0, sheetHeight);
             check(didRecord, "discarded upload recorded");
             check(!batchedSheet.isReadable(), "recording published an unsubmitted image layout");
             // Discard the recorded copy, then submit an empty replacement. Its
             // completion must not commit the abandoned copy's pending state.
             const bool didCompleteEmpty = didRecord && beginBatch()
-                && batchedSheet.recordUpload(device, commandBuffer, mirror, 0, 0)
+                && batchedSheet.recordUpload(commandBuffer, mirror, 0, 0)
                 && submitBatch();
             check(didCompleteEmpty, "empty replacement completed");
             if (didCompleteEmpty)
@@ -292,8 +292,8 @@ int smokeCoverageSheet()
             check(!batchedSheet.isReadable(), "empty replacement committed an abandoned copy");
 
             didRecord = didCompleteEmpty && beginBatch()
-                && batchedSheet.recordUpload(device, commandBuffer, mirror, 0, sheetHeight)
-                && batchedColor.recordUpload(device, commandBuffer);
+                && batchedSheet.recordUpload(commandBuffer, mirror, 0, sheetHeight)
+                && batchedColor.recordUpload(commandBuffer);
             check(didRecord, "both sheet uploads recorded");
             check(!batchedSheet.isReadable(), "batch recording published an incomplete image layout");
             const bool didComplete = didRecord && submitBatch();
@@ -311,6 +311,47 @@ int smokeCoverageSheet()
                 check(didReadColor && batchedReadback.size() == colorMirror.size()
                         && std::equal(colorMirror.begin(), colorMirror.end(), batchedReadback.begin()),
                     "batched color differs from its mirror");
+
+                // Rectangles that lie apart, each staged behind the one before
+                // it. The whole mirror changes and only the rectangles are
+                // copied: they must hold the new bytes, and every byte outside
+                // them what the upload before left there.
+                using Rect = Ubiquitty::Linux::VulkanCoverageSheet::Rect;
+                const std::vector<std::uint8_t> before = mirror;
+                fillMirror(0xA7);
+                const std::array<Rect, 3> rects { {
+                    { .x = 5, .y = 3, .width = 17, .height = 9 },
+                    { .x = 60, .y = 3, .width = 31, .height = 9 }, // beside the first, in its rows
+                    { .x = 0, .y = sheetHeight - bandHeight, .width = sheetWidth, .height = bandHeight }, // the last band, whole
+                } };
+                const bool didCopyRects = beginBatch() && batchedSheet.recordUpload(commandBuffer, mirror, rects) && submitBatch();
+                check(didCopyRects, "the rectangles uploaded");
+                if (didCopyRects) {
+                    batchedSheet.didUpload();
+                    std::vector<std::uint8_t> afterRects;
+                    check(readImage(batchedSheet.imageForReadback(), sheetWidth, sheetHeight, 1, afterRects), "the sheet read back after the rectangles");
+                    bool doRectsMatch = afterRects.size() == mirror.size();
+                    bool isOutsideRectsKept = doRectsMatch;
+                    for (int y = 0; doRectsMatch && y < sheetHeight; ++y) {
+                        for (int x = 0; x < sheetWidth; ++x) {
+                            const std::size_t index = static_cast<std::size_t>(y) * sheetWidth + x;
+                            const bool isInRect = std::ranges::any_of(rects, [&](const Rect& rect) {
+                                return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+                            });
+                            if (isInRect && afterRects[index] != mirror[index])
+                                doRectsMatch = false;
+                            if (!isInRect && afterRects[index] != before[index])
+                                isOutsideRectsKept = false;
+                        }
+                    }
+                    check(doRectsMatch, "a copied rectangle does not hold the new bytes");
+                    check(isOutsideRectsKept, "a rectangle copy disturbed bytes outside it");
+                }
+                // A rectangle reaching past the sheet is refused rather than
+                // clamped, and no rectangle at all is nothing to copy.
+                const std::array<Rect, 1> pastTheEdge { { { .x = sheetWidth - 6, .y = 0, .width = 7, .height = 4 } } };
+                check(beginBatch() && !batchedSheet.recordUpload(commandBuffer, mirror, pastTheEdge), "a rectangle past the sheet was accepted");
+                check(beginBatch() && batchedSheet.recordUpload(commandBuffer, mirror, std::span<const Rect> {}), "an empty list of rectangles was refused");
             }
         }
         if (wasCommandAllocated)
