@@ -406,7 +406,7 @@ enum EditMenuScenarios {
                 // Each of these is dead when no responder answers it: the
                 // item is then permanently grey. Asked through the responder
                 // chain the way the menu asks.
-                for name in ["resetTerminal:", "pasteEscapedText:", "pasteEscapedSelection:", "selectLastCommandOutput:"] {
+                for name in ["resetTerminal:", "hardResetTerminal:", "pasteEscapedText:", "pasteEscapedSelection:", "selectLastCommandOutput:"] {
                     let selector = NSSelectorFromString(name)
                     t.expect(
                         shell.responds(to: selector),
@@ -414,8 +414,8 @@ enum EditMenuScenarios {
                     )
                 }
 
-                // Reset Terminal is the one with a consequence a scenario can
-                // read without a selection or a clipboard: DECSTR clears the
+                // Soft Reset is the one with a consequence a scenario can read
+                // without a selection or a clipboard: DECSTR clears the
                 // application-keypad mode an app may have left on.
                 surface.feed(Data("\u{1b}[?1h".utf8))
                 t.pump(0.2)
@@ -609,7 +609,7 @@ enum EditMenuScenarios {
                 }
                 let titles = menu.items.filter { !$0.isSeparatorItem }.map(\.title)
                 t.expect(
-                    titles == ["Copy", "Paste", "Select All", "Copy Command Output", "Copy Command", "Clear Scrollback", "Reset Terminal"],
+                    titles == ["Copy", "Paste", "Select All", "Copy Command Output", "Copy Command", "Clear Scrollback", "Soft Reset", "Hard Reset"],
                     desc: "the menu carries what the classic shell's does (\(titles))"
                 )
 
@@ -748,7 +748,7 @@ enum EditMenuScenarios {
             }
         }
 
-        // Clear Scrollback and Reset Terminal belong to the pane the click
+        // Clear Scrollback and the resets belong to the pane the click
         // opened the menu over, which need not be the focused one.
         UBUITestRegister("swift_shell_context_menu_clears_the_pane_it_opened_over") { context in
             guard let t = context else { return }
@@ -794,10 +794,10 @@ enum EditMenuScenarios {
                     let menu = clicked.menu(for: event),
                     let clear = menu.items.first(where: { $0.title == "Clear Scrollback" }),
                     let clearAction = clear.action,
-                    let reset = menu.items.first(where: { $0.title == "Reset Terminal" }),
+                    let reset = menu.items.first(where: { $0.title == "Soft Reset" }),
                     let resetAction = reset.action
                 else {
-                    t.expect(false, desc: "a right-click on the unfocused pane offers Clear Scrollback and Reset Terminal")
+                    t.expect(false, desc: "a right-click on the unfocused pane offers Clear Scrollback and Soft Reset")
                     return
                 }
                 _ = NSApp.sendAction(clearAction, to: clear.target, from: clear)
@@ -823,7 +823,7 @@ enum EditMenuScenarios {
                 t.expect(
                     t.wait(until: { !clicked.gridTextForTesting().hasPrefix("Yabc") }, timeout: 4)
                         && clicked.gridTextForTesting().hasPrefix("YZbc\n"),
-                    desc: "Reset Terminal resets the clicked pane (row 0 reads \(clicked.gridTextForTesting().prefix(8).debugDescription))"
+                    desc: "Soft Reset resets the clicked pane (row 0 reads \(clicked.gridTextForTesting().prefix(8).debugDescription))"
                 )
             }
         }
@@ -864,7 +864,9 @@ enum EditMenuScenarios {
                     paste?.action == NSSelectorFromString("paste:") && paste?.target == nil,
                     desc: "the context menu's Paste sends paste: down the chain"
                 )
-                for (title, name) in [("Clear Scrollback", "clearScrollbackUnderMouse:"), ("Reset Terminal", "resetTerminalUnderMouse:")] {
+                for (title, name) in [
+                    ("Clear Scrollback", "clearScrollbackUnderMouse:"), ("Soft Reset", "softResetUnderMouse:"), ("Hard Reset", "hardResetUnderMouse:"),
+                ] {
                     let item = menu.items.first { $0.title == title }
                     let sent = item?.action.map(NSStringFromSelector) ?? "nothing"
                     t.expect(
@@ -873,7 +875,8 @@ enum EditMenuScenarios {
                     )
                 }
                 let commands = [
-                    "paste:", "growFontSize:", "shrinkFontSize:", "resetFontSize:", "clearScrollback:", "resetTerminal:", "toggleBeam:",
+                    "paste:", "growFontSize:", "shrinkFontSize:", "resetFontSize:", "clearScrollback:", "resetTerminal:", "hardResetTerminal:",
+                    "toggleBeam:",
                 ]
                 for name in commands {
                     t.expect(

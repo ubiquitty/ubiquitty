@@ -211,7 +211,10 @@ extension UBAppDelegate {
         // it carries no key equivalent to invite a reflex press.
         menu.addItem(withTitle: "Clear Screen", action: NSSelectorFromString("clearScreen:"), keyEquivalent: "")
         menu.addItem(withTitle: "Clear to Previous Mark", action: NSSelectorFromString("clearToPreviousMark:"), keyEquivalent: "l")
-        menu.addItem(withTitle: "Reset Terminal", action: NSSelectorFromString("resetTerminal:"), keyEquivalent: "")
+        // Soft Reset frees what a program left stuck and moves no row; Hard
+        // Reset also blanks the screen, keeping the rows above the prompt.
+        menu.addItem(withTitle: "Soft Reset", action: NSSelectorFromString("resetTerminal:"), keyEquivalent: "")
+        menu.addItem(withTitle: "Hard Reset", action: NSSelectorFromString("hardResetTerminal:"), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Find…", action: NSSelectorFromString("performFindAction:"), keyEquivalent: "f")
         menu.addItem(withTitle: "Find Next", action: NSSelectorFromString("findNext:"), keyEquivalent: "g")

@@ -38,16 +38,27 @@ extension TerminalWindowController {
         activeSurface?.invokeMacro(named: name)
     }
 
-    /// Edit > Reset Terminal — a local DECSTR.
+    /// Edit > Soft Reset — DECSTR, and the mouse, paste and focus modes it
+    /// leaves on.
     ///
     /// The manual escape hatch for a session a dead peer left wedged: mouse
     /// tracking on, application keys on, nothing left alive to send the
-    /// resets. Same reset a host-initiated `CSI ! p` performs.
+    /// resets. The screen stays. A pane attached to a host asks the host.
     ///
     /// - Parameter sender: Ignored.
     @objc
     public func resetTerminal(_ sender: Any?) {
         focusedSurface?.softResetTerminal()
+    }
+
+    /// Edit > Hard Reset — the soft reset from a blank screen with the cursor
+    /// home, the rows above the prompt kept as history, and the program asked
+    /// to draw itself again. A pane attached to a host asks the host.
+    ///
+    /// - Parameter sender: Ignored.
+    @objc
+    public func hardResetTerminal(_ sender: Any?) {
+        focusedSurface?.hardResetTerminal()
     }
 
     /// File > Rename Tab… (⇧⌘I) — the tab's custom title.

@@ -38,7 +38,7 @@ enum RemoteClearScenarios {
                 }
             }
         }
-        UBUITestRegister("remote_session_context_menu_leaves_the_terminal_to_the_host") { context in
+        UBUITestRegister("remote_session_context_menu_runs_on_the_host") { context in
             guard let t = context else { return }
             MainActor.assumeIsolated {
                 withHostedSurface(t) { surface, _ in
@@ -292,9 +292,9 @@ enum RemoteClearScenarios {
         )
     }
 
-    /// The surface's context menu over a hosted pane: Clear Scrollback runs on
-    /// the host, and Reset Terminal, whose terminal is the host's, is disabled
-    /// and leaves the pane's copy as the host set it.
+    /// The surface's context menu over a hosted pane: Clear Scrollback, Soft
+    /// Reset and Hard Reset all run on the host, whose terminal it is, and the
+    /// pane draws what the host sends back.
     ///
     /// - Parameters:
     ///   - t: The scenario's context.
@@ -307,31 +307,44 @@ enum RemoteClearScenarios {
             let menu = surface.menu(for: event),
             let clear = menu.items.first(where: { $0.title == "Clear Scrollback" }),
             let clearAction = clear.action,
-            let reset = menu.items.first(where: { $0.title == "Reset Terminal" })
+            let reset = menu.items.first(where: { $0.title == "Soft Reset" }),
+            let resetAction = reset.action,
+            let hardReset = menu.items.first(where: { $0.title == "Hard Reset" }),
+            let hardResetAction = hardReset.action
         else {
-            t.expect(false, desc: "a right-click on the hosted pane offers Clear Scrollback and Reset Terminal")
+            t.expect(false, desc: "a right-click on the hosted pane offers Clear Scrollback, Soft Reset and Hard Reset")
             return
         }
         t.expect(surface.validateMenuItem(clear), desc: "Clear Scrollback is enabled on the hosted pane")
-        t.expect(!surface.validateMenuItem(reset), desc: "Reset Terminal is disabled on the hosted pane")
+        t.expect(surface.validateMenuItem(reset), desc: "Soft Reset is enabled on the hosted pane")
+        t.expect(surface.validateMenuItem(hardReset), desc: "Hard Reset is enabled on the hosted pane")
         _ = NSApp.sendAction(clearAction, to: clear.target, from: clear)
         t.expect(
             t.wait(until: { history() == 0 }, timeout: 10),
             desc: "the context menu's Clear Scrollback empties the hosted session's history (now \(history()))"
         )
 
-        // Mouse reporting, which the host's program turns on and a reset of
-        // the pane's copy alone would turn off there.
+        // Mouse reporting, which the host's program turns on: only a reset the
+        // host runs turns it off, and the pane learns so from the host.
         surface.send("printf '\\033[?1000h'\n")
         t.expect(
             t.wait(until: { surface.drive.readSnapshot().mouseReportsActive }, timeout: 10),
             desc: "the host's program turns mouse reporting on"
         )
-        surface.softResetTerminal()
-        t.pump(0.5)
+        _ = NSApp.sendAction(resetAction, to: reset.target, from: reset)
         t.expect(
-            surface.drive.readSnapshot().mouseReportsActive,
-            desc: "a reset leaves the hosted pane's copy of the terminal as the host set it"
+            t.wait(until: { !surface.drive.readSnapshot().mouseReportsActive }, timeout: 10),
+            desc: "the context menu's Soft Reset turns the host's mouse reporting off"
+        )
+
+        // Hard Reset blanks the host's screen and keeps what was above the
+        // prompt: the command line typed above moves into the history, and the
+        // shell draws its prompt again.
+        t.expect(surface.gridTextForTesting().contains("printf"), desc: "the typed command line is on the screen")
+        _ = NSApp.sendAction(hardResetAction, to: hardReset.target, from: hardReset)
+        t.expect(
+            t.wait(until: { !surface.gridTextForTesting().contains("printf") && history() > 0 }, timeout: 10),
+            desc: "the context menu's Hard Reset moves the screen into the host's history (screen \(surface.gridTextForTesting().prefix(40).debugDescription), history \(history()))"
         )
     }
 }
