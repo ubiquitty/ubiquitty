@@ -4078,7 +4078,7 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
             // deliveries that asked for it.
             const Ubiquitty::Runtime::TerminalSession::PerfDrainTally tally = pane.isIngesting ? pane.session->takePerfDrainTally() : Ubiquitty::Runtime::TerminalSession::PerfDrainTally {};
             Ubiquitty::PAL::logLine(stderr,
-                "[perf] {:.2f}s | {:3}fr {:5.0f}fps exported={} | frame(ms) avg={:6.3f} max={:6.3f} | wait={:6.3f}/{:6.3f} | readback={:6.3f}/{:6.3f} | ticks={} withheld={} | hops={} avg={:.3f}ms (flags {:.1f} follow {:.1f} queues {:.1f} title {:.1f} pointer {:.1f} ms) | hold(ms) avg={:.3f} max={:.3f} | ingest: {} deliveries {:.1f} MB {:.0f} ms parse (longest {:.1f} ms) | {}x{} | backend={}",
+                "[perf] {:.2f}s | {:3}fr {:5.0f}fps exported={} | frame(ms) avg={:6.3f} max={:6.3f} | wait={:6.3f}/{:6.3f} | readback={:6.3f}/{:6.3f} | ticks={} withheld={} | hops={} avg={:.3f}ms (flags {:.1f} follow {:.1f} queues {:.1f} title {:.1f} pointer {:.1f} ms) | hold(ms) avg={:.3f} max={:.3f} | ingest: {} deliveries {:.1f} MB {:.0f} ms parse (longest {:.1f} ms) | lock handoffs {} {:.2f} ms | captures {} replaced {} | {}x{} | backend={}",
                 windowSeconds, frames, frames / windowSeconds, window.exportedFrames,
                 frameSum / frames * 1000.0, maxFrameSeconds * 1000.0,
                 waitSum / frames * 1000.0, maxWaitSeconds * 1000.0,
@@ -4090,6 +4090,8 @@ bool renderPaneInto(LinuxPane& pane, GtkWidget* picture, std::optional<Ubiquitty
                 window.ticks > 0 ? window.holdWaitSeconds / window.ticks * 1000.0 : 0.0, window.maxHoldWaitSeconds * 1000.0,
                 tally.deliveries, static_cast<double>(tally.bytes) / 1e6, static_cast<double>(tally.ingestMicroseconds) / 1000.0,
                 static_cast<double>(tally.longestIngestMicroseconds) / 1000.0,
+                tally.lockHandoffs, static_cast<double>(tally.lockHandoffMicroseconds) / 1000.0,
+                tally.framesCaptured, tally.framesReplaced,
                 width, height, app().isVulkanReady ? "vulkan" : "cpu");
             windowStartSeconds = nowSeconds;
             waitSum = maxWaitSeconds = readbackSum = maxReadbackSeconds = frameSum = maxFrameSeconds = 0.0;
