@@ -63,7 +63,7 @@ class PackageNotices(unittest.TestCase):
         self.write(core / dependencies[0]["noticePath"], f"{label} Core dependency\n")
         self.write(kit / dependencies[1]["noticePath"], f"{label} Kit dependency\n")
         self.write(app / dependencies[2]["noticePath"], f"{label} App dependency\n")
-        for relative in ("Scripts/license_notices.py", "Scripts/build-root.sh", "Scripts/ccache-env.sh"):
+        for relative in ("Scripts/license_notices.py", "Scripts/build-root.sh", "Scripts/ccache-env.sh", "Scripts/default-compiler.sh"):
             shutil.copyfile(CORE_ROOT / relative, core / relative)
         shutil.copyfile(ROOT / "Scripts/library-scripts.sh", app / "Scripts/library-scripts.sh")
         return app, core, kit
