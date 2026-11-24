@@ -41,6 +41,7 @@ fi
 # shellcheck source=Scripts/release-bundle.sh
 . "$ROOT/Scripts/release-bundle.sh"
 require_release_bundle "$APP"
+require_bundle_floor "$APP"
 
 # A broken signature won't launch on Apple Silicon regardless of quarantine, so
 # refuse to ship one. Ad-hoc is fine (still runs once quarantine is stripped).

@@ -625,6 +625,17 @@ set_target_properties(Ubiquitty PROPERTIES
     # says why there are two. Per-target because only the app takes the higher
     # one: the kit keeps `cxx` so a host below the app's floor can adopt it.
     XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "${UBIQUITTY_MACOS_APP_MIN}")
+# The same floor at the link. This target links through swiftc, and the -target
+# in UBIQUITTY_SWIFT_FLAGS is a compile option the link rule never sees; a
+# swiftc given no -target stamps the BUILD MACHINE's macOS into the executable's
+# LC_BUILD_VERSION. A release built on macOS 27 then declared 26.0 in its
+# LSMinimumSystemVersion and carried minos 27.0 in its executable, so macOS 26
+# installed it and refused to run it. Xcode takes the floor from the build
+# setting above. Scripts/bundle_floor.py refuses a bundle where the two disagree.
+if(NOT CMAKE_GENERATOR MATCHES "Xcode")
+    target_link_options(Ubiquitty PRIVATE
+        "SHELL:-target ${CMAKE_SYSTEM_PROCESSOR}-apple-macos${UBIQUITTY_MACOS_APP_MIN}")
+endif()
 target_compile_options(Ubiquitty PRIVATE
     "$<$<COMPILE_LANGUAGE:Swift>:SHELL:${UBIQUITTY_SWIFT_FLAGS_GROUPED}>"
     # This shell's own map, which only this module imports, after the shared

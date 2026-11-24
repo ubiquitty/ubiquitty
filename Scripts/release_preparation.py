@@ -16,6 +16,7 @@ import subprocess
 import sys
 import zipfile
 
+import bundle_floor
 import release_ci
 
 SCHEMA = "ubiquitty.release-preparation.v1"
@@ -105,6 +106,7 @@ def package_macos(app, output, tag):
         path = app / relative
         if not path.is_file() or path.stat().st_size == 0:
             raise ValueError("prepared Mac app is incomplete: " + relative)
+    bundle_floor.check(app)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
     signature = subprocess.run(["codesign", "-dvv", str(app)], capture_output=True, text=True, check=True)
     if "Signature=adhoc" not in signature.stderr:

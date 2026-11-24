@@ -670,6 +670,7 @@ if wanted test_app_tools; then
     echo "=== test_app_tools ==="
     RAN=$((RAN + 1))
     python3 "$ROOT/Tests/Tools/test_install_macos.py" || exit 1
+    python3 "$ROOT/Tests/Tools/test_bundle_floor.py" || exit 1
     python3 "$ROOT/Tests/Tools/test_bundle_resources.py" || exit 1
     python3 "$ROOT/Tests/Tools/test_fetch_sparkle.py" || exit 1
     python3 "$ROOT/Tests/Tools/test_test_routing.py" || exit 1

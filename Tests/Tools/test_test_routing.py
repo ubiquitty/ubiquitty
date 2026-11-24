@@ -209,7 +209,7 @@ python3() { printf '%s\\n' "$1" >> "$OWNERSHIP_LOG"; }
             self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
             modules = [Path(line).name for line in log.read_text().splitlines()]
         self.assertEqual(modules, [
-            "test_install_macos.py", "test_bundle_resources.py", "test_fetch_sparkle.py",
+            "test_install_macos.py", "test_bundle_floor.py", "test_bundle_resources.py", "test_fetch_sparkle.py",
             "test_test_routing.py", "test_package_notices.py",
         ])
         owners = [Path(entry["command"][1]).name] + modules

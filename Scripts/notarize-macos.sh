@@ -74,6 +74,7 @@ fi
 # shellcheck source=Scripts/release-bundle.sh
 . "$ROOT/Scripts/release-bundle.sh"
 require_release_bundle "$APP"
+require_bundle_floor "$APP"
 
 # The notary service rejects anything not signed with Developer ID + hardened
 # runtime; verify locally so a stale dev-signed build fails here, not minutes

@@ -37,3 +37,9 @@ require_release_bundle() {
         exit 2
     fi
 }
+
+# Exits 2 unless every binary in the bundle at $1 loads on the macOS its
+# LSMinimumSystemVersion admits; Scripts/bundle_floor.py says why.
+require_bundle_floor() {
+    python3 "$(dirname "${BASH_SOURCE[0]}")/bundle_floor.py" "$1" || exit 2
+}
